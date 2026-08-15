@@ -1410,8 +1410,21 @@ class MessageStore private constructor(
                 resultId,
             )?.messageId
 
-        var mapped = page.messages.mapIndexedNotNull { index, archived ->
-            archivedMessageId(archived.resultId)?.let { messageId ->
+        suspend fun mappedArchivePosition(
+            index: Int,
+            archived: ArchivedIncomingMessage,
+        ): MappedArchivePosition? {
+            val candidateIds = mutableListOf<String>()
+            archivedMessageId(archived.resultId)?.let(candidateIds::add)
+            archived.message?.aliases.orEmpty().forEach { alias ->
+                dao.trustedAlias(
+                    page.key.accountId,
+                    alias.kind,
+                    alias.authority,
+                    alias.value,
+                )?.messageId?.let(candidateIds::add)
+            }
+            return candidateIds.distinct().firstNotNullOfOrNull { messageId ->
                 dao.archivePosition(
                     page.key.accountId,
                     page.key.archiveAuthority,
@@ -1421,6 +1434,10 @@ class MessageStore private constructor(
                     MappedArchivePosition(index, messageId, position.archiveOrdinal)
                 }
             }
+        }
+
+        var mapped = page.messages.mapIndexedNotNull { index, archived ->
+            mappedArchivePosition(index, archived)
         }
         val migrationResetBootstrap = page.direction == ArchiveDirection.BOOTSTRAP &&
             current?.let { cursor ->

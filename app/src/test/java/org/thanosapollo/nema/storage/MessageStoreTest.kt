@@ -836,6 +836,86 @@ class MessageStoreTest {
     }
 
     @Test
+    fun migratedBeforeUsesTrustedIdentityBeforePrefixRebase() = runBlocking {
+        var store = MessageStore(database)
+        val key = archiveKey(ACCOUNT)
+        val stableAlias = stanzaAlias("stable-older-second")
+        val earliest = archived("stable-earliest", "stable-message-earliest", "earliest")
+        val olderFirst = archived("stable-r0", "stable-message-0", "older first")
+        val olderSecond = archived(
+            "stable-r1",
+            "stable-message-1",
+            "older second",
+            stableAlias,
+        )
+        val tailFirst = archived("stable-r2", "stable-message-2", "tail first")
+        val tailSecond = archived("stable-r3", "stable-message-3", "tail second")
+        assertEquals(
+            ArchivePageStatus.APPLIED,
+            store.applyArchivePage(
+                archivePage(
+                    key = key,
+                    direction = ArchiveDirection.BOOTSTRAP,
+                    complete = true,
+                    hasEarlier = false,
+                    messages = listOf(earliest, olderFirst, olderSecond, tailFirst, tailSecond),
+                ),
+            ).status,
+        )
+        database.messageDao().upsertArchiveCursor(
+            key.emptyCursor().copy(
+                hasEarlier = true,
+                retryableError = "Archive cursor reset during migration",
+            ),
+        )
+        store = reopenStore()
+        val bootstrap = store.applyArchivePage(
+            archivePage(
+                key = key,
+                direction = ArchiveDirection.BOOTSTRAP,
+                complete = true,
+                hasEarlier = true,
+                messages = listOf(
+                    tailFirst,
+                    ArchivedIncomingMessage("stable-unsupported-tail", null),
+                    tailSecond,
+                ),
+            ),
+        )
+        assertEquals(ArchivePageStatus.APPLIED, bootstrap.status)
+
+        store = reopenStore()
+        val before = store.applyArchivePage(
+            archivePage(
+                key = key,
+                direction = ArchiveDirection.BEFORE,
+                boundaryId = "stable-r2",
+                complete = true,
+                hasEarlier = false,
+                messages = listOf(
+                    olderFirst,
+                    ArchivedIncomingMessage("stable-unsupported-older", null),
+                    archived(
+                        "stable-new-result",
+                        "stable-replayed-message-1",
+                        "older second",
+                        stableAlias,
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(ArchivePageStatus.APPLIED, before.status)
+        assertEquals(-1L, store.archivePositions(ACCOUNT, "stable-message-earliest").single().archiveOrdinal)
+        assertEquals(0L, store.archivePositions(ACCOUNT, "stable-message-0").single().archiveOrdinal)
+        assertEquals(2L, store.archivePositions(ACCOUNT, "stable-message-1").single().archiveOrdinal)
+        assertEquals(5L, store.archivePositions(ACCOUNT, "stable-message-3").single().archiveOrdinal)
+        assertEquals(5, store.messages(ACCOUNT).size)
+        store = reopenStore()
+        assertEquals(before.cursor, store.archiveCursor(key))
+    }
+
+    @Test
     fun migratedResetFullyMappedBeforePagesAdvanceAcrossBoundaryForms() = runBlocking {
         var store = MessageStore(database)
         val key = archiveKey(ACCOUNT)
