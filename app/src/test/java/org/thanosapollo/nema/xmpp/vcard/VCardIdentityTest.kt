@@ -93,5 +93,13 @@ class VCardIdentityTest {
                 failureTtlMs = 500L,
             ),
         )
+        assertFalse(
+            peerVCardNeedsFetch(
+                PeerEntity("a", "room@conference.example.org", room = true),
+                1_000_000L,
+                successTtlMs = 1_000L,
+                failureTtlMs = 500L,
+            ),
+        )
     }
 }

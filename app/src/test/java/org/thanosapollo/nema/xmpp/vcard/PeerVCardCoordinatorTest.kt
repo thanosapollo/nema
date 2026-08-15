@@ -143,8 +143,26 @@ class PeerVCardCoordinatorTest {
         assertEquals("image/png", cached.photoMime)
     }
 
+    @Test
+    fun roomVCardIsNotFetchedAndDoesNotWipeDisplayName() = runBlocking {
+        store.saveRoom(ACCOUNT, ROOM, true)
+        store.saveDisplayName(ACCOUNT, ROOM, "Council of Oberon")
+        val loads = AtomicInteger()
+        val coordinator = PeerVCardCoordinator(
+            store = store,
+            loader = VCardLoader { _, _, _ ->
+                loads.incrementAndGet()
+                RemoteVCardPayload(null, null, null, null, null)
+            },
+        )
+        coordinator.ensure(AccountId.require(ACCOUNT), ConnectionGeneration.require(1), listOf(ROOM))
+        assertEquals(0, loads.get())
+        assertEquals("Council of Oberon", store.peer(ACCOUNT, ROOM)?.displayName)
+    }
+
     companion object {
         private const val ACCOUNT = "account-a"
         private const val PEER = "peer@example.org"
+        private const val ROOM = "coven@conference.example.org"
     }
 }

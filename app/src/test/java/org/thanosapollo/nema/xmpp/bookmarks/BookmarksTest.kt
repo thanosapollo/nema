@@ -147,6 +147,43 @@ class BookmarksTest {
     }
 
     @Test
+    fun joinBookmarkKeepsExistingNameAndPassword() {
+        val existing = RoomBookmark(
+            roomJid = "coven@chat.shakespeare.example",
+            name = "Council of Oberon",
+            nick = "Legacy",
+            password = "secret",
+            autojoin = false,
+        )
+        val published = joinRoomBookmark(
+            roomJid = "coven@chat.shakespeare.example",
+            nick = "Puck",
+            password = null,
+            existing = existing,
+        )
+        assertEquals(
+            RoomBookmark(
+                roomJid = "coven@chat.shakespeare.example",
+                name = "Council of Oberon",
+                nick = "Puck",
+                password = "secret",
+                autojoin = true,
+            ),
+            published,
+        )
+        assertEquals(
+            RoomBookmark(
+                roomJid = "quiet@conference.example.org",
+                name = null,
+                nick = null,
+                password = null,
+                autojoin = true,
+            ),
+            joinRoomBookmark("quiet@conference.example.org", null, null, existing = null),
+        )
+    }
+
+    @Test
     fun bookmark2XmlRoundTripsNickPasswordNameAndAutojoin() {
         val original = RoomBookmark(
             roomJid = "coven@chat.shakespeare.example",

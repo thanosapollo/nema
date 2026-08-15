@@ -1,9 +1,19 @@
 package org.thanosapollo.nema.xmpp.muc
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class RoomStateTest {
+    @Test
+    fun persistedTitleFillsOnceFromDiscoThenSubject() {
+        assertEquals("Council", roomDisplayNameToPersist(null, "Council", "topic"))
+        assertEquals("Council", roomDisplayNameToPersist("  ", "Council", "topic"))
+        assertEquals("topic", roomDisplayNameToPersist(null, null, "topic"))
+        assertNull(roomDisplayNameToPersist("Keep Me", "Council", "topic"))
+        assertNull(roomDisplayNameToPersist("Keep Me", null, "new topic"))
+    }
+
     @Test
     fun subtitlePrefersSubjectThenOccupantCount() {
         assertEquals("Council of Oberon", roomSubtitle("  Council of Oberon  ", 4))

@@ -69,6 +69,19 @@ fun mergeRoomBookmarks(preferred: List<RoomBookmark>, fallback: List<RoomBookmar
 fun autojoinRooms(bookmarks: List<RoomBookmark>): List<RoomBookmark> =
     bookmarks.filter(RoomBookmark::autojoin)
 
+fun joinRoomBookmark(
+    roomJid: String,
+    nick: String?,
+    password: String?,
+    existing: RoomBookmark?,
+): RoomBookmark = RoomBookmark(
+    roomJid = roomJid,
+    name = existing?.name?.trim()?.takeIf(String::isNotEmpty),
+    nick = nick?.trim()?.takeIf(String::isNotEmpty) ?: existing?.nick,
+    password = password?.trim()?.takeIf(String::isNotEmpty) ?: existing?.password,
+    autojoin = true,
+)
+
 fun preferredRoomNick(bookmarkNick: String?, accountBareJid: String): String {
     val nick = bookmarkNick?.trim().orEmpty()
     if (nick.isNotEmpty()) return nick

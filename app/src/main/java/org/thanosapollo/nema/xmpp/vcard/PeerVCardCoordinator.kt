@@ -98,6 +98,7 @@ fun peerVCardNeedsFetch(
     failureTtlMs: Long = VCARD_FAILURE_TTL_MS,
 ): Boolean {
     if (existing == null) return true
+    if (existing.room) return false
     val fetched = existing.vcardFetchedAtMs
     if (fetched != null && nowMs - fetched < successTtlMs) return false
     val failed = existing.vcardFailureAtMs

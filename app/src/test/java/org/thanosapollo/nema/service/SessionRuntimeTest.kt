@@ -37,6 +37,7 @@ import org.thanosapollo.nema.storage.OutboundIntent
 import org.thanosapollo.nema.storage.OutboxStatus
 import org.thanosapollo.nema.storage.PeerIdentityStore
 import org.thanosapollo.nema.thread.MessageKind
+import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmark
 import org.thanosapollo.nema.xmpp.transport.AccountId
 import org.thanosapollo.nema.xmpp.transport.OutgoingFailureEnvelope
 import org.thanosapollo.nema.xmpp.transport.OutgoingMessageEnvelope
@@ -288,6 +289,88 @@ class SessionRuntimeTest {
         assertEquals(count, store.messages(active.id.value).size)
     }
 
+    @Test
+    fun `join publishes bookmark without wiping existing name`() = runTest {
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val connections = RecordingConnectionFactory()
+        val runtime = SessionRuntime(
+            accounts = accounts,
+            credentials = credentials,
+            messages = MessageStore(database),
+            peerIdentities = PeerIdentityStore(database.messageDao()),
+            runtimeScope = backgroundScope,
+            connectionFactory = connections,
+        )
+        val active = account("active")
+        accounts.save(active)
+        accounts.activate(active.id)
+        credentials.store(active.id, "secret".toCharArray())
+        assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
+        val connection = connections.created.single()
+        val room = "coven@conference.example.org"
+        connection.bookmarks = listOf(
+            RoomBookmark(room, name = "Council of Oberon", nick = "Legacy", password = "secret"),
+        )
+
+        assertTrue(runtime.joinMuc(room, nick = "Puck"))
+        runCurrent()
+
+        assertEquals(
+            listOf(
+                RoomBookmark(
+                    roomJid = room,
+                    name = "Council of Oberon",
+                    nick = "Puck",
+                    password = "secret",
+                    autojoin = true,
+                ),
+            ),
+            connection.publishedBookmarks,
+        )
+    }
+
+    @Test
+    fun `room update fills empty display name from disco then keeps it`() = runTest {
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val identities = PeerIdentityStore(database.messageDao())
+        val connections = RecordingConnectionFactory()
+        val runtime = SessionRuntime(
+            accounts = accounts,
+            credentials = credentials,
+            messages = MessageStore(database),
+            peerIdentities = identities,
+            runtimeScope = backgroundScope,
+            connectionFactory = connections,
+        )
+        val active = account("active")
+        accounts.save(active)
+        accounts.activate(active.id)
+        credentials.store(active.id, "secret".toCharArray())
+        assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
+        val connection = connections.created.single()
+        val room = "coven@conference.example.org"
+
+        connection.emitRoom(
+            org.thanosapollo.nema.xmpp.muc.RoomView(
+                roomJid = room,
+                subject = "topic",
+                discoName = "Council of Oberon",
+            ),
+        )
+        assertEquals("Council of Oberon", identities.peer(active.id.value, room)?.displayName)
+
+        connection.emitRoom(
+            org.thanosapollo.nema.xmpp.muc.RoomView(
+                roomJid = room,
+                subject = "new topic",
+                discoName = "Other",
+            ),
+        )
+        assertEquals("Council of Oberon", identities.peer(active.id.value, room)?.displayName)
+    }
+
     private fun account(id: String, bareJid: String = "$id@example.org") = AccountConfiguration.create(
         id = AccountId.require(id),
         bareJid = bareJid,
@@ -343,6 +426,8 @@ class SessionRuntimeTest {
         override var isUsable = true
         var disconnectCalls = 0
         lateinit var attemptIdentity: SessionAttemptIdentity
+        var bookmarks: List<RoomBookmark> = emptyList()
+        val publishedBookmarks = mutableListOf<RoomBookmark>()
 
         override fun revoke() {
             isUsable = false
@@ -366,6 +451,28 @@ class SessionRuntimeTest {
 
         override suspend fun send(message: OutgoingMessageEnvelope, entered: () -> Unit) = entered()
 
+        override suspend fun joinMuc(
+            accountId: AccountId,
+            generation: org.thanosapollo.nema.xmpp.transport.ConnectionGeneration,
+            roomJid: String,
+            nick: String?,
+            password: String?,
+        ): Boolean = true
+
+        override suspend fun bookmarkedRoomDetails(
+            accountId: AccountId,
+            generation: org.thanosapollo.nema.xmpp.transport.ConnectionGeneration,
+        ): List<RoomBookmark> = bookmarks
+
+        override suspend fun publishRoomBookmark(
+            accountId: AccountId,
+            generation: org.thanosapollo.nema.xmpp.transport.ConnectionGeneration,
+            bookmark: RoomBookmark,
+        ): Boolean {
+            publishedBookmarks += bookmark
+            return true
+        }
+
         override suspend fun disconnect() {
             disconnectCalls++
             isUsable = false
@@ -378,6 +485,10 @@ class SessionRuntimeTest {
                     OutgoingFailureEnvelope(operationId, peer, "remote-server-timeout"),
                 ),
             )
+        }
+
+        fun emitRoom(view: org.thanosapollo.nema.xmpp.muc.RoomView) {
+            event(SessionEvent.RoomUpdated(attemptIdentity, view))
         }
     }
 }

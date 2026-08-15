@@ -69,9 +69,12 @@ import org.thanosapollo.nema.xmpp.transport.SendNotAttemptedException
 import org.thanosapollo.nema.xmpp.blocking.PeerBlockingState
 import org.thanosapollo.nema.xmpp.blocking.PeerBlockingMutationResult
 import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmark
+import org.thanosapollo.nema.xmpp.bookmarks.joinRoomBookmark
 import org.thanosapollo.nema.xmpp.httpupload.LocalUploadRequest
 import org.thanosapollo.nema.xmpp.httpupload.UploadedFile
 import org.thanosapollo.nema.xmpp.muc.RoomStateStore
+import org.thanosapollo.nema.xmpp.muc.RoomView
+import org.thanosapollo.nema.xmpp.muc.roomDisplayNameToPersist
 import org.thanosapollo.nema.xmpp.vcard.PeerVCardCoordinator
 import org.thanosapollo.nema.xmpp.vcard.VCardLoader
 
@@ -168,8 +171,10 @@ class SessionRuntime(
                             peer = event.failure.peer,
                             reason = event.failure.reason,
                         )
-                    is org.thanosapollo.nema.session.SessionEvent.RoomUpdated ->
+                    is org.thanosapollo.nema.session.SessionEvent.RoomUpdated -> {
                         rooms.apply(event.attempt.accountId.value, event.view)
+                        persistRoomDisplayName(event.attempt.accountId.value, event.view)
+                    }
                     is org.thanosapollo.nema.session.SessionEvent.ConnectionLost -> Unit
                 }
             },
@@ -309,19 +314,28 @@ class SessionRuntime(
             }
             scope.launch {
                 runCatching {
+                    val existing = runCatching {
+                        controller.bookmarkedRoomDetails(
+                            lease.identity.accountId,
+                            lease.identity.generation,
+                        ).firstOrNull { it.roomJid == roomJid }
+                    }.getOrNull()
                     controller.publishRoomBookmark(
                         lease.identity.accountId,
                         lease.identity.generation,
-                        RoomBookmark(
-                            roomJid = roomJid,
-                            nick = nick?.trim()?.takeIf(String::isNotEmpty),
-                            autojoin = true,
-                        ),
+                        joinRoomBookmark(roomJid, nick, password, existing),
                     )
                 }
             }
         }
         return joined
+    }
+
+    private suspend fun persistRoomDisplayName(accountId: String, view: RoomView) {
+        peerIdentities.saveRoom(accountId, view.roomJid, true)
+        val current = peerIdentities.peer(accountId, view.roomJid)?.displayName
+        val fill = roomDisplayNameToPersist(current, view.discoName, view.subject) ?: return
+        peerIdentities.saveDisplayName(accountId, view.roomJid, fill)
     }
 
     private suspend fun restoreBookmarkedRooms(

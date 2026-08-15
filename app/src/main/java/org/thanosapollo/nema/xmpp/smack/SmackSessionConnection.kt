@@ -51,6 +51,7 @@ import org.jivesoftware.smackx.sid.StableUniqueStanzaIdManager
 import org.jivesoftware.smackx.sid.element.OriginIdElement
 import org.jivesoftware.smackx.sid.element.StanzaIdElement
 import org.jivesoftware.smackx.vcardtemp.VCardManager
+import org.jxmpp.jid.EntityBareJid
 import org.jxmpp.jid.Jid
 import org.jxmpp.jid.impl.JidCreate
 import org.jxmpp.jid.parts.Resourcepart
@@ -165,6 +166,7 @@ internal class SmackSessionConnection(
     private val stableIdGate = StableIdDiscoveryGate()
     private val watchedRooms = mutableSetOf<String>()
     private val roomNicks = ConcurrentHashMap<String, String>()
+    private val roomDiscoNames = ConcurrentHashMap<String, String>()
     private val connectionListener = AttemptConnectionListener().also(connection::addConnectionListener)
     private val messageListener = StanzaListener { stanza ->
         if (revoked.get()) return@StanzaListener
@@ -464,6 +466,7 @@ internal class SmackSessionConnection(
         val nickPart = Resourcepart.from(roomNick)
         listenToRoom(muc, roomJid)
         if (muc.isJoined) {
+            rememberRoomDiscoName(room, roomJid)
             emitRoomView(muc, roomJid)
             return@runInterruptible true
         }
@@ -476,9 +479,11 @@ internal class SmackSessionConnection(
             .build()
         try {
             muc.join(enter)
+            rememberRoomDiscoName(room, roomJid)
             emitRoomView(muc, roomJid)
             true
         } catch (_: MultiUserChatException.MucAlreadyJoinedException) {
+            rememberRoomDiscoName(room, roomJid)
             emitRoomView(muc, roomJid)
             true
         }
@@ -553,6 +558,17 @@ internal class SmackSessionConnection(
         return mergeRoomBookmarks(fromManager, fromXml)
     }
 
+    private fun rememberRoomDiscoName(room: EntityBareJid, roomJid: String) {
+        if (roomDiscoNames.containsKey(roomJid)) return
+        runCatching {
+            MultiUserChatManager.getInstanceFor(connection)
+                .getRoomInfo(room)
+                .name
+                ?.takeIf(String::isNotEmpty)
+                ?.let { roomDiscoNames[roomJid] = it }
+        }
+    }
+
     private fun listenToRoom(muc: MultiUserChat, roomJid: String) {
         if (!watchedRooms.add(roomJid)) return
         muc.addParticipantListener { emitRoomView(muc, roomJid) }
@@ -572,6 +588,7 @@ internal class SmackSessionConnection(
                 RoomView(
                     roomJid = roomJid,
                     subject = muc.subject?.takeIf(String::isNotEmpty),
+                    discoName = roomDiscoNames[roomJid],
                     occupants = occupants,
                     ownNick = muc.nickname?.toString(),
                 ),

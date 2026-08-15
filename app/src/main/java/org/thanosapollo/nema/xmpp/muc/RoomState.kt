@@ -9,10 +9,21 @@ data class RoomOccupant(
 data class RoomView(
     val roomJid: String,
     val subject: String? = null,
+    val discoName: String? = null,
     val occupants: List<RoomOccupant> = emptyList(),
     val ownNick: String? = null,
 ) {
     val occupantCount: Int get() = occupants.size
+}
+
+fun roomDisplayNameToPersist(
+    currentDisplayName: String?,
+    discoName: String?,
+    subject: String?,
+): String? {
+    if (currentDisplayName?.trim().orEmpty().isNotEmpty()) return null
+    return discoName?.trim()?.takeIf(String::isNotEmpty)
+        ?: subject?.trim()?.takeIf(String::isNotEmpty)
 }
 
 fun roomSubtitle(subject: String?, occupantCount: Int): String {
