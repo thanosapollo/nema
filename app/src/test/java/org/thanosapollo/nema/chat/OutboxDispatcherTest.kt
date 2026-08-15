@@ -48,6 +48,7 @@ import org.thanosapollo.nema.session.LifecycleEpoch
 import org.thanosapollo.nema.session.SessionIdentity
 import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.thread.ThreadId
+import org.thanosapollo.nema.thread.ThreadIdFactory
 import org.thanosapollo.nema.thread.ThreadRef
 import org.thanosapollo.nema.thread.draftKey
 import org.thanosapollo.nema.xmpp.reply.replyReference
@@ -133,6 +134,15 @@ class OutboxDispatcherTest {
 
     @Test
     fun threadReplyDraftDispatchesOneStanzaWithBothXepMetadataAndConsumesDraft() = runBlocking {
+        store = MessageStore(
+            database,
+            System::currentTimeMillis,
+            ThreadIdFactory { ThreadId.require("parent-thread") },
+        )
+        assertEquals(
+            ThreadRef(ThreadId.require("parent-thread"), null),
+            store.ensureDirectThreadSession(ACCOUNT, PEER),
+        )
         val thread = ThreadRef(ThreadId.require("reply-thread"), ThreadId.require("parent-thread"))
         database.messageDao().saveDraft(
             ACCOUNT,

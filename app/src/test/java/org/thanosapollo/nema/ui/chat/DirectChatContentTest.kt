@@ -22,6 +22,7 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertHeightIsEqualTo
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
@@ -69,12 +70,15 @@ import org.thanosapollo.nema.chat.DraftCorrection
 import org.thanosapollo.nema.chat.DraftReply
 import org.thanosapollo.nema.chat.DraftSnapshot
 import org.thanosapollo.nema.chat.MessageReplyPresentation
+import org.thanosapollo.nema.chat.RecentThread
 import org.thanosapollo.nema.chat.ThreadSummary
 import org.thanosapollo.nema.chat.TimelineMessage
 import org.thanosapollo.nema.storage.RetryUncertainKey
 import org.thanosapollo.nema.session.SessionIdentity
+import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.thread.ThreadId
 import org.thanosapollo.nema.thread.ThreadRef
+import org.thanosapollo.nema.thread.draftKey
 import org.thanosapollo.nema.ui.theme.AppearanceSpec
 import org.thanosapollo.nema.ui.theme.NemaTheme
 import org.thanosapollo.nema.ui.theme.MIN_TEXT_CONTRAST
@@ -206,6 +210,61 @@ class DirectChatContentTest {
         composeRule.waitUntil { blockValue != null }
         assertEquals(DirectConversationKey(ACCOUNT_A, PEER_A), blockKey)
         assertEquals(true, blockValue)
+    }
+
+    @Test
+    fun profileListsOpensAndRenamesRecentThread() {
+        val thread = ThreadRef(
+            id = ThreadId.require("recent-child"),
+            parentId = ThreadId.require("current-session"),
+        )
+        var opened: ThreadRef? = null
+        var renamed: Pair<ThreadRef, String>? = null
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A).copy(
+                        recentThreads = listOf(
+                            RecentThread(
+                                thread = thread,
+                                title = "Default thread title",
+                                replyCount = 3,
+                                messageKind = MessageKind.CHAT,
+                            ),
+                        ),
+                    ),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                    onContinueThread = {
+                        opened = it
+                        true
+                    },
+                    onRenameThread = { selected, name ->
+                        renamed = selected.thread to name
+                        true
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Open contact info").performClick()
+        composeRule.onNodeWithTag("contact-info-list").performScrollToIndex(5)
+        composeRule.onNodeWithText("Recent threads").assertIsDisplayed()
+        composeRule.onNodeWithText("Default thread title").assertIsDisplayed()
+        composeRule.onNodeWithText("Replies 3").assertIsDisplayed()
+
+        composeRule.onNodeWithTag("rename-thread-${thread.draftKey()}").performClick()
+        composeRule.onNodeWithTag("thread-name-input").performTextReplacement("Planning")
+        composeRule.onNodeWithText("Save").performClick()
+        composeRule.waitUntil { renamed != null }
+        assertEquals(thread to "Planning", renamed)
+
+        composeRule.onNodeWithTag("recent-thread-${thread.draftKey()}").performClick()
+        composeRule.waitUntil { opened != null }
+        assertEquals(thread, opened)
     }
 
     @Test
@@ -404,7 +463,7 @@ class DirectChatContentTest {
     }
 
     @Test
-    fun threadActionUsesReadableTextColorWithoutUncertainRetryNoise() {
+    fun replySummaryUsesReadableTextColorWithoutUncertainRetryNoise() {
         val appearance = AppearanceSpec(
             themeMode = ThemeMode.LIGHT,
             palette = PaletteChoice.Custom.require("#767676", "#FFFFFF"),
@@ -434,15 +493,22 @@ class DirectChatContentTest {
                             outgoing = false,
                             delivery = null,
                             retryUncertainKey = null,
-                            thread = ThreadRef(ThreadId.require("thread")),
+                            thread = null,
+                            threadSummaries = listOf(
+                                ThreadSummary(
+                                    thread = ThreadRef(ThreadId.require("thread")),
+                                    replyCount = 1,
+                                    latestMessageId = "incoming-thread",
+                                    latestPreview = "incoming",
+                                ),
+                            ),
                         ),
                     ),
                 )
             }
         }
 
-        composeRule.onNodeWithText("incoming").performTouchInput { longClick() }
-        val incoming = contrastRatio(renderedTextColor("Open thread"), containers.second)
+        val incoming = contrastRatio(renderedTextColor("Replies 1"), containers.second)
 
         composeRule.onNodeWithText("Retry — duplicate possible").assertDoesNotExist()
         composeRule.onNodeWithText("May have sent").assertDoesNotExist()
@@ -2217,9 +2283,9 @@ class DirectChatContentTest {
             }
         }
 
-        composeRule.onNodeWithText("Thread · 2 replies").assertIsDisplayed()
+        composeRule.onNodeWithText("Replies 2").assertIsDisplayed()
         composeRule.onNodeWithText("latest answer").assertIsDisplayed()
-        composeRule.onNodeWithText("Thread · 2 replies").performClick()
+        composeRule.onNodeWithText("Replies 2").performClick()
         composeRule.waitForIdle()
         assertEquals(thread, opened)
     }
@@ -2273,11 +2339,11 @@ class DirectChatContentTest {
 
         composeRule.onNodeWithTag("message-timeline").performScrollToIndex(79)
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("Thread · 1 reply").assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("Replies 1").assertIsDisplayed().performClick()
         composeRule.onNodeWithContentDescription("Back to conversation").performClick()
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithText("Thread · 1 reply").assertIsDisplayed()
+        composeRule.onNodeWithText("Replies 1").assertIsDisplayed()
         composeRule.onNodeWithText("message-21").assertIsDisplayed()
     }
 
@@ -2302,8 +2368,11 @@ class DirectChatContentTest {
                                     outgoing = false,
                                     delivery = null,
                                     retryUncertainKey = null,
-                                    thread = thread,
+                                    thread = null,
                                     replyReferenceId = "thread-root-wire-id",
+                                    threadSummaries = listOf(
+                                        ThreadSummary(thread, 1, "message-identity", "thread root"),
+                                    ),
                                 ),
                             ),
                         ),
@@ -2326,16 +2395,16 @@ class DirectChatContentTest {
             }
         }
 
-        composeRule.onNodeWithText("thread root").performTouchInput { longClick() }
-        composeRule.onNodeWithText("Open thread").performClick()
+        composeRule.onNodeWithText("Replies 1").performClick()
         composeRule.waitForIdle()
         assertEquals("thread-a", opened?.id?.value)
         assertTrue(opened?.id?.value != "message-identity")
-        composeRule.onNodeWithText("thread root").performTouchInput { longClick() }
+        composeRule.onNodeWithTag("message-bubble-message-identity")
+            .performSemanticsAction(SemanticsActions.OnClick)
         composeRule.onNodeWithText("Reply as a thread").performClick()
         composeRule.waitForIdle()
         assertEquals("message-identity", threadSource?.id)
-        assertEquals(thread, threadSource?.thread)
+        assertEquals(null, threadSource?.thread)
         composeRule.onNodeWithContentDescription("Conversation actions").performClick()
         composeRule.onNodeWithText("New thread").performClick()
         composeRule.waitForIdle()
@@ -2372,8 +2441,7 @@ class DirectChatContentTest {
     }
 
     @Test
-    fun threadedBubbleChipOpensThatThread() {
-        var opened: ThreadRef? = null
+    fun sessionThreadMetadataDoesNotExposePerMessageNavigation() {
         val thread = ThreadRef(ThreadId.require("topic"))
         composeRule.setContent {
             MaterialTheme {
@@ -2389,14 +2457,13 @@ class DirectChatContentTest {
                             thread = thread,
                         ),
                     ),
-                    onContinueThread = { opened = it },
                 )
             }
         }
 
-        composeRule.onNodeWithTag("thread-chip").performClick()
-        composeRule.waitForIdle()
-        assertEquals(thread, opened)
+        composeRule.onNodeWithTag("thread-chip").assertDoesNotExist()
+        composeRule.onNodeWithText("incoming").performTouchInput { doubleClick() }
+        composeRule.onNodeWithText("Open thread").assertDoesNotExist()
     }
 
     @Test
@@ -2447,7 +2514,8 @@ class DirectChatContentTest {
         }
 
         composeRule.onNodeWithText("incoming").performTouchInput { doubleClick() }
-        composeRule.onNodeWithText("Open thread").assertIsDisplayed()
+        composeRule.onNodeWithText("Quote").assertIsDisplayed()
+        composeRule.onNodeWithText("Open thread").assertDoesNotExist()
     }
 
     @Test
@@ -2468,7 +2536,7 @@ class DirectChatContentTest {
     }
 
     @Test
-    fun threadChipStacksBelowBubbleWithAccessibleTouchTarget() {
+    fun replySummaryStacksInsideBubbleWithAccessibleTouchTarget() {
         val thread = ThreadRef(ThreadId.require("thread"))
         composeRule.setContent {
             MaterialTheme {
@@ -2481,18 +2549,25 @@ class DirectChatContentTest {
                             outgoing = false,
                             delivery = null,
                             retryUncertainKey = null,
-                            thread = thread,
+                            thread = null,
+                            threadSummaries = listOf(
+                                ThreadSummary(thread, 1, "stacked-thread", "incoming"),
+                            ),
                         ),
                     ),
                 )
             }
         }
 
-        composeRule.onNodeWithTag("thread-chip").assertHeightIsEqualTo(48.dp)
+        val summaryTag = "thread-summary-${thread.draftKey()}"
+        composeRule.onNodeWithTag(summaryTag).assertHeightIsAtLeast(48.dp)
         val bubble = composeRule.onNodeWithTag("message-bubble-stacked-thread")
             .fetchSemanticsNode().boundsInRoot
-        val chip = composeRule.onNodeWithTag("thread-chip").fetchSemanticsNode().boundsInRoot
-        assertTrue("thread chip overlaps its message bubble", chip.top >= bubble.bottom)
+        val summary = composeRule.onNodeWithTag(summaryTag).fetchSemanticsNode().boundsInRoot
+        assertTrue(
+            "reply summary escapes its message bubble",
+            summary.top >= bubble.top && summary.bottom <= bubble.bottom,
+        )
     }
 
     private fun state(accountId: String, peer: String, draft: String = "") = DirectChatState(

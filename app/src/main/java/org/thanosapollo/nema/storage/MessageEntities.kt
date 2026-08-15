@@ -94,6 +94,60 @@ data class MessageThreadEntity(
     val parentThreadId: String?,
 )
 
+@Entity(
+    tableName = "direct_thread_sessions",
+    primaryKeys = ["accountId", "peerJid"],
+    foreignKeys = [
+        ForeignKey(
+            entity = PeerEntity::class,
+            parentColumns = ["accountId", "jid"],
+            childColumns = ["accountId", "peerJid"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+        ForeignKey(
+            entity = MessageThreadEntity::class,
+            parentColumns = ["accountId", "peerJid", "messageKind", "threadId"],
+            childColumns = ["accountId", "peerJid", "messageKind", "threadId"],
+            onDelete = ForeignKey.RESTRICT,
+        ),
+    ],
+    indices = [Index(value = ["accountId", "peerJid", "messageKind", "threadId"])],
+)
+data class DirectThreadSessionEntity(
+    val accountId: String,
+    val peerJid: String,
+    val messageKind: MessageKind = MessageKind.CHAT,
+    val threadId: String,
+) {
+    init {
+        require(messageKind == MessageKind.CHAT) { "Direct sessions require chat message kind" }
+    }
+}
+
+@Entity(
+    tableName = "message_thread_titles",
+    primaryKeys = ["accountId", "peerJid", "messageKind", "threadId"],
+    foreignKeys = [
+        ForeignKey(
+            entity = MessageThreadEntity::class,
+            parentColumns = ["accountId", "peerJid", "messageKind", "threadId"],
+            childColumns = ["accountId", "peerJid", "messageKind", "threadId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+)
+data class MessageThreadTitleEntity(
+    val accountId: String,
+    val peerJid: String,
+    val messageKind: MessageKind,
+    val threadId: String,
+    val title: String,
+) {
+    init {
+        require(title.isNotBlank()) { "Custom thread title must not be blank" }
+    }
+}
+
 enum class MessageDirection {
     INBOUND,
     OUTBOUND,
@@ -148,6 +202,7 @@ data class MessageEntity(
     val markerTargetId: String? = null,
     val replaceId: String? = null,
     val correctionTargetMessageId: String? = null,
+    val directSessionTransitionApplied: Boolean = false,
 )
 
 @Entity(

@@ -22,6 +22,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.thread.ThreadId
+import org.thanosapollo.nema.thread.ThreadIdFactory
 import org.thanosapollo.nema.thread.ThreadRef
 import org.thanosapollo.nema.thread.draftKey
 import org.thanosapollo.nema.xmpp.transport.MessageTimeSource
@@ -394,6 +395,8 @@ class MessageStoreTest {
                 setOf(
                     "peers",
                     "message_threads",
+                    "direct_thread_sessions",
+                    "message_thread_titles",
                     "messages",
                     "trusted_identity_aliases",
                     "identity_conflicts",
@@ -501,6 +504,7 @@ class MessageStoreTest {
         database.messageDao().saveDirectDraft(ACCOUNT, PEER, "persisted stale body")
         val faulting = MessageStore.observingWrites(
             database = database,
+            threadIds = ThreadIdFactory { ThreadId.require("rolled-back-session") },
             observer = {
                 if (it == MessageWriteBoundary.AFTER_OUTBOX) error("post-compose fault")
             },
@@ -522,6 +526,12 @@ class MessageStoreTest {
         assertEquals("persisted stale body", database.messageDao().directDraft(ACCOUNT, PEER)?.body)
         assertTrue(store.messages(ACCOUNT).isEmpty())
         assertTrue(store.outboxes(ACCOUNT).isEmpty())
+        assertNull(database.messageDao().directThreadSession(ACCOUNT, PEER))
+        assertNull(database.messageDao().thread(ACCOUNT, PEER, MessageKind.CHAT, "rolled-back-session"))
+
+        store = reopenStore()
+        assertNull(database.messageDao().directThreadSession(ACCOUNT, PEER))
+        assertNull(database.messageDao().thread(ACCOUNT, PEER, MessageKind.CHAT, "rolled-back-session"))
 
         store.composeDirectDraft(
             accountId = ACCOUNT,
@@ -698,12 +708,543 @@ class MessageStoreTest {
     }
 
     @Test
+    fun ordinaryDirectSendsReuseDurableTopLevelSessionAcrossRestart() = runBlocking {
+        val ids = ArrayDeque(listOf("session-a", "unused"))
+        var store = MessageStore(
+            database,
+            clock = { 1_000L },
+            threadIds = ThreadIdFactory { ThreadId.require(ids.removeFirst()) },
+        )
+
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "session-first-wire",
+            localMessageId = "session-first-local",
+            originId = "session-first-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "first",
+        )
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "session-second-wire",
+            localMessageId = "session-second-local",
+            originId = "session-second-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "second",
+        )
+        store = reopenStore()
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "session-third-wire",
+            localMessageId = "session-third-local",
+            originId = "session-third-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "third",
+        )
+
+        assertEquals(listOf("session-a", "session-a", "session-a"), store.messages(ACCOUNT).map { it.threadId })
+        assertTrue(store.messages(ACCOUNT).all { it.parentThreadId == null })
+    }
+
+    @Test
+    fun liveInboundAdoptsTopLevelRotatesThreadlessAndIgnoresMamSession() = runBlocking {
+        val ids = ArrayDeque(listOf("after-threadless"))
+        val store = MessageStore(
+            database,
+            clock = { 1_000L },
+            threadIds = ThreadIdFactory { ThreadId.require(ids.removeFirst()) },
+        )
+        store.ingest(incoming(localId = "live-agent", threadId = "agent-session"))
+        store.ingest(
+            incoming(localId = "history-agent", threadId = "historical-session").copy(
+                sentAtEpochMs = 500L,
+                sentTimeSource = MessageTimeSource.MAM,
+            ),
+        )
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "adopted-wire",
+            localMessageId = "adopted-local",
+            originId = "adopted-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "reply in adopted session",
+        )
+        store.ingest(incoming(localId = "legacy-live"))
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "rotated-wire",
+            localMessageId = "rotated-local",
+            originId = "rotated-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "reply after legacy stanza",
+        )
+
+        val messages = store.messages(ACCOUNT).associateBy { it.localMessageId }
+        assertEquals("agent-session", messages.getValue("adopted-local").threadId)
+        assertEquals("after-threadless", messages.getValue("rotated-local").threadId)
+        assertNull(messages.getValue("legacy-live").threadId)
+    }
+
+    @Test
+    fun freshExplicitTopicIsParentedToCurrentSessionButEstablishedLineageIsPreserved() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(incoming(localId = "current", threadId = "current-session"))
+
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "new-topic-wire",
+            localMessageId = "new-topic-local",
+            originId = "new-topic-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "new topic",
+            thread = ThreadRef(ThreadId.require("new-topic")),
+            draftThread = null,
+        )
+        store.ingest(incoming(localId = "other-top-level", threadId = "other-session"))
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "known-topic-wire",
+            localMessageId = "known-topic-local",
+            originId = "known-topic-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "known topic",
+            thread = ThreadRef(ThreadId.require("current-session")),
+        )
+
+        val messages = store.messages(ACCOUNT).associateBy { it.localMessageId }
+        assertEquals("current-session", messages.getValue("new-topic-local").parentThreadId)
+        assertNull(messages.getValue("known-topic-local").parentThreadId)
+    }
+
+    @Test
+    fun liveReplyInheritsKnownChildParentWhenParentElementIsNotRepeated() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(incoming(localId = "current", threadId = "current-session"))
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "child-wire",
+            localMessageId = "child-local",
+            originId = "child-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "child request",
+            thread = ThreadRef(ThreadId.require("child-session"), ThreadId.require("current-session")),
+        )
+
+        store.ingest(incoming(localId = "child-response", threadId = "child-session"))
+
+        val response = store.messages(ACCOUNT).single { it.localMessageId == "child-response" }
+        assertEquals("current-session", response.parentThreadId)
+    }
+
+    @Test
+    fun groupchatDraftSendRemainsThreadlessAndDoesNotCreateDirectSession() = runBlocking {
+        val room = "room@conference.example.org"
+        MessageStore(database).composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "room-session-wire",
+            localMessageId = "room-session-local",
+            originId = "room-session-origin",
+            peerJid = room,
+            senderJid = SELF,
+            body = "room",
+            messageKind = MessageKind.GROUPCHAT,
+        )
+
+        val message = MessageStore(database).messages(ACCOUNT).single()
+        assertNull(message.threadId)
+        assertNull(database.messageDao().directThreadSession(ACCOUNT, room))
+    }
+
+    @Test
+    fun replayedLiveIdentityDoesNotRewindOrRerotateDirectSession() = runBlocking {
+        val generated = ArrayDeque(listOf("rotated-session", "unexpected-session"))
+        val factory = ThreadIdFactory { ThreadId.require(generated.removeFirst()) }
+        var store = MessageStore(database, clock = { 1_000L }, threadIds = factory)
+        val topLevelAlias = stanzaAlias("top-level-wire")
+        val threadlessAlias = stanzaAlias("threadless-wire")
+        store.ingest(
+            incoming(
+                localId = "top-level-live",
+                body = "top-level",
+                aliases = listOf(topLevelAlias),
+                threadId = "remote-session",
+            ),
+        )
+        store.ingest(
+            incoming(
+                localId = "threadless-live",
+                body = "threadless",
+                aliases = listOf(threadlessAlias),
+            ),
+        )
+        database.close()
+        database = NemaDatabase.create(context, databaseName)
+        store = MessageStore(database, clock = { 2_000L }, threadIds = factory)
+
+        store.ingest(
+            incoming(
+                localId = "top-level-replay",
+                body = "top-level",
+                aliases = listOf(topLevelAlias),
+                threadId = "remote-session",
+            ),
+        )
+        store.ingest(
+            incoming(
+                localId = "threadless-replay",
+                body = "threadless",
+                aliases = listOf(threadlessAlias),
+            ),
+        )
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "after-replay-wire",
+            localMessageId = "after-replay-local",
+            originId = "after-replay-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "after replay",
+        )
+
+        assertEquals("rotated-session", store.messages(ACCOUNT).last().threadId)
+        assertEquals(listOf("unexpected-session"), generated.toList())
+    }
+
+    @Test
+    fun mamOnlyThreadDoesNotCreateSessionBeforeFreshOrdinarySend() = runBlocking {
+        val generated = ArrayDeque(listOf("fresh-local-session"))
+        val store = MessageStore(
+            database,
+            clock = { 1_000L },
+            threadIds = ThreadIdFactory { ThreadId.require(generated.removeFirst()) },
+        )
+        store.ingest(
+            incoming(localId = "mam-only", threadId = "historical-session").copy(
+                sentAtEpochMs = 500L,
+                sentTimeSource = MessageTimeSource.MAM,
+            ),
+        )
+        assertNull(database.messageDao().directThreadSession(ACCOUNT, PEER))
+
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "fresh-wire",
+            localMessageId = "fresh-local",
+            originId = "fresh-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "fresh",
+        )
+
+        assertEquals("fresh-local-session", store.messages(ACCOUNT).last().threadId)
+    }
+
+    @Test
+    fun timestampLessArchiveCannotTransitionDirectSessionButCorrelatedLiveCopiesCan() = runBlocking {
+        val generated = ArrayDeque(listOf("rotated-live-session", "unexpected-session"))
+        val store = MessageStore(
+            database,
+            clock = { 1_000L },
+            threadIds = ThreadIdFactory { ThreadId.require(generated.removeFirst()) },
+        )
+        store.ingest(incoming(localId = "current", threadId = "current-session"))
+        val topLevelAlias = stanzaAlias("archived-top-level")
+        val threadlessAlias = stanzaAlias("archived-threadless")
+
+        store.applyArchivePage(
+            archivePage(
+                key = archiveKey(ACCOUNT),
+                direction = ArchiveDirection.BOOTSTRAP,
+                complete = true,
+                hasEarlier = false,
+                messages = listOf(
+                    archived(
+                        resultId = "archive-top-level",
+                        localId = "archive-top-level-local",
+                        body = "historical top-level",
+                        alias = topLevelAlias,
+                        threadId = "historical-session",
+                    ),
+                    archived(
+                        resultId = "archive-threadless",
+                        localId = "archive-threadless-local",
+                        body = "historical threadless",
+                        alias = threadlessAlias,
+                    ),
+                ),
+            ),
+        )
+        assertEquals("current-session", database.messageDao().directThreadSession(ACCOUNT, PEER)?.threadId)
+
+        store.ingest(
+            incoming(
+                localId = "live-top-level",
+                body = "historical top-level",
+                aliases = listOf(topLevelAlias),
+                threadId = "historical-session",
+            ),
+        )
+        assertEquals("historical-session", database.messageDao().directThreadSession(ACCOUNT, PEER)?.threadId)
+        store.ingest(
+            incoming(
+                localId = "live-threadless",
+                body = "historical threadless",
+                aliases = listOf(threadlessAlias),
+            ),
+        )
+        assertEquals("rotated-live-session", database.messageDao().directThreadSession(ACCOUNT, PEER)?.threadId)
+
+        store.ingest(
+            incoming(
+                localId = "live-threadless-replay",
+                body = "historical threadless",
+                aliases = listOf(threadlessAlias),
+            ),
+        )
+        assertEquals("rotated-live-session", database.messageDao().directThreadSession(ACCOUNT, PEER)?.threadId)
+        assertEquals(listOf("unexpected-session"), generated.toList())
+    }
+
+    @Test
+    fun archiveCannotReparentMessageEmptyReservedDirectSession() = runBlocking {
+        val generated = ArrayDeque(listOf("reserved-session", "unexpected-session"))
+        val factory = ThreadIdFactory { ThreadId.require(generated.removeFirst()) }
+        var store = MessageStore(database, clock = { 1_000L }, threadIds = factory)
+        val session = store.ensureDirectThreadSession(ACCOUNT, PEER)
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "reserved-child-wire",
+            localMessageId = "reserved-child-local",
+            originId = "reserved-child-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "child request",
+            thread = ThreadRef(ThreadId.require("reserved-child"), session.id),
+        )
+
+        val result = store.applyArchivePage(
+            archivePage(
+                key = archiveKey(ACCOUNT),
+                direction = ArchiveDirection.BOOTSTRAP,
+                complete = true,
+                hasEarlier = false,
+                messages = listOf(
+                    archived(
+                        resultId = "reserved-session-result",
+                        localId = "reserved-session-archive",
+                        body = "conflicting historical lineage",
+                        threadId = session.id.value,
+                        parentThreadId = "archive-parent",
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(ArchivePageStatus.APPLIED, result.status)
+        assertNull(database.messageDao().thread(ACCOUNT, PEER, MessageKind.CHAT, session.id.value)?.parentThreadId)
+        assertNull(database.messageDao().thread(ACCOUNT, PEER, MessageKind.CHAT, "archive-parent"))
+        assertEquals(session.id.value, database.messageDao().directThreadSession(ACCOUNT, PEER)?.threadId)
+        database.close()
+        database = NemaDatabase.create(context, databaseName)
+        store = MessageStore(database, clock = { 2_000L }, threadIds = factory)
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "after-reserved-archive-wire",
+            localMessageId = "after-reserved-archive-local",
+            originId = "after-reserved-archive-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "ordinary send",
+        )
+
+        assertEquals(session.id.value, store.messages(ACCOUNT).last().threadId)
+        assertEquals(listOf("unexpected-session"), generated.toList())
+    }
+
+    @Test
+    fun explicitDirectLineageFailuresRollbackMessageOutboxDraftAndSession() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(incoming(localId = "current", threadId = "current-session"))
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "known-child-wire",
+            localMessageId = "known-child-local",
+            originId = "known-child-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "known child",
+            thread = ThreadRef(ThreadId.require("known-child"), ThreadId.require("current-session")),
+        )
+        database.messageDao().saveDraft(ACCOUNT, PEER, "", "keep draft")
+        val beforeMessages = store.messages(ACCOUNT)
+        val beforeSession = database.messageDao().directThreadSession(ACCOUNT, PEER)
+        val invalidThreads = listOf(
+            ThreadRef(ThreadId.require("known-child")) to null,
+            ThreadRef(ThreadId.require("known-child"), ThreadId.require("wrong-parent")) to null,
+            ThreadRef(ThreadId.require("new-child"), ThreadId.require("unknown-parent")) to null,
+            ThreadRef(ThreadId.require("reply-child"), ThreadId.require("unknown-parent")) to "reply-wire-id",
+        )
+
+        invalidThreads.forEachIndexed { index, (invalid, replyToId) ->
+            assertSuspendFailure<IllegalArgumentException> {
+                store.composeDirectDraft(
+                    accountId = ACCOUNT,
+                    operationId = "invalid-$index-wire",
+                    localMessageId = "invalid-$index-local",
+                    originId = "invalid-$index-origin",
+                    peerJid = PEER,
+                    senderJid = SELF,
+                    body = "invalid",
+                    thread = invalid,
+                    replyToId = replyToId,
+                    replyToJid = replyToId?.let { PEER },
+                    replyFallbackBody = replyToId?.let { "unknown root" },
+                )
+            }
+        }
+
+        assertEquals(beforeMessages, store.messages(ACCOUNT))
+        assertEquals(beforeSession, database.messageDao().directThreadSession(ACCOUNT, PEER))
+        assertEquals("keep draft", database.messageDao().draft(ACCOUNT, PEER, "")?.body)
+        assertTrue(store.pendingOutbound(ACCOUNT).all { it.localMessageId == "known-child-local" })
+    }
+
+    @Test
+    fun conflictingParentReplayRejectsWithoutConsumingEitherLineageDraft() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(incoming(localId = "current", threadId = "current-session"))
+        val original = ThreadRef(ThreadId.require("replayed-child"), ThreadId.require("current-session"))
+        val conflicting = ThreadRef(ThreadId.require("replayed-child"), ThreadId.require("wrong-parent"))
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "replayed-child-wire",
+            localMessageId = "replayed-child-local",
+            originId = "replayed-child-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "child request",
+            thread = original,
+        )
+        database.messageDao().saveDraft(ACCOUNT, PEER, original.draftKey(), "original draft")
+        database.messageDao().saveDraft(ACCOUNT, PEER, conflicting.draftKey(), "conflicting draft")
+        val beforeMessages = store.messages(ACCOUNT)
+        val beforeOutboxes = store.outboxes(ACCOUNT)
+        val beforeSession = database.messageDao().directThreadSession(ACCOUNT, PEER)
+
+        assertSuspendFailure<IllegalArgumentException> {
+            store.composeDirectDraft(
+                accountId = ACCOUNT,
+                operationId = "replayed-child-wire",
+                localMessageId = "replayed-child-local",
+                originId = "replayed-child-origin",
+                peerJid = PEER,
+                senderJid = SELF,
+                body = "child request",
+                thread = conflicting,
+            )
+        }
+
+        assertEquals(beforeMessages, store.messages(ACCOUNT))
+        assertEquals(beforeOutboxes, store.outboxes(ACCOUNT))
+        assertEquals(beforeSession, database.messageDao().directThreadSession(ACCOUNT, PEER))
+        assertEquals("original draft", database.messageDao().draft(ACCOUNT, PEER, original.draftKey())?.body)
+        assertEquals("conflicting draft", database.messageDao().draft(ACCOUNT, PEER, conflicting.draftKey())?.body)
+    }
+
+    @Test
+    fun exactOperationReplayNeverMutatesNewerDrafts() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(incoming(localId = "current", threadId = "current-session"))
+        val original = ThreadRef(ThreadId.require("replay-child"), ThreadId.require("current-session"))
+        val other = ThreadRef(ThreadId.require("other-child"), ThreadId.require("current-session"))
+        val existing = requireNotNull(
+            store.composeDirectDraft(
+                accountId = ACCOUNT,
+                operationId = "replay-wire",
+                localMessageId = "replay-local",
+                originId = "replay-origin",
+                peerJid = PEER,
+                senderJid = SELF,
+                body = "sent body",
+                thread = original,
+            ),
+        )
+        database.messageDao().saveDraft(ACCOUNT, PEER, original.draftKey(), "newer original draft")
+        database.messageDao().saveDraft(ACCOUNT, PEER, other.draftKey(), "newer other draft")
+
+        val originalReplay = store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "replay-wire",
+            localMessageId = "replay-local",
+            originId = "replay-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "sent body",
+            thread = original,
+            draftThread = original,
+        )
+
+        assertEquals(existing, originalReplay)
+        assertEquals("newer original draft", database.messageDao().draft(ACCOUNT, PEER, original.draftKey())?.body)
+        assertEquals("newer other draft", database.messageDao().draft(ACCOUNT, PEER, other.draftKey())?.body)
+
+        val otherReplay = store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "replay-wire",
+            localMessageId = "replay-local",
+            originId = "replay-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "sent body",
+            thread = original,
+            draftThread = other,
+        )
+
+        assertEquals(existing, otherReplay)
+        assertEquals("newer original draft", database.messageDao().draft(ACCOUNT, PEER, original.draftKey())?.body)
+        assertEquals("newer other draft", database.messageDao().draft(ACCOUNT, PEER, other.draftKey())?.body)
+    }
+
+    @Test
+    fun directSessionsRemainIsolatedByAccountAndPeerAcrossRestart() = runBlocking {
+        addAccount(OTHER_ACCOUNT)
+        val otherPeer = "other-peer@example.org"
+        var store = MessageStore(database)
+        store.ingest(incoming(localId = "primary", threadId = "primary-session"))
+        store.ingest(incoming(localId = "other-peer", peerJid = otherPeer, threadId = "peer-session"))
+        store.ingest(
+            incoming(
+                accountId = OTHER_ACCOUNT,
+                localId = "other-account",
+                peerJid = PEER,
+                sender = PEER,
+                threadId = "account-session",
+            ),
+        )
+        store = reopenStore()
+
+        assertEquals("primary-session", database.messageDao().directThreadSession(ACCOUNT, PEER)?.threadId)
+        assertEquals("peer-session", database.messageDao().directThreadSession(ACCOUNT, otherPeer)?.threadId)
+        assertEquals("account-session", database.messageDao().directThreadSession(OTHER_ACCOUNT, PEER)?.threadId)
+        assertEquals(3, store.messages(ACCOUNT).size + store.messages(OTHER_ACCOUNT).size)
+    }
+
+    @Test
     fun threadDraftSendPersistsExactLineageWithoutConsumingConversationDraft() = runBlocking {
         val thread = ThreadRef(ThreadId.require("child-thread"), ThreadId.require("parent-thread"))
         database.messageDao().saveDraft(ACCOUNT, PEER, "", "conversation draft")
         database.messageDao().saveDraft(ACCOUNT, PEER, thread.draftKey(), "thread draft")
 
         var store = MessageStore(database)
+        store.ingest(incoming(localId = "parent-message", threadId = "parent-thread"))
         store.composeDirectDraft(
             accountId = ACCOUNT,
             operationId = "operation-thread",
@@ -716,7 +1257,7 @@ class MessageStoreTest {
         )
         store = reopenStore()
 
-        val message = store.messages(ACCOUNT).single()
+        val message = store.messages(ACCOUNT).single { it.localMessageId == "message-identity" }
         val pending = store.pendingOutbound(ACCOUNT).single()
         assertEquals("child-thread", message.threadId)
         assertEquals("parent-thread", message.parentThreadId)
@@ -2484,16 +3025,15 @@ class MessageStoreTest {
         assertEquals(ArchivePageStatus.APPLIED, populatedRoot.status)
         assertEquals(null, store.messages(ACCOUNT).last().parentThreadId)
         assertNull(database.messageDao().thread(ACCOUNT, PEER, MessageKind.CHAT, "different-root"))
-        assertSuspendFailure<IllegalArgumentException> {
-            store.ingest(
-                incoming(
-                    localId = "missing-parent-live",
-                    body = "live omission",
-                    threadId = "child",
-                ),
-            )
-        }
-        assertEquals(6, store.messages(ACCOUNT).size)
+        store.ingest(
+            incoming(
+                localId = "missing-parent-live",
+                body = "live omission",
+                threadId = "child",
+            ),
+        )
+        assertEquals("root", store.messages(ACCOUNT).last().parentThreadId)
+        assertEquals(7, store.messages(ACCOUNT).size)
         assertSuspendFailure<IllegalArgumentException> {
             store.compose(
                 outbound("missing-parent").copy(
@@ -2503,7 +3043,7 @@ class MessageStoreTest {
             )
         }
         assertNull(store.outbox(ACCOUNT, "operation-missing-parent"))
-        assertEquals(6, store.messages(ACCOUNT).size)
+        assertEquals(7, store.messages(ACCOUNT).size)
         assertSuspendFailure<IllegalArgumentException> {
             store.ingest(
                 incoming(

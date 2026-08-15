@@ -5,6 +5,58 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 internal object MessageSchema {
+    val MIGRATION_13_14: Migration = object : Migration(13, 14) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "ALTER TABLE messages ADD COLUMN directSessionTransitionApplied INTEGER NOT NULL DEFAULT 0",
+            )
+        }
+    }
+
+    val MIGRATION_12_13: Migration = object : Migration(12, 13) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS direct_thread_sessions (
+                    accountId TEXT NOT NULL,
+                    peerJid TEXT NOT NULL,
+                    messageKind TEXT NOT NULL,
+                    threadId TEXT NOT NULL,
+                    PRIMARY KEY(accountId, peerJid),
+                    FOREIGN KEY(accountId, peerJid)
+                        REFERENCES peers(accountId, jid)
+                        ON UPDATE NO ACTION ON DELETE CASCADE,
+                    FOREIGN KEY(accountId, peerJid, messageKind, threadId)
+                        REFERENCES message_threads(accountId, peerJid, messageKind, threadId)
+                        ON UPDATE NO ACTION ON DELETE RESTRICT
+                )
+                """.trimIndent(),
+            )
+            db.execSQL(
+                """
+                CREATE INDEX IF NOT EXISTS
+                    index_direct_thread_sessions_accountId_peerJid_messageKind_threadId
+                ON direct_thread_sessions(accountId, peerJid, messageKind, threadId)
+                """.trimIndent(),
+            )
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS message_thread_titles (
+                    accountId TEXT NOT NULL,
+                    peerJid TEXT NOT NULL,
+                    messageKind TEXT NOT NULL,
+                    threadId TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    PRIMARY KEY(accountId, peerJid, messageKind, threadId),
+                    FOREIGN KEY(accountId, peerJid, messageKind, threadId)
+                        REFERENCES message_threads(accountId, peerJid, messageKind, threadId)
+                        ON UPDATE NO ACTION ON DELETE CASCADE
+                )
+                """.trimIndent(),
+            )
+        }
+    }
+
     val MIGRATION_11_12: Migration = object : Migration(11, 12) {
         override fun migrate(db: SupportSQLiteDatabase) {
             db.execSQL("ALTER TABLE messages ADD COLUMN replaceId TEXT")

@@ -12,7 +12,10 @@ import androidx.room.Upsert
 import androidx.room.withTransaction
 import kotlinx.coroutines.flow.Flow
 import org.thanosapollo.nema.thread.MessageKind
+import org.thanosapollo.nema.thread.ThreadId
+import org.thanosapollo.nema.thread.ThreadIdFactory
 import org.thanosapollo.nema.thread.ThreadRef
+import org.thanosapollo.nema.thread.UuidThreadIdFactory
 import org.thanosapollo.nema.thread.draftKey
 import org.thanosapollo.nema.xmpp.transport.MessageTimeSource
 import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
@@ -179,6 +182,53 @@ abstract class MessageDao {
         threadId: String,
     ): MessageThreadEntity?
 
+    @Upsert
+    abstract suspend fun saveDirectThreadSession(session: DirectThreadSessionEntity)
+
+    @Query(
+        """
+        SELECT * FROM direct_thread_sessions
+        WHERE accountId = :accountId AND peerJid = :peerJid
+        """,
+    )
+    abstract suspend fun directThreadSession(accountId: String, peerJid: String): DirectThreadSessionEntity?
+
+    @Query(
+        """
+        SELECT * FROM direct_thread_sessions
+        WHERE accountId = :accountId AND peerJid = :peerJid
+        """,
+    )
+    abstract fun observeDirectThreadSession(accountId: String, peerJid: String): Flow<DirectThreadSessionEntity?>
+
+    @Query("DELETE FROM direct_thread_sessions WHERE accountId = :accountId AND peerJid = :peerJid")
+    abstract suspend fun deleteDirectThreadSession(accountId: String, peerJid: String): Int
+
+    @Upsert
+    abstract suspend fun saveThreadTitle(title: MessageThreadTitleEntity)
+
+    @Query(
+        """
+        SELECT * FROM message_thread_titles
+        WHERE accountId = :accountId AND peerJid = :peerJid
+        """,
+    )
+    abstract fun observeThreadTitles(accountId: String, peerJid: String): Flow<List<MessageThreadTitleEntity>>
+
+    @Query(
+        """
+        DELETE FROM message_thread_titles
+        WHERE accountId = :accountId AND peerJid = :peerJid
+          AND messageKind = :messageKind AND threadId = :threadId
+        """,
+    )
+    abstract suspend fun deleteThreadTitle(
+        accountId: String,
+        peerJid: String,
+        messageKind: MessageKind,
+        threadId: String,
+    ): Int
+
     @Query(
         """
         SELECT EXISTS(SELECT 1 FROM messages
@@ -201,6 +251,11 @@ abstract class MessageDao {
           AND parentThreadId IS NULL
           AND NOT EXISTS (
             SELECT 1 FROM messages
+            WHERE accountId = :accountId AND peerJid = :peerJid
+              AND messageKind = :messageKind AND threadId = :threadId
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM direct_thread_sessions
             WHERE accountId = :accountId AND peerJid = :peerJid
               AND messageKind = :messageKind AND threadId = :threadId
           )
@@ -1270,10 +1325,23 @@ class MessageStore private constructor(
     private val database: NemaDatabase,
     private val writeBoundary: (MessageWriteBoundary) -> Unit,
     private val clock: () -> Long,
+    private val threadIds: ThreadIdFactory,
 ) {
-    constructor(database: NemaDatabase) : this(database, {}, System::currentTimeMillis)
+    constructor(database: NemaDatabase) : this(database, {}, System::currentTimeMillis, UuidThreadIdFactory)
 
-    internal constructor(database: NemaDatabase, clock: () -> Long) : this(database, {}, clock)
+    internal constructor(database: NemaDatabase, clock: () -> Long) :
+        this(database, {}, clock, UuidThreadIdFactory)
+
+    internal constructor(database: NemaDatabase, clock: () -> Long, threadIds: ThreadIdFactory) :
+        this(database, {}, clock, threadIds)
+
+    suspend fun ensureDirectThreadSession(accountId: String, peerJid: String): ThreadRef =
+        database.withTransaction {
+            val dao = database.messageDao()
+            ensureScope(accountId, peerJid, MessageKind.CHAT, null, null, false)
+            validDirectThreadSession(dao, accountId, peerJid)
+                ?: createDirectThreadSession(dao, accountId, peerJid)
+        }
 
     suspend fun compose(intent: OutboundIntent): OutboxEntity = database.withTransaction {
         composeInTransaction(intent)
@@ -1348,6 +1416,45 @@ class MessageStore private constructor(
         } else {
             replyFallbackSender ?: replyToJid?.substringAfterLast('/')?.substringBefore('@') ?: "message"
         }
+        val effectiveThread = if (messageKind == MessageKind.CHAT) {
+            val existingThread = dao.outbox(accountId, operationId)
+                ?.let { dao.message(accountId, it.messageId) }
+                ?.threadRef()
+            when {
+                existingThread == null -> prepareDirectOutgoingThread(
+                    dao = dao,
+                    accountId = accountId,
+                    peerJid = peerJid,
+                    requested = thread,
+                )
+                thread == null || thread == existingThread -> existingThread
+                else -> throw IllegalArgumentException("Operation ID identifies different thread lineage")
+            }
+        } else {
+            thread
+        }
+        val intent = OutboundIntent(
+            accountId = accountId,
+            operationId = operationId,
+            localMessageId = localMessageId,
+            originId = originId,
+            peerJid = peerJid,
+            senderJid = senderJid,
+            messageKind = messageKind,
+            threadId = effectiveThread?.id?.value,
+            parentThreadId = effectiveThread?.parentId?.value,
+            body = body,
+            attachmentUrl = attachmentUrl,
+            attachmentName = attachmentName,
+            attachmentMime = attachmentMime,
+            attachmentSize = attachmentSize,
+            replyToId = replyToId,
+            replyToJid = replyToJid,
+            replyFallbackBody = replyFallbackBody,
+            replaceId = replaceId,
+            correctionTargetMessageId = correctionTargetMessageId,
+        )
+        existingOutboxForIntent(dao, intent)?.let { return@withTransaction it }
         if (replaceId == null) {
             dao.saveDraft(
                 accountId,
@@ -1360,29 +1467,7 @@ class MessageStore private constructor(
                 durableReplySender,
             )
         }
-        val outbox = composeInTransaction(
-            OutboundIntent(
-                accountId = accountId,
-                operationId = operationId,
-                localMessageId = localMessageId,
-                originId = originId,
-                peerJid = peerJid,
-                senderJid = senderJid,
-                messageKind = messageKind,
-                threadId = thread?.id?.value,
-                parentThreadId = thread?.parentId?.value,
-                body = body,
-                attachmentUrl = attachmentUrl,
-                attachmentName = attachmentName,
-                attachmentMime = attachmentMime,
-                attachmentSize = attachmentSize,
-                replyToId = replyToId,
-                replyToJid = replyToJid,
-                replyFallbackBody = replyFallbackBody,
-                replaceId = replaceId,
-                correctionTargetMessageId = correctionTargetMessageId,
-            ),
-        )
+        val outbox = composeInTransaction(intent)
         if (replaceId == null) {
             check(dao.deleteDraft(accountId, peerJid, threadKey) == 1) {
                 "Direct draft changed during send transaction"
@@ -1393,13 +1478,7 @@ class MessageStore private constructor(
 
     private suspend fun composeInTransaction(intent: OutboundIntent): OutboxEntity {
         val dao = database.messageDao()
-        dao.outbox(intent.accountId, intent.operationId)?.let { existing ->
-            val message = requireNotNull(dao.message(intent.accountId, existing.messageId))
-            require(existing.originId == intent.originId && message.matches(intent)) {
-                "Operation ID identifies different outbound intent"
-            }
-            return existing
-        }
+        existingOutboxForIntent(dao, intent)?.let { return it }
         require(dao.outboxByOrigin(intent.accountId, intent.originId) == null) {
             "Origin ID already identifies another outbound intent"
         }
@@ -1476,6 +1555,14 @@ class MessageStore private constructor(
         }
     }
 
+    private suspend fun existingOutboxForIntent(dao: MessageDao, intent: OutboundIntent): OutboxEntity? =
+        dao.outbox(intent.accountId, intent.operationId)?.also { existing ->
+            val message = requireNotNull(dao.message(intent.accountId, existing.messageId))
+            require(existing.originId == intent.originId && message.matches(intent)) {
+                "Operation ID identifies different outbound intent"
+            }
+        }
+
     suspend fun ingest(incoming: IncomingMessage): IngestionResult = database.withTransaction {
         val position = incoming.archivePosition()
         val result = ingestInTransaction(incoming.withoutArchivePosition())
@@ -1486,19 +1573,23 @@ class MessageStore private constructor(
     private suspend fun ingestInTransaction(
         received: IncomingMessage,
         preserveStoredThreadLineage: Boolean = false,
+        allowDirectSessionTransition: Boolean = true,
     ): IngestionResult {
+        val dao = database.messageDao()
         val timed = received.withStoredTime(clock)
+        val inheritedParent = timed.threadId
+            ?.takeIf { timed.parentThreadId == null }
+            ?.let { dao.thread(timed.accountId, timed.peerJid, timed.messageKind, it)?.parentThreadId }
         val incoming = timed.copy(
             parentThreadId = ensureScope(
                 accountId = timed.accountId,
                 peerJid = timed.peerJid,
                 messageKind = timed.messageKind,
                 threadId = timed.threadId,
-                parentThreadId = timed.parentThreadId,
+                parentThreadId = timed.parentThreadId ?: inheritedParent,
                 preserveStoredThreadLineage = preserveStoredThreadLineage,
             ),
         )
-        val dao = database.messageDao()
         val existingLocal = dao.message(incoming.accountId, incoming.localMessageId)
         require(existingLocal == null || existingLocal.isCompatibleWith(incoming)) {
             "Local message ID identifies incompatible content"
@@ -1572,6 +1663,15 @@ class MessageStore private constructor(
 
         confirmMatchingOutbox(incoming, winner.localMessageId)
         writeBoundary(MessageWriteBoundary.AFTER_OUTBOX)
+        if (allowDirectSessionTransition &&
+            incoming.messageKind == MessageKind.CHAT &&
+            incoming.sentTimeSource != MessageTimeSource.MAM &&
+            !winner.directSessionTransitionApplied
+        ) {
+            reconcileDirectThreadSession(dao, incoming)
+            winner = winner.copy(directSessionTransitionApplied = true)
+            dao.updateMessage(winner)
+        }
         return IngestionResult(winner.localMessageId, mergedRows, identityConflict)
     }
 
@@ -1987,6 +2087,7 @@ class MessageStore private constructor(
             val result = ingestInTransaction(
                 message.withoutArchivePosition().copy(aliases = aliases),
                 preserveStoredThreadLineage = true,
+                allowDirectSessionTransition = false,
             )
             if (result.identityConflict) {
                 throw ArchivePageRejectedException("Archive page contains conflicting identity evidence")
@@ -2213,7 +2314,12 @@ class MessageStore private constructor(
         val withArchive = if (winner.archiveOrdinal == null && loser.archiveOrdinal != null) {
             winner.copy(archiveOrdinal = loser.archiveOrdinal)
         } else winner
-        val reconciled = withArchive.withPreferredTime(loser.sentAtEpochMs, loser.sentTimeSource)
+        val withTransition = if (loser.directSessionTransitionApplied) {
+            withArchive.copy(directSessionTransitionApplied = true)
+        } else {
+            withArchive
+        }
+        val reconciled = withTransition.withPreferredTime(loser.sentAtEpochMs, loser.sentTimeSource)
         if (reconciled != winner) dao.updateMessage(reconciled)
         return reconciled
     }
@@ -2333,6 +2439,94 @@ class MessageStore private constructor(
         return current
     }
 
+    private suspend fun prepareDirectOutgoingThread(
+        dao: MessageDao,
+        accountId: String,
+        peerJid: String,
+        requested: ThreadRef?,
+    ): ThreadRef {
+        ensureScope(accountId, peerJid, MessageKind.CHAT, null, null, false)
+        val current = validDirectThreadSession(dao, accountId, peerJid)
+        if (requested == null) return current ?: createDirectThreadSession(dao, accountId, peerJid)
+
+        val existing = dao.thread(accountId, peerJid, MessageKind.CHAT, requested.id.value)
+        if (requested.parentId != null) {
+            if (existing != null) {
+                require(existing.parentThreadId == requested.parentId.value) { "Thread lineage conflict" }
+            } else {
+                val parent = dao.thread(accountId, peerJid, MessageKind.CHAT, requested.parentId.value)
+                require(parent != null) { "New child thread requires known parent" }
+            }
+            return requested
+        }
+        if (existing != null) {
+            require(existing.parentThreadId == null) { "Child thread requires exact parent lineage" }
+            commitDirectThreadSession(dao, accountId, peerJid, requested.id.value)
+            return requested
+        }
+        val parent = current ?: createDirectThreadSession(dao, accountId, peerJid)
+        return ThreadRef(requested.id, parent.id)
+    }
+
+    private suspend fun reconcileDirectThreadSession(dao: MessageDao, incoming: IncomingMessage) {
+        if (incoming.messageKind != MessageKind.CHAT) return
+        validDirectThreadSession(dao, incoming.accountId, incoming.peerJid)
+        if (incoming.sentTimeSource == MessageTimeSource.MAM) return
+        when {
+            incoming.threadId == null -> createDirectThreadSession(dao, incoming.accountId, incoming.peerJid)
+            incoming.parentThreadId == null -> {
+                val thread = dao.thread(
+                    incoming.accountId,
+                    incoming.peerJid,
+                    MessageKind.CHAT,
+                    incoming.threadId,
+                )
+                if (thread?.parentThreadId == null) {
+                    commitDirectThreadSession(dao, incoming.accountId, incoming.peerJid, incoming.threadId)
+                }
+            }
+        }
+    }
+
+    private suspend fun validDirectThreadSession(
+        dao: MessageDao,
+        accountId: String,
+        peerJid: String,
+    ): ThreadRef? {
+        val session = dao.directThreadSession(accountId, peerJid) ?: return null
+        val thread = dao.thread(accountId, peerJid, MessageKind.CHAT, session.threadId)
+        if (session.messageKind == MessageKind.CHAT && thread?.parentThreadId == null) {
+            return ThreadRef(ThreadId.require(session.threadId))
+        }
+        dao.deleteDirectThreadSession(accountId, peerJid)
+        return null
+    }
+
+    private suspend fun createDirectThreadSession(
+        dao: MessageDao,
+        accountId: String,
+        peerJid: String,
+    ): ThreadRef {
+        val id = threadIds.create()
+        require(dao.thread(accountId, peerJid, MessageKind.CHAT, id.value) == null) {
+            "Generated direct session ID already exists"
+        }
+        ensureScope(accountId, peerJid, MessageKind.CHAT, id.value, null, false)
+        commitDirectThreadSession(dao, accountId, peerJid, id.value)
+        return ThreadRef(id)
+    }
+
+    private suspend fun commitDirectThreadSession(
+        dao: MessageDao,
+        accountId: String,
+        peerJid: String,
+        threadId: String,
+    ) {
+        val thread = requireNotNull(dao.thread(accountId, peerJid, MessageKind.CHAT, threadId))
+        require(thread.parentThreadId == null) { "Direct session must be top-level" }
+        dao.saveDirectThreadSession(DirectThreadSessionEntity(accountId, peerJid, threadId = threadId))
+    }
+
     private suspend fun ensureScope(
         accountId: String,
         peerJid: String,
@@ -2364,7 +2558,11 @@ class MessageStore private constructor(
         }
         if (preserveStoredThreadLineage && existing.parentThreadId != null) return existing.parentThreadId
         if (existing.parentThreadId == null) {
-            if (preserveStoredThreadLineage && dao.threadHasMessages(accountId, peerJid, messageKind, threadId)) {
+            val currentDirectSession = messageKind == MessageKind.CHAT &&
+                dao.directThreadSession(accountId, peerJid)?.threadId == threadId
+            if (preserveStoredThreadLineage &&
+                (currentDirectSession || dao.threadHasMessages(accountId, peerJid, messageKind, threadId))
+            ) {
                 return null
             }
             insertParentPlaceholder(dao, accountId, peerJid, messageKind, parentThreadId)
@@ -2393,9 +2591,17 @@ class MessageStore private constructor(
 
         internal fun observingWrites(
             database: NemaDatabase,
+            threadIds: ThreadIdFactory = UuidThreadIdFactory,
             observer: (MessageWriteBoundary) -> Unit,
-        ): MessageStore = MessageStore(database, observer, System::currentTimeMillis)
+        ): MessageStore = MessageStore(database, observer, System::currentTimeMillis, threadIds)
     }
+}
+
+private fun MessageEntity.threadRef(): ThreadRef? = threadId?.let {
+    ThreadRef(
+        id = ThreadId.require(it),
+        parentId = parentThreadId?.let(ThreadId::require),
+    )
 }
 
 private fun IncomingMessage.toEntity(localSequence: Long) = MessageEntity(

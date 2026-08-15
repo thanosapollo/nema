@@ -414,7 +414,349 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
-    fun rootAwareProjectionCollapsesOverviewAndPrependsRootToExactThread() = runBlocking {
+    fun childWithoutReplyMetadataKeepsOwnRootAndCollapsesOnlyReplies() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(incoming(ACCOUNT, "parent", "main session", threadId = "session"))
+        store.ingest(
+            incoming(
+                ACCOUNT,
+                "child-root",
+                "A dedicated child topic",
+                threadId = "child",
+                parentThreadId = "session",
+            ),
+        )
+        val repository = ChatRepository(database)
+        val child = ThreadRef(ThreadId.require("child"), ThreadId.require("session"))
+        val rootOnlyOverview = repository.observeTimeline(ACCOUNT, PEER).first()
+        assertEquals(0, rootOnlyOverview.last().threadSummaries.single().replyCount)
+        store.ingest(
+            incoming(
+                ACCOUNT,
+                "child-reply",
+                "reply",
+                threadId = "child",
+                parentThreadId = "session",
+            ),
+        )
+
+        val overview = repository.observeTimeline(ACCOUNT, PEER).first()
+        val dedicated = repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER, child)).first()
+
+        assertEquals(listOf("parent", "child-root"), overview.map(TimelineMessage::id))
+        assertEquals(1, overview.last().threadSummaries.single().replyCount)
+        assertEquals(child, overview.last().threadSummaries.single().thread)
+        assertEquals(listOf("child-root", "child-reply"), dedicated.map(TimelineMessage::id))
+    }
+
+    @Test
+    fun presenterParentsNewTopicsToObservedDirectSession() = runBlocking {
+        val repository = ChatRepository(database)
+        MessageStore(database).ingest(incoming(ACCOUNT, "session-message", "main", threadId = "session"))
+        val sent = mutableListOf<DraftSnapshot>()
+        val ids = ArrayDeque(listOf("opened-child", "quick-child"))
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = repository,
+            scope = scope,
+            enqueue = { _, snapshot -> sent += snapshot; true },
+            threadingPolicy = ThreadingPolicy { ThreadId.require(ids.removeFirst()) },
+        )
+        assertTrue(presenter.selectPeer(PEER))
+        presenter.state.first { it.currentSession?.id?.value == "session" }
+
+        assertTrue(presenter.startNewThread())
+        val opened = presenter.state.first { it.selectedThread?.id?.value == "opened-child" }
+        assertEquals("session", opened.selectedThread?.parentId?.value)
+        presenter.closeThread()
+        presenter.state.first { it.selectedThread == null }
+        assertTrue(presenter.sendDraftAsNewThread(snapshot(ACCOUNT, PEER, "quick topic")).await())
+        assertEquals("session", sent.single().outboundThread?.parentId?.value)
+        presenter.close()
+    }
+
+    @Test
+    fun presenterReservesDirectSessionBeforeOpeningFirstChildThread() = runBlocking {
+        val repository = ChatRepository(database)
+        val store = MessageStore(database)
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = repository,
+            scope = scope,
+            enqueue = { _, _ -> true },
+            threadingPolicy = ThreadingPolicy { ThreadId.require("first-child") },
+        )
+        assertTrue(presenter.selectPeer(PEER))
+
+        assertTrue(presenter.startNewThread())
+
+        val opened = presenter.state.first { it.selectedThread?.id?.value == "first-child" }
+        val session = requireNotNull(opened.currentSession)
+        assertEquals(session.id, opened.selectedThread?.parentId)
+        val outbox = store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "first-child-operation",
+            localMessageId = "first-child-message",
+            originId = "first-child-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "first child body",
+            thread = opened.selectedThread,
+        )
+        assertTrue(outbox != null)
+        assertEquals(opened.selectedThread, store.messages(ACCOUNT).single().let {
+            ThreadRef(
+                ThreadId.require(requireNotNull(it.threadId)),
+                ThreadId.require(requireNotNull(it.parentThreadId)),
+            )
+        })
+        presenter.close()
+    }
+
+    @Test
+    fun roomTopicsIgnoreDirectSessionAndExposeOnlyRoomThreads() = runBlocking {
+        val repository = ChatRepository(database)
+        val store = MessageStore(database)
+        store.ingest(incoming(ACCOUNT, "direct-session", "direct", threadId = "shared-session"))
+        store.ingest(
+            incoming(ACCOUNT, "room-thread", "room topic", threadId = "room-session").copy(
+                senderJid = "$PEER/alice",
+                messageKind = MessageKind.GROUPCHAT,
+            ),
+        )
+        repository.markRoom(ACCOUNT, PEER)
+        val sent = mutableListOf<DraftSnapshot>()
+        val ids = ArrayDeque(listOf("opened-room-topic", "quick-room-topic"))
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = repository,
+            scope = scope,
+            enqueue = { _, snapshot -> sent += snapshot; true },
+            threadingPolicy = ThreadingPolicy { ThreadId.require(ids.removeFirst()) },
+        )
+
+        assertTrue(presenter.selectPeer(PEER))
+        val room = presenter.state.first { it.selectedPeerGroupChat && it.recentThreads.isNotEmpty() }
+        assertEquals(null, room.currentSession)
+        assertEquals(listOf(MessageKind.GROUPCHAT), room.recentThreads.map(RecentThread::messageKind))
+
+        assertTrue(presenter.startNewThread())
+        val opened = presenter.state.first { it.selectedThread?.id?.value == "opened-room-topic" }
+        assertEquals(null, opened.selectedThread?.parentId)
+        presenter.closeThread()
+        presenter.state.first { it.selectedThread == null }
+        assertTrue(
+            presenter.sendDraftAsNewThread(
+                snapshot(ACCOUNT, PEER, "quick room topic").copy(groupChat = true),
+            ).await(),
+        )
+        assertEquals(null, sent.single().outboundThread?.parentId)
+        presenter.close()
+    }
+
+    @Test
+    fun recentThreadsKeepLatestTenAndPersistCustomLocalTitle() = runBlocking {
+        val store = MessageStore(database)
+        repeat(12) { index ->
+            store.ingest(
+                incoming(
+                    ACCOUNT,
+                    "thread-$index-root",
+                    "Thread $index has a deliberately long title",
+                    threadId = "thread-$index",
+                    parentThreadId = "session-$index",
+                ),
+            )
+        }
+        var repository = ChatRepository(database)
+
+        var recent = repository.observeRecentThreads(ACCOUNT, PEER).first()
+        assertEquals(10, recent.size)
+        assertEquals("thread-11", recent.first().thread.id.value)
+        assertEquals("Thread 11 has a deli", recent.first().title)
+        assertTrue(
+            repository.renameThread(
+                ACCOUNT,
+                PEER,
+                recent.first().messageKind,
+                recent.first().thread,
+                "Hermes planning",
+            ),
+        )
+
+        database.close()
+        database = NemaDatabase.create(context, databaseName)
+        repository = ChatRepository(database)
+        recent = repository.observeRecentThreads(ACCOUNT, PEER).first()
+        assertEquals("Hermes planning", recent.first().title)
+        assertEquals("thread-2", recent.last().thread.id.value)
+    }
+
+    @Test
+    fun recentThreadsIncludeTopLevelSessionsAndIsolateKindTitles() = runBlocking {
+        val store = MessageStore(database)
+        val emojiTitle = "😀".repeat(21) + " tail"
+        store.ingest(incoming(ACCOUNT, "chat-root", emojiTitle, threadId = "shared"))
+        store.ingest(incoming(ACCOUNT, "chat-reply", "chat reply", threadId = "shared"))
+        store.ingest(
+            incoming(ACCOUNT, "room-root", "Room planning", threadId = "shared").copy(
+                senderJid = "$PEER/alice",
+                messageKind = MessageKind.GROUPCHAT,
+            ),
+        )
+        store.ingest(
+            incoming(ACCOUNT, "room-reply", "room reply", threadId = "shared").copy(
+                senderJid = "$PEER/bob",
+                messageKind = MessageKind.GROUPCHAT,
+            ),
+        )
+        val repository = ChatRepository(database)
+
+        var recent = repository.observeRecentThreads(ACCOUNT, PEER).first()
+        val direct = recent.single { it.messageKind == MessageKind.CHAT }
+        val room = recent.single { it.messageKind == MessageKind.GROUPCHAT }
+        assertEquals("😀".repeat(20), direct.title)
+        assertEquals("Room planning", room.title)
+        assertEquals(1, direct.replyCount)
+        assertEquals(1, room.replyCount)
+        assertTrue(repository.renameThread(ACCOUNT, PEER, MessageKind.CHAT, direct.thread, "Direct session"))
+
+        recent = repository.observeRecentThreads(ACCOUNT, PEER).first()
+        assertEquals("Direct session", recent.single { it.messageKind == MessageKind.CHAT }.title)
+        assertEquals("Room planning", recent.single { it.messageKind == MessageKind.GROUPCHAT }.title)
+    }
+
+    @Test
+    fun recentThreadsApplyTenItemLimitIndependentlyPerMessageKind() = runBlocking {
+        val store = MessageStore(database)
+        repeat(12) { index ->
+            store.ingest(incoming(ACCOUNT, "chat-$index", "chat $index", threadId = "chat-thread-$index"))
+            store.ingest(
+                incoming(ACCOUNT, "room-$index", "room $index", threadId = "room-thread-$index").copy(
+                    senderJid = "$PEER/alice",
+                    messageKind = MessageKind.GROUPCHAT,
+                ),
+            )
+        }
+
+        val recent = ChatRepository(database).observeRecentThreads(ACCOUNT, PEER).first()
+
+        assertEquals(10, recent.count { it.messageKind == MessageKind.CHAT })
+        assertEquals(10, recent.count { it.messageKind == MessageKind.GROUPCHAT })
+        assertEquals("chat-thread-11", recent.first { it.messageKind == MessageKind.CHAT }.thread.id.value)
+        assertEquals("room-thread-11", recent.first { it.messageKind == MessageKind.GROUPCHAT }.thread.id.value)
+    }
+
+    @Test
+    fun directSessionStaysInOverviewWhileChildFromLegacyRootGetsSummary() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(
+            incoming(ACCOUNT, "legacy-root", "legacy root").copy(
+                aliases = listOf(TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "legacy-wire")),
+            ),
+        )
+        val repository = ChatRepository(database)
+        val session = requireNotNull(repository.observeCurrentSession(ACCOUNT, PEER).first())
+        store.ingest(
+            incoming(ACCOUNT, "session-member", "ordinary session", threadId = session.id.value).copy(
+                replyToId = "legacy-wire",
+                replyToJid = PEER,
+            ),
+        )
+        val child = ThreadRef(ThreadId.require("legacy-child"), session.id)
+        store.ingest(
+            incoming(
+                ACCOUNT,
+                "child-member",
+                "child answer",
+                threadId = child.id.value,
+                parentThreadId = session.id.value,
+            ).copy(
+                replyToId = "legacy-wire",
+                replyToJid = PEER,
+            ),
+        )
+
+        val overview = repository.observeTimeline(ACCOUNT, PEER).first()
+        val focused = repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER, child)).first()
+
+        assertEquals(listOf("legacy-root", "session-member"), overview.map(TimelineMessage::id))
+        assertEquals(child, overview.first().threadSummaries.single().thread)
+        assertEquals(listOf("child-member"), focused.map(TimelineMessage::id))
+    }
+
+    @Test
+    fun recentChildUsesExternalRootTitleAndCountsEveryReply() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(
+            incoming(ACCOUNT, "recent-root", "External root title").copy(
+                aliases = listOf(
+                    TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "recent-root-wire"),
+                ),
+            ),
+        )
+        val repository = ChatRepository(database)
+        val session = requireNotNull(repository.observeCurrentSession(ACCOUNT, PEER).first())
+        val child = ThreadRef(ThreadId.require("recent-child"), session.id)
+        store.ingest(
+            incoming(
+                ACCOUNT,
+                "recent-child-first",
+                "first answer",
+                threadId = child.id.value,
+                parentThreadId = session.id.value,
+            ).copy(
+                replyToId = "recent-root-wire",
+                replyToJid = PEER,
+            ),
+        )
+        store.ingest(
+            incoming(
+                ACCOUNT,
+                "recent-child-second",
+                "second answer",
+                threadId = child.id.value,
+                parentThreadId = session.id.value,
+            ),
+        )
+        store.ingest(incoming(ACCOUNT, "new-session-root", "new session root"))
+        val rotatedSession = requireNotNull(repository.observeCurrentSession(ACCOUNT, PEER).first())
+        assertTrue(rotatedSession != session)
+
+        val recent = repository.observeRecentThreads(ACCOUNT, PEER).first().single { it.thread == child }
+        val summary = repository.observeTimeline(ACCOUNT, PEER).first()
+            .single { it.id == "recent-root" }
+            .threadSummaries
+            .single { it.thread == child }
+
+        assertEquals("External root title", recent.title)
+        assertEquals(2, recent.replyCount)
+        assertEquals(2, summary.replyCount)
+    }
+
+    @Test
+    fun renameUsesStableThreadIdentityWhenReplyCountChanges() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(incoming(ACCOUNT, "rename-root", "rename root", threadId = "rename-thread"))
+        val repository = ChatRepository(database)
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = repository,
+            scope = scope,
+            enqueue = { _, _ -> true },
+        )
+        assertTrue(presenter.selectPeer(PEER))
+        val captured = presenter.state.first { it.recentThreads.isNotEmpty() }.recentThreads.single()
+        store.ingest(incoming(ACCOUNT, "rename-reply", "new reply", threadId = "rename-thread"))
+        presenter.state.first { it.recentThreads.single().replyCount == 1 }
+
+        assertTrue(presenter.renameThread(captured, "Stable title"))
+        presenter.state.first { it.recentThreads.single().title == "Stable title" }
+        presenter.close()
+    }
+
+    @Test
+    fun rootAwareProjectionCollapsesOverviewAndKeepsExactThreadMessages() = runBlocking {
         val store = MessageStore(database)
         store.ingest(
             incoming(ACCOUNT, "root", "root body").copy(
@@ -424,17 +766,32 @@ class ChatRepositoryPresenterTest {
                 ),
             ),
         )
+        val session = requireNotNull(ChatRepository(database).observeCurrentSession(ACCOUNT, PEER).first())
         store.ingest(
-            incoming(ACCOUNT, "thread-first", "first answer", threadId = "thread-a").copy(
+            incoming(
+                ACCOUNT,
+                "thread-first",
+                "first answer",
+                threadId = "thread-a",
+                parentThreadId = session.id.value,
+            ).copy(
                 replyToId = "root-message-id",
                 replyToJid = PEER,
                 replyFallbackBody = "> peer wrote:\n> root body\n",
             ),
         )
-        store.ingest(incoming(ACCOUNT, "thread-later", "latest answer", threadId = "thread-a"))
+        store.ingest(
+            incoming(
+                ACCOUNT,
+                "thread-later",
+                "latest answer",
+                threadId = "thread-a",
+                parentThreadId = session.id.value,
+            ),
+        )
         store.ingest(incoming(OTHER_ACCOUNT, "other-account", "hidden"))
         val repository = ChatRepository(database)
-        val thread = ThreadRef(ThreadId.require("thread-a"))
+        val thread = ThreadRef(ThreadId.require("thread-a"), session.id)
 
         val conversations = repository.observeConversations(ACCOUNT).first()
         val overview = repository.observeTimeline(ACCOUNT, PEER).first()
@@ -453,48 +810,62 @@ class ChatRepositoryPresenterTest {
             ),
             overview.single().threadSummaries,
         )
-        assertEquals(listOf("root", "thread-first", "thread-later"), dedicated.map(TimelineMessage::id))
-        assertTrue(dedicated.first().thread == null)
-        assertTrue(dedicated.first().threadSummaries.isEmpty())
-        assertEquals(thread, dedicated[1].thread)
-        assertEquals(thread, dedicated[2].thread)
+        assertEquals(listOf("thread-first", "thread-later"), dedicated.map(TimelineMessage::id))
+        assertTrue(dedicated.all { it.thread == thread })
 
         database.close()
         database = NemaDatabase.create(context, databaseName)
         val reopened = ChatRepository(database)
         assertEquals(listOf("root"), reopened.observeTimeline(ACCOUNT, PEER).first().map(TimelineMessage::id))
         assertEquals(
-            listOf("root", "thread-first", "thread-later"),
+            listOf("thread-first", "thread-later"),
             reopened.observeTimeline(DirectConversationKey(ACCOUNT, PEER, thread)).first().map(TimelineMessage::id),
         )
     }
 
     @Test
-    fun dedicatedProjectionPrependsBackfilledRootBeforeChronologicalMembers() = runBlocking {
+    fun dedicatedProjectionKeepsOnlyChronologicalThreadMembersAfterBackfill() = runBlocking {
         val store = MessageStore(database)
+        val session = store.ensureDirectThreadSession(ACCOUNT, PEER)
         store.ingest(
-            incoming(ACCOUNT, "thread-first", "first answer", threadId = "backfilled-thread").copy(
+            incoming(
+                ACCOUNT,
+                "thread-first",
+                "first answer",
+                threadId = "backfilled-thread",
+                parentThreadId = session.id.value,
+            ).copy(
                 replyToId = "backfilled-root-wire",
                 replyToJid = PEER,
             ),
         )
-        store.ingest(incoming(ACCOUNT, "thread-later", "later answer", threadId = "backfilled-thread"))
+        store.ingest(
+            incoming(
+                ACCOUNT,
+                "thread-later",
+                "later answer",
+                threadId = "backfilled-thread",
+                parentThreadId = session.id.value,
+            ),
+        )
         store.ingest(
             incoming(ACCOUNT, "backfilled-root", "root body").copy(
+                sentAtEpochMs = 1,
+                sentTimeSource = MessageTimeSource.MAM,
                 aliases = listOf(
                     TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "backfilled-root-wire"),
                 ),
             ),
         )
         val repository = ChatRepository(database)
-        val thread = ThreadRef(ThreadId.require("backfilled-thread"))
+        val thread = ThreadRef(ThreadId.require("backfilled-thread"), session.id)
 
         val overview = repository.observeTimeline(ACCOUNT, PEER).first()
         val dedicated = repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER, thread)).first()
 
         assertEquals(listOf("backfilled-root"), overview.map(TimelineMessage::id))
         assertEquals(
-            listOf("backfilled-root", "thread-first", "thread-later"),
+            listOf("thread-first", "thread-later"),
             dedicated.map(TimelineMessage::id),
         )
     }
@@ -512,20 +883,33 @@ class ChatRepositoryPresenterTest {
                 aliases = listOf(TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "later-wire")),
             ),
         )
+        val session = requireNotNull(ChatRepository(database).observeCurrentSession(ACCOUNT, PEER).first())
         store.ingest(
-            incoming(ACCOUNT, "thread-first", "first answer", threadId = "stable-thread").copy(
+            incoming(
+                ACCOUNT,
+                "thread-first",
+                "first answer",
+                threadId = "stable-thread",
+                parentThreadId = session.id.value,
+            ).copy(
                 replyToId = "first-wire",
                 replyToJid = PEER,
             ),
         )
         store.ingest(
-            incoming(ACCOUNT, "thread-later", "later answer", threadId = "stable-thread").copy(
+            incoming(
+                ACCOUNT,
+                "thread-later",
+                "later answer",
+                threadId = "stable-thread",
+                parentThreadId = session.id.value,
+            ).copy(
                 replyToId = "later-wire",
                 replyToJid = PEER,
             ),
         )
         val repository = ChatRepository(database)
-        val thread = ThreadRef(ThreadId.require("stable-thread"))
+        val thread = ThreadRef(ThreadId.require("stable-thread"), session.id)
 
         val overview = repository.observeTimeline(ACCOUNT, PEER).first()
         val dedicated = repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER, thread)).first()
@@ -533,7 +917,7 @@ class ChatRepositoryPresenterTest {
         assertEquals(listOf("first-root", "later-target"), overview.map(TimelineMessage::id))
         assertEquals(thread, overview.first().threadSummaries.single().thread)
         assertTrue(overview.last().threadSummaries.isEmpty())
-        assertEquals(listOf("first-root", "thread-first", "thread-later"), dedicated.map(TimelineMessage::id))
+        assertEquals(listOf("thread-first", "thread-later"), dedicated.map(TimelineMessage::id))
     }
 
     @Test
@@ -602,12 +986,13 @@ class ChatRepositoryPresenterTest {
         val parentView = repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER, parent)).first()
         val childView = repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER, child)).first()
 
-        assertEquals(listOf("root"), overview.map(TimelineMessage::id))
-        assertEquals(parent, overview.single().threadSummaries.single().thread)
-        assertEquals(listOf("root", "parent-reply"), parentView.map(TimelineMessage::id))
-        assertEquals(child, parentView.last().threadSummaries.single().thread)
-        assertEquals(listOf("parent-reply", "child-reply"), childView.map(TimelineMessage::id))
-        assertTrue(childView.first().threadSummaries.isEmpty())
+        assertEquals(listOf("root", "parent-reply"), overview.map(TimelineMessage::id))
+        assertTrue(overview.first().threadSummaries.isEmpty())
+        assertEquals(child, overview.last().threadSummaries.single().thread)
+        assertEquals(listOf("parent-reply"), parentView.map(TimelineMessage::id))
+        assertEquals(child, parentView.single().threadSummaries.single().thread)
+        assertEquals(listOf("child-reply"), childView.map(TimelineMessage::id))
+        assertTrue(childView.single().threadSummaries.isEmpty())
     }
 
     @Test
@@ -1239,7 +1624,8 @@ class ChatRepositoryPresenterTest {
 
         assertEquals(DirectConversationKey(ACCOUNT, PEER), sent.single().key)
         assertEquals("new-thread", sent.single().outboundThread?.id?.value)
-        assertEquals(null, sent.single().outboundThread?.parentId)
+        val session = requireNotNull(repository.observeCurrentSession(ACCOUNT, PEER).first())
+        assertEquals(session.id, sent.single().outboundThread?.parentId)
         assertEquals(null, presenter.state.first().selectedThread)
     }
 

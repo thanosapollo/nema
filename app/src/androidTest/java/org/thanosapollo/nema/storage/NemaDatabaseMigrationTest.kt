@@ -382,6 +382,157 @@ class NemaDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migration12To13AddsScopedSessionAndTitleTablesWithWorkingCascades() {
+        helper.createDatabase(DATABASE_NAME, 12).apply {
+            execSQL(
+                "INSERT INTO accounts (id, bareJid, authenticationId, serviceDomain) " +
+                    "VALUES ('account-a', 'self@example.org', 'self', 'example.org')",
+            )
+            execSQL(
+                "INSERT INTO peers (accountId, jid, room) " +
+                    "VALUES ('account-a', 'peer@example.org', 0)",
+            )
+            execSQL(
+                """
+                INSERT INTO message_threads (
+                    accountId, peerJid, messageKind, threadId, parentThreadId
+                ) VALUES ('account-a', 'peer@example.org', 'CHAT', 'session-a', NULL)
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO messages (
+                    accountId, localMessageId, peerJid, senderJid, direction,
+                    messageKind, threadId, parentThreadId, body, localSequence, markable
+                ) VALUES ('account-a', 'legacy', 'peer@example.org', 'peer@example.org',
+                    'INBOUND', 'CHAT', 'session-a', NULL, 'legacy', 1, 0)
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_NAME,
+            13,
+            true,
+            MessageSchema.MIGRATION_12_13,
+        ).use { database ->
+            enableAndAssertForeignKeys(database)
+            database.query("SELECT body FROM messages WHERE localMessageId = 'legacy'").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("legacy", cursor.getString(0))
+            }
+            database.execSQL(
+                """
+                INSERT INTO direct_thread_sessions(accountId, peerJid, messageKind, threadId)
+                VALUES ('account-a', 'peer@example.org', 'CHAT', 'session-a')
+                """.trimIndent(),
+            )
+            database.execSQL(
+                """
+                INSERT INTO message_thread_titles(accountId, peerJid, messageKind, threadId, title)
+                VALUES ('account-a', 'peer@example.org', 'CHAT', 'session-a', 'Custom title')
+                """.trimIndent(),
+            )
+            assertForeignKeysClean(database)
+            database.execSQL("DELETE FROM peers WHERE accountId = 'account-a' AND jid = 'peer@example.org'")
+            assertTableEmpty(database, "direct_thread_sessions")
+            assertTableEmpty(database, "message_thread_titles")
+            assertTableEmpty(database, "message_threads")
+            assertTableEmpty(database, "messages")
+            assertForeignKeysClean(database)
+        }
+    }
+
+    @Test
+    fun migration13To14PreservesThreadStateAndAddsNeutralTransitionMarker() {
+        helper.createDatabase(DATABASE_NAME, 13).apply {
+            execSQL(
+                "INSERT INTO accounts (id, bareJid, authenticationId, serviceDomain) " +
+                    "VALUES ('account-a', 'self@example.org', 'self', 'example.org')",
+            )
+            execSQL(
+                "INSERT INTO peers (accountId, jid, room) " +
+                    "VALUES ('account-a', 'peer@example.org', 0)",
+            )
+            execSQL(
+                """
+                INSERT INTO message_threads (
+                    accountId, peerJid, messageKind, threadId, parentThreadId
+                ) VALUES ('account-a', 'peer@example.org', 'CHAT', 'session-a', NULL)
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO messages (
+                    accountId, localMessageId, peerJid, senderJid, direction,
+                    messageKind, threadId, parentThreadId, body, localSequence, markable
+                ) VALUES ('account-a', 'legacy', 'peer@example.org', 'peer@example.org',
+                    'INBOUND', 'CHAT', 'session-a', NULL, 'legacy', 1, 0)
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO direct_thread_sessions(accountId, peerJid, messageKind, threadId)
+                VALUES ('account-a', 'peer@example.org', 'CHAT', 'session-a')
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO message_thread_titles(accountId, peerJid, messageKind, threadId, title)
+                VALUES ('account-a', 'peer@example.org', 'CHAT', 'session-a', 'Custom title')
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_NAME,
+            14,
+            true,
+            MessageSchema.MIGRATION_13_14,
+        ).use { database ->
+            database.query(
+                "SELECT body, directSessionTransitionApplied FROM messages WHERE localMessageId = 'legacy'",
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("legacy", cursor.getString(0))
+                assertEquals(0, cursor.getInt(1))
+            }
+            database.query("SELECT threadId FROM direct_thread_sessions").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("session-a", cursor.getString(0))
+            }
+            database.query("SELECT title FROM message_thread_titles").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("Custom title", cursor.getString(0))
+            }
+            assertForeignKeysClean(database)
+        }
+    }
+
+    private fun assertTableEmpty(database: androidx.sqlite.db.SupportSQLiteDatabase, table: String) {
+        database.query("SELECT COUNT(*) FROM $table").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(0, cursor.getInt(0))
+        }
+    }
+
+    private fun assertForeignKeysClean(database: androidx.sqlite.db.SupportSQLiteDatabase) {
+        database.query("PRAGMA foreign_key_check").use { cursor ->
+            assertTrue(!cursor.moveToFirst())
+        }
+    }
+
+    private fun enableAndAssertForeignKeys(database: androidx.sqlite.db.SupportSQLiteDatabase) {
+        database.execSQL("PRAGMA foreign_keys = ON")
+        database.query("PRAGMA foreign_keys").use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(1, cursor.getInt(0))
+        }
+    }
+
     private companion object {
         const val DATABASE_NAME = "nema-migration-test"
     }

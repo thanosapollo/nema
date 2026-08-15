@@ -113,9 +113,11 @@ import org.thanosapollo.nema.chat.DirectConversationKey
 import org.thanosapollo.nema.chat.DraftCorrection
 import org.thanosapollo.nema.chat.DraftReply
 import org.thanosapollo.nema.chat.DraftSnapshot
+import org.thanosapollo.nema.chat.RecentThread
 import org.thanosapollo.nema.chat.ThreadSummary
 import org.thanosapollo.nema.chat.TimelineMessage
 import org.thanosapollo.nema.session.SessionIdentity
+import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.thread.ThreadId
 import org.thanosapollo.nema.thread.ThreadRef
 import org.thanosapollo.nema.thread.draftKey
@@ -150,6 +152,7 @@ fun DirectChatContent(
     onStartChildThread: suspend () -> Boolean = { false },
     onStartThreadFrom: suspend (TimelineMessage) -> Boolean = { false },
     onCloseThread: () -> Unit = {},
+    onRenameThread: suspend (RecentThread, String) -> Boolean = { _, _ -> false },
     blockingSession: SessionIdentity? = null,
     onSavePeerNickname: suspend (DirectConversationKey, String) -> Boolean = { _, _ -> false },
     onLoadPeerBlocking: suspend (SessionIdentity, DirectConversationKey) -> PeerBlockingState = { _, _ ->
@@ -236,6 +239,7 @@ fun DirectChatContent(
                         remoteDisplayName = state.selectedPeerDisplayName,
                         localNickname = state.selectedPeerLocalNickname,
                         photoBytes = state.selectedPeerPhotoBytes,
+                        recentThreads = state.recentThreads,
                         onBack = { showPeerProfile = false },
                         onSaveNickname = onSavePeerNickname,
                         onLoadBlocking = onLoadPeerBlocking,
@@ -245,6 +249,12 @@ fun DirectChatContent(
                                 currentConversationKey?.copy(thread = null) == key
                         },
                         onSharePeer = onSharePeer,
+                        onOpenThread = { thread ->
+                            scope.launch {
+                                if (onContinueThread(thread)) showPeerProfile = false
+                            }
+                        },
+                        onRenameThread = onRenameThread,
                         modifier = Modifier
                             .fillMaxSize()
                             .background(MaterialTheme.colorScheme.background),
@@ -395,7 +405,17 @@ fun DirectChatContent(
                                     )
                                     if (state.selectedThread != null) {
                                         Text(
-                                            "Thread",
+                                            state.recentThreads
+                                                .firstOrNull {
+                                                    it.thread == state.selectedThread &&
+                                                        it.messageKind == if (state.selectedPeerGroupChat) {
+                                                            MessageKind.GROUPCHAT
+                                                        } else {
+                                                            MessageKind.CHAT
+                                                        }
+                                                }
+                                                ?.title
+                                                ?: "Thread",
                                             style = MaterialTheme.typography.labelSmall,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
@@ -834,12 +854,15 @@ private fun PeerProfileContent(
     remoteDisplayName: String?,
     localNickname: String?,
     photoBytes: ByteArray?,
+    recentThreads: List<RecentThread>,
     onBack: () -> Unit,
     onSaveNickname: suspend (DirectConversationKey, String) -> Boolean,
     onLoadBlocking: suspend (SessionIdentity, DirectConversationKey) -> PeerBlockingState,
     onSetBlocked: suspend (SessionIdentity, DirectConversationKey, Boolean) -> PeerBlockingMutationResult,
     isCurrentBlockingOwner: (SessionIdentity, DirectConversationKey) -> Boolean,
     onSharePeer: ((String) -> Unit)?,
+    onOpenThread: (ThreadRef) -> Unit,
+    onRenameThread: suspend (RecentThread, String) -> Boolean,
     modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
@@ -852,6 +875,10 @@ private fun PeerProfileContent(
     var blockingError by remember(key, blockingSession) { mutableStateOf<String?>(null) }
     var blockingMutation by remember { mutableStateOf<Boolean?>(null) }
     var blockingBusy by remember { mutableStateOf(false) }
+    var renamingThread by remember(key) { mutableStateOf<RecentThread?>(null) }
+    var threadNameDraft by remember(key) { mutableStateOf("") }
+    var threadNameSaving by remember(key) { mutableStateOf(false) }
+    var threadNameError by remember(key) { mutableStateOf<String?>(null) }
 
     LaunchedEffect(key, blockingSession) {
         blockingState = null
@@ -944,6 +971,32 @@ private fun PeerProfileContent(
                     modifier = Modifier.testTag("encryption-info"),
                 )
             }
+            if (recentThreads.isNotEmpty()) {
+                item {
+                    Text(
+                        "Recent threads",
+                        modifier = Modifier
+                            .padding(horizontal = 20.dp, vertical = 12.dp)
+                            .testTag("recent-threads-heading"),
+                        color = MaterialTheme.colorScheme.primary,
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                }
+                items(
+                    items = recentThreads,
+                    key = { it.thread.draftKey() },
+                ) { recent ->
+                    RecentThreadProfileRow(
+                        recent = recent,
+                        onOpen = { onOpenThread(recent.thread) },
+                        onRename = {
+                            threadNameDraft = recent.title
+                            threadNameError = null
+                            renamingThread = recent
+                        },
+                    )
+                }
+            }
             blockingState?.takeIf(PeerBlockingState::supported)?.let { state ->
                 item {
                     ProfileRow(
@@ -1022,6 +1075,61 @@ private fun PeerProfileContent(
                 TextButton(
                     enabled = !nicknameSaving,
                     onClick = { nicknameOpen = false },
+                ) { Text("Cancel") }
+            },
+        )
+    }
+
+    renamingThread?.let { recent ->
+        AlertDialog(
+            onDismissRequest = { if (!threadNameSaving) renamingThread = null },
+            title = { Text("Thread name") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = threadNameDraft,
+                        onValueChange = {
+                            threadNameDraft = it
+                            threadNameError = null
+                        },
+                        modifier = Modifier.testTag("thread-name-input"),
+                        label = { Text("Name") },
+                        supportingText = { Text("Leave blank to restore the default name") },
+                        singleLine = true,
+                        isError = threadNameError != null,
+                    )
+                    threadNameError?.let {
+                        Text(it, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = !threadNameSaving,
+                    onClick = {
+                        threadNameSaving = true
+                        scope.launch {
+                            val saved = try {
+                                onRenameThread(recent, threadNameDraft)
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (_: Exception) {
+                                false
+                            }
+                            threadNameSaving = false
+                            if (saved) {
+                                renamingThread = null
+                            } else {
+                                threadNameError = "Thread name was not saved"
+                            }
+                        }
+                    },
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !threadNameSaving,
+                    onClick = { renamingThread = null },
                 ) { Text("Cancel") }
             },
         )
@@ -1137,6 +1245,45 @@ private fun ProfileRow(
                 overflow = TextOverflow.Ellipsis,
             )
         }
+    }
+}
+
+@Composable
+private fun RecentThreadProfileRow(
+    recent: RecentThread,
+    onOpen: () -> Unit,
+    onRename: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 64.dp)
+            .padding(start = 20.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .clickable(role = Role.Button, onClick = onOpen)
+                .padding(vertical = 10.dp)
+                .testTag("recent-thread-${recent.thread.draftKey()}"),
+        ) {
+            Text(
+                recent.title,
+                style = MaterialTheme.typography.bodyLarge,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                "Replies ${recent.replyCount}",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        TextButton(
+            onClick = onRename,
+            modifier = Modifier.testTag("rename-thread-${recent.thread.draftKey()}"),
+        ) { Text("Rename") }
     }
 }
 
@@ -1623,9 +1770,6 @@ fun MessageTimeline(
                 var messageActionsOpen by remember(message.id) { mutableStateOf(false) }
                 val (bubbleContainerColor, bubbleContentColor) = messageBubbleColors(message.outgoing)
                 val quote = remember(message.body) { message.body.leadingManualQuote() }
-                val navigableThread = message.thread?.takeIf {
-                    !conversationGroupChat && !message.groupChat
-                }
                 val correctionTarget = message.correctionTargetOrNull(conversationGroupChat)
                     .takeIf { editActionsEnabled }
                 Box(modifier = Modifier.fillMaxWidth()) {
@@ -1709,25 +1853,6 @@ fun MessageTimeline(
                                 }
                             }
                         }
-                        navigableThread?.let { thread ->
-                            Box(
-                                modifier = Modifier
-                                    .heightIn(min = 48.dp)
-                                    .testTag("thread-chip")
-                                    .clickable(
-                                        role = Role.Button,
-                                        onClickLabel = "Open thread",
-                                        onClick = { onContinueThread(thread) },
-                                    ),
-                                contentAlignment = Alignment.CenterStart,
-                            ) {
-                                Text(
-                                    "Thread",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        }
                         DropdownMenu(
                             expanded = messageActionsOpen,
                             onDismissRequest = { messageActionsOpen = false },
@@ -1766,16 +1891,6 @@ fun MessageTimeline(
                                     onQuote(message)
                                 },
                             )
-
-                            navigableThread?.let { thread ->
-                                DropdownMenuItem(
-                                    text = { Text("Open thread") },
-                                    onClick = {
-                                        messageActionsOpen = false
-                                        onContinueThread(thread)
-                                    },
-                                )
-                            }
                         }
                     }
                 }
@@ -1812,14 +1927,16 @@ private fun ThreadSummaryButton(
     summary: ThreadSummary,
     onClick: () -> Unit,
 ) {
-    val replies = if (summary.replyCount == 1) "1 reply" else "${summary.replyCount} replies"
+    val replies = "Replies ${summary.replyCount}"
     Surface(
         modifier = Modifier
             .fillMaxWidth()
+            .heightIn(min = 48.dp)
             .padding(top = 5.dp)
             .clickable(role = Role.Button, onClick = onClick)
             .semantics {
-                contentDescription = "Open thread with $replies. Latest: ${summary.latestPreview}"
+                contentDescription =
+                    "Open thread with ${summary.replyCount} replies. Latest: ${summary.latestPreview}"
             }
             .testTag("thread-summary-${summary.thread.draftKey()}"),
         color = MaterialTheme.colorScheme.surface.copy(alpha = 0.55f),
@@ -1827,8 +1944,8 @@ private fun ThreadSummaryButton(
     ) {
         Column(Modifier.padding(horizontal = 8.dp, vertical = 5.dp)) {
             Text(
-                "Thread · $replies",
-                color = MaterialTheme.colorScheme.primary,
+                replies,
+                color = MaterialTheme.colorScheme.onSurface,
                 style = MaterialTheme.typography.labelMedium,
             )
             Text(

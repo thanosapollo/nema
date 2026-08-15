@@ -316,6 +316,7 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean, activityRe
                             onStartChildThread = presenter::startChildThread,
                             onStartThreadFrom = presenter::startThreadFrom,
                             onCloseThread = presenter::closeThread,
+                            onRenameThread = presenter::renameThread,
                             blockingSession = blockingSession,
                             onSavePeerNickname = { key, nickname ->
                                 if (key.accountId != account.id.value) {

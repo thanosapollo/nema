@@ -126,6 +126,18 @@ class AccountRepositoryTest {
                 body = "threaded message",
             ),
         )
+        database.messageDao().saveDirectThreadSession(
+            DirectThreadSessionEntity(FIRST_ID.value, "peer-one@example.org", threadId = "root"),
+        )
+        database.messageDao().saveThreadTitle(
+            MessageThreadTitleEntity(
+                FIRST_ID.value,
+                "peer-one@example.org",
+                MessageKind.CHAT,
+                "child",
+                "Child title",
+            ),
+        )
         database.messageDao().upsertArchiveCursor(
             ArchiveCursorEntity(
                 accountId = FIRST_ID.value,
@@ -146,6 +158,14 @@ class AccountRepositoryTest {
         assertEquals(ChatRoute("peer-two@example.org"), chats.observeRoute(SECOND_ID.value).first())
         assertEquals(emptyList<MessageEntity>(), messages.messages(FIRST_ID.value))
         assertEquals(emptyList<OutboxEntity>(), messages.outboxes(FIRST_ID.value))
+        assertEquals(
+            null,
+            database.messageDao().directThreadSession(FIRST_ID.value, "peer-one@example.org"),
+        )
+        assertEquals(
+            emptyList<MessageThreadTitleEntity>(),
+            database.messageDao().observeThreadTitles(FIRST_ID.value, "peer-one@example.org").first(),
+        )
         assertEquals(
             null,
             messages.archiveCursor(ArchiveCursorKey(FIRST_ID.value, first.bareJid.value, "ACCOUNT")),

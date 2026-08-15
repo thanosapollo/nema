@@ -92,6 +92,9 @@ abstract class AccountDao {
     @Query("DELETE FROM messages WHERE accountId = :accountId")
     protected abstract suspend fun deleteMessages(accountId: String): Int
 
+    @Query("DELETE FROM direct_thread_sessions WHERE accountId = :accountId")
+    protected abstract suspend fun deleteDirectThreadSessions(accountId: String): Int
+
     @Query("UPDATE message_threads SET parentThreadId = NULL WHERE accountId = :accountId")
     protected abstract suspend fun detachChildThreads(accountId: String): Int
 
@@ -131,6 +134,7 @@ abstract class AccountDao {
         requireNotNull(account(accountId)) { "Cannot remove an unknown account" }
         deleteIdentityAliases(accountId)
         deleteMessages(accountId)
+        deleteDirectThreadSessions(accountId)
         detachChildThreads(accountId)
         deleteThreads(accountId)
         check(deleteAccount(accountId) == 1) { "Account changed during removal" }
@@ -143,6 +147,8 @@ abstract class AccountDao {
         ActiveAccountEntity::class,
         PeerEntity::class,
         MessageThreadEntity::class,
+        DirectThreadSessionEntity::class,
+        MessageThreadTitleEntity::class,
         MessageEntity::class,
         ArchiveMessagePositionEntity::class,
         TrustedIdentityAliasEntity::class,
@@ -153,7 +159,7 @@ abstract class AccountDao {
         AccountMessageSequenceEntity::class,
         ChatNavigationEntity::class,
     ],
-    version = 12,
+    version = 14,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -185,6 +191,8 @@ abstract class NemaDatabase : RoomDatabase() {
                 MessageSchema.MIGRATION_9_10,
                 MessageSchema.MIGRATION_10_11,
                 MessageSchema.MIGRATION_11_12,
+                MessageSchema.MIGRATION_12_13,
+                MessageSchema.MIGRATION_13_14,
             )
             .addCallback(MessageSchema.REOPEN_CALLBACK)
             .build()

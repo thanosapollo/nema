@@ -29,6 +29,8 @@ import org.thanosapollo.nema.storage.ConversationListRow
 import org.thanosapollo.nema.storage.NemaDatabase
 import org.thanosapollo.nema.storage.MessageDirection
 import org.thanosapollo.nema.storage.MessageDraftEntity
+import org.thanosapollo.nema.storage.MessageStore
+import org.thanosapollo.nema.storage.MessageThreadTitleEntity
 import org.thanosapollo.nema.storage.OutboxStatus
 import org.thanosapollo.nema.storage.PeerEntity
 import org.thanosapollo.nema.storage.RetryUncertainKey
@@ -108,6 +110,13 @@ data class ThreadSummary(
     val latestPreview: String,
 )
 
+data class RecentThread(
+    val thread: ThreadRef,
+    val title: String,
+    val replyCount: Int,
+    val messageKind: MessageKind,
+)
+
 data class DraftReply(
     val id: String,
     val to: String?,
@@ -165,6 +174,8 @@ data class DirectChatState(
     val selectedRoomSubject: String? = null,
     val selectedRoomOccupantCount: Int = 0,
     val selectedThread: ThreadRef? = null,
+    val currentSession: ThreadRef? = null,
+    val recentThreads: List<RecentThread> = emptyList(),
     val messages: List<TimelineMessage> = emptyList(),
     val draft: String = "",
     val draftReply: DraftReply? = null,
@@ -186,6 +197,8 @@ data class DirectChatState(
             selectedRoomSubject == other.selectedRoomSubject &&
             selectedRoomOccupantCount == other.selectedRoomOccupantCount &&
             selectedThread == other.selectedThread &&
+            currentSession == other.currentSession &&
+            recentThreads == other.recentThreads &&
             messages === other.messages &&
             draft == other.draft &&
             draftReply == other.draftReply &&
@@ -205,6 +218,8 @@ data class DirectChatState(
         result = 31 * result + selectedRoomOccupantCount
         result = 31 * result + (selectedPeerPhotoBytes?.contentHashCode() ?: 0)
         result = 31 * result + (selectedThread?.hashCode() ?: 0)
+        result = 31 * result + (currentSession?.hashCode() ?: 0)
+        result = 31 * result + recentThreads.hashCode()
         result = 31 * result + System.identityHashCode(messages)
         result = 31 * result + draft.hashCode()
         result = 31 * result + (draftReply?.hashCode() ?: 0)
@@ -263,6 +278,7 @@ data class DraftSnapshot(
 
 class ChatRepository(database: NemaDatabase) {
     private val dao = database.messageDao()
+    private val messages = MessageStore(database)
 
     fun observeConversations(accountId: String): Flow<List<ConversationSummary>> =
         combine(
@@ -325,6 +341,50 @@ class ChatRepository(database: NemaDatabase) {
         } else {
             timeline.projectThreads(key.thread)
         }
+    }
+
+    fun observeCurrentSession(accountId: String, peerJid: String): Flow<ThreadRef?> =
+        dao.observeDirectThreadSession(accountId, peerJid).map { session ->
+            session?.let { ThreadRef(ThreadId.require(it.threadId)) }
+        }
+
+    suspend fun ensureCurrentSession(accountId: String, peerJid: String): ThreadRef =
+        messages.ensureDirectThreadSession(accountId, peerJid)
+
+    fun observeRecentThreads(accountId: String, peerJid: String): Flow<List<RecentThread>> = combine(
+        dao.observeDirectTimeline(accountId, peerJid),
+        dao.observeDirectReplyAliases(accountId, peerJid),
+        dao.observeThreadTitles(accountId, peerJid),
+    ) { rows, aliases, titles ->
+        val aliasesByMessage = aliases
+            .filter { it.messageId != null }
+            .groupBy(TrustedIdentityAliasEntity::messageId, TrustedIdentityAliasEntity::value)
+            .mapValues { it.value.toSet() }
+        chronologicalTimelineRows(rows)
+            .map { row -> row.toPresentation(aliasesByMessage[row.localMessageId].orEmpty()) }
+            .let { messages -> messages.map { it.withReplyPresentation(messages) } }
+            .recentThreads(titles)
+    }
+
+    suspend fun renameThread(
+        accountId: String,
+        peerJid: String,
+        messageKind: MessageKind,
+        thread: ThreadRef,
+        title: String,
+    ): Boolean {
+        val target = dao.thread(accountId, peerJid, messageKind, thread.id.value)
+            ?.takeIf { it.parentThreadId == thread.parentId?.value }
+            ?: return false
+        val normalized = title.trim()
+        if (normalized.isEmpty()) {
+            dao.deleteThreadTitle(accountId, peerJid, target.messageKind, target.threadId)
+        } else {
+            dao.saveThreadTitle(
+                MessageThreadTitleEntity(accountId, peerJid, target.messageKind, target.threadId, normalized),
+            )
+        }
+        return true
     }
 
     fun observeDraft(accountId: String, peerJid: String): Flow<String> =
@@ -425,6 +485,8 @@ class DirectChatPresenter(
         val draft: StoredDraft,
         val peer: PeerEntity?,
         val room: RoomView?,
+        val currentSession: ThreadRef?,
+        val recentThreads: List<RecentThread>,
     )
 
     private val actionLock = Any()
@@ -443,7 +505,7 @@ class DirectChatPresenter(
     )
     private val selectedConversation = selectedRoute.flatMapLatest { route ->
         if (route == null) {
-            flowOf(SelectedConversation(null, emptyList(), StoredDraft(), null, null))
+            flowOf(SelectedConversation(null, emptyList(), StoredDraft(), null, null, null, emptyList()))
         } else {
             val key = DirectConversationKey(account.id.value, route.peerJid, route.thread)
             combine(
@@ -451,8 +513,11 @@ class DirectChatPresenter(
                 repository.observeStoredDraft(key),
                 repository.observePeer(account.id.value, route.peerJid),
                 observeRoom(route.peerJid),
-            ) { messages, draft, peer, room ->
-                SelectedConversation(route, messages, draft, peer, room)
+                repository.observeCurrentSession(account.id.value, route.peerJid),
+            ) { messages, draft, peer, room, currentSession ->
+                SelectedConversation(route, messages, draft, peer, room, currentSession, emptyList())
+            }.combine(repository.observeRecentThreads(account.id.value, route.peerJid)) { selected, recent ->
+                selected.copy(recentThreads = recent)
             }
         }
     }
@@ -461,6 +526,8 @@ class DirectChatPresenter(
         repository.observeConversations(account.id.value),
         selectedConversation,
     ) { conversations, selected ->
+        val groupChat = selected.peer?.room == true || selected.messages.any { it.groupChat }
+        val selectedKind = if (groupChat) MessageKind.GROUPCHAT else MessageKind.CHAT
         DirectChatState(
             accountId = account.id.value,
             conversations = conversations,
@@ -470,11 +537,12 @@ class DirectChatPresenter(
             selectedPeerLocalNickname = selected.peer?.localNickname,
             selectedPeerPhotoBytes = selected.peer?.photoBytes,
             selectedPeerPhotoMime = selected.peer?.photoMime,
-            selectedPeerGroupChat = selected.peer?.room == true ||
-                selected.messages.any { it.groupChat },
+            selectedPeerGroupChat = groupChat,
             selectedRoomSubject = selected.room?.subject,
             selectedRoomOccupantCount = selected.room?.occupantCount ?: 0,
             selectedThread = selected.route?.thread,
+            currentSession = selected.currentSession.takeUnless { groupChat },
+            recentThreads = selected.recentThreads.filter { it.messageKind == selectedKind },
             messages = selected.messages,
             draft = selected.draft.body,
             draftReply = selected.draft.reply,
@@ -529,7 +597,15 @@ class DirectChatPresenter(
 
     suspend fun startNewThread(): Boolean {
         val route = selectedRoute.value ?: return false
-        selectRoute(route.copy(thread = threadingPolicy.newTopic()))
+        val groupChat = repository.observePeer(account.id.value, route.peerJid).first()?.room == true ||
+            repository.observeTimeline(account.id.value, route.peerJid).first().any { it.groupChat }
+        val currentSession = if (groupChat) {
+            null
+        } else {
+            repository.observeCurrentSession(account.id.value, route.peerJid).first()
+                ?: repository.ensureCurrentSession(account.id.value, route.peerJid)
+        }
+        selectRoute(route.copy(thread = newTopic(currentSession)))
         return true
     }
 
@@ -558,7 +634,9 @@ class DirectChatPresenter(
         if (current.selectedPeerGroupChat) return false
         if (current.messages.singleOrNull { it.id == message.id } != message) return false
         val reference = message.replyReferenceId ?: return false
-        val thread = message.thread?.let(threadingPolicy::childOf) ?: threadingPolicy.newTopic()
+        val thread = message.thread?.let(threadingPolicy::childOf) ?: newTopic(
+            current.currentSession ?: repository.ensureCurrentSession(account.id.value, route.peerJid),
+        )
         val nextRoute = route.copy(thread = thread)
         val reply = DraftReply(
             id = reference,
@@ -602,11 +680,41 @@ class DirectChatPresenter(
     }
 
     fun sendDraftAsNewThread(snapshot: DraftSnapshot): Deferred<Boolean> = submitAction {
-        owns(snapshot.key) &&
-            snapshot.key.thread == null &&
-            snapshot.outboundThread == null &&
-            snapshot.body.isNotBlank() &&
-            enqueue(account, snapshot.copy(outboundThread = threadingPolicy.newTopic()))
+        if (!owns(snapshot.key) ||
+            snapshot.key.thread != null ||
+            snapshot.outboundThread != null ||
+            snapshot.body.isBlank()
+        ) {
+            return@submitAction false
+        }
+        val currentSession = if (snapshot.groupChat) {
+            null
+        } else {
+            repository.observeCurrentSession(
+                snapshot.key.accountId,
+                snapshot.key.canonicalBarePeer,
+            ).first() ?: repository.ensureCurrentSession(
+                snapshot.key.accountId,
+                snapshot.key.canonicalBarePeer,
+            )
+        }
+        enqueue(account, snapshot.copy(outboundThread = newTopic(currentSession)))
+    }
+
+    suspend fun renameThread(recent: RecentThread, title: String): Boolean {
+        val route = selectedRoute.value ?: return false
+        val current = state.value
+        val stillPresent = current.recentThreads.any {
+            it.messageKind == recent.messageKind && it.thread == recent.thread
+        }
+        if (current.selectedPeer != route.peerJid || !stillPresent) return false
+        return repository.renameThread(
+            account.id.value,
+            route.peerJid,
+            recent.messageKind,
+            recent.thread,
+            title,
+        )
     }
 
     suspend fun retryUncertain(key: RetryUncertainKey) {
@@ -633,6 +741,9 @@ class DirectChatPresenter(
     private fun owns(key: DirectConversationKey): Boolean =
         key.accountId == account.id.value &&
             canonicalDirectPeer(key.canonicalBarePeer) == key.canonicalBarePeer
+
+    private fun newTopic(currentSession: ThreadRef?): ThreadRef =
+        currentSession?.let(threadingPolicy::childOf) ?: threadingPolicy.newTopic()
 }
 
 internal fun canonicalDirectPeer(value: String): String? = runCatching {
@@ -767,50 +878,92 @@ private data class ResolvedThread(
     val members: List<TimelineMessage>,
 )
 
-private fun List<TimelineMessage>.projectThreads(selected: ThreadRef?): List<TimelineMessage> {
+private fun List<TimelineMessage>.projectThreads(
+    selected: ThreadRef?,
+): List<TimelineMessage> {
     val resolved = asSequence()
         .filter { !it.groupChat }
         .mapNotNull(TimelineMessage::thread)
+        .filter { it.parentId != null }
         .distinct()
-        .mapNotNull { thread -> resolveThread(thread) }
+        .mapNotNull(::resolveThread)
         .toList()
     val visible = if (selected == null) {
         val hidden = resolved.flatMap(ResolvedThread::members).mapTo(mutableSetOf(), TimelineMessage::id)
         filterNot { it.id in hidden }
     } else {
-        val resolvedThread = resolved.singleOrNull { it.thread == selected }
-        resolvedThread?.let { listOf(it.root) + it.members }
-            ?: filter { it.thread == selected }
+        filter { it.thread == selected }
     }
     val summaries = resolved.groupBy { it.root.id }
     return visible.map { message ->
         val attached = summaries[message.id].orEmpty()
             .filter { it.thread != selected }
             .map { thread ->
+                val latest = thread.members.lastOrNull() ?: thread.root
                 ThreadSummary(
                     thread = thread.thread,
                     replyCount = thread.members.size,
-                    latestMessageId = thread.members.last().id,
-                    latestPreview = thread.members.last().body,
+                    latestMessageId = latest.id,
+                    latestPreview = latest.body,
                 )
             }
         message.copy(threadSummaries = attached)
     }
 }
 
-private fun List<TimelineMessage>.resolveThread(thread: ThreadRef): ResolvedThread? {
+private fun List<TimelineMessage>.resolveThread(
+    thread: ThreadRef,
+): ResolvedThread? {
     val members = filter { it.thread == thread && !it.groupChat }
     if (members.isEmpty()) return null
-    val root = members.first().resolveReplyTarget(this)
+    val externalRoot = members.first().resolveReplyTarget(this)
         ?.takeIf { candidate ->
-            !candidate.groupChat && if (thread.parentId == null) {
-                candidate.thread == null
-            } else {
-                candidate.thread?.id == thread.parentId
-            }
+            !candidate.groupChat &&
+                (candidate.thread?.id == thread.parentId ||
+                    (candidate.thread == null && thread.parentId != null))
         }
-        ?: return null
-    return ResolvedThread(thread, root, members)
+    return if (externalRoot != null) {
+        ResolvedThread(thread, externalRoot, members)
+    } else {
+        ResolvedThread(thread, members.first(), members.drop(1))
+    }
+}
+
+private fun List<TimelineMessage>.recentThreads(
+    titles: List<MessageThreadTitleEntity>,
+): List<RecentThread> {
+    val customTitles = titles.associateBy { it.messageKind to it.threadId }
+    return withIndex()
+        .filter { it.value.thread != null }
+        .groupBy {
+            val kind = if (it.value.groupChat) MessageKind.GROUPCHAT else MessageKind.CHAT
+            kind to requireNotNull(it.value.thread)
+        }
+        .map { (key, indexed) ->
+            val (kind, thread) = key
+            val members = indexed.map { it.value }
+            val resolved = if (kind == MessageKind.CHAT && thread.parentId != null) {
+                resolveThread(thread)
+            } else {
+                null
+            }
+            val replies = resolved?.members?.size ?: (members.size - 1).coerceAtLeast(0)
+            val defaultTitle = (resolved?.root ?: members.first()).body.threadTitlePreview()
+            val title = customTitles[kind to thread.id.value]?.title ?: defaultTitle
+            indexed.maxOf { it.index } to RecentThread(thread, title, replies, kind)
+        }
+        .groupBy { it.second.messageKind }
+        .values
+        .flatMap { kind -> kind.sortedByDescending { it.first }.take(10) }
+        .sortedByDescending { it.first }
+        .map { it.second }
+}
+
+private fun String.threadTitlePreview(): String {
+    val normalized = trim()
+    if (normalized.isEmpty()) return "Thread"
+    val codePoints = normalized.codePointCount(0, normalized.length).coerceAtMost(20)
+    return normalized.substring(0, normalized.offsetByCodePoints(0, codePoints))
 }
 
 private fun TimelineMessage.resolveReplyTarget(timeline: List<TimelineMessage>): TimelineMessage? {
