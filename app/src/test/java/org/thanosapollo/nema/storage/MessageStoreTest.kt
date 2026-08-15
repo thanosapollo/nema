@@ -916,6 +916,265 @@ class MessageStoreTest {
     }
 
     @Test
+    fun migratedBeforeRejectsPageInternalIdentityRepeatBeforePrefixRebase() = runBlocking {
+        var store = MessageStore(database)
+        val key = archiveKey(ACCOUNT)
+        val bridge = stanzaAlias("page-internal-bridge")
+        val target = archived("internal-target-result", "internal-target", "same body")
+        val tail = archived("internal-tail-result", "internal-tail", "tail")
+        assertEquals(
+            ArchivePageStatus.APPLIED,
+            store.applyArchivePage(
+                archivePage(
+                    key = key,
+                    direction = ArchiveDirection.BOOTSTRAP,
+                    complete = true,
+                    hasEarlier = false,
+                    messages = listOf(target, tail),
+                ),
+            ).status,
+        )
+        database.messageDao().upsertArchiveCursor(
+            key.emptyCursor().copy(
+                hasEarlier = true,
+                retryableError = "Archive cursor reset during migration",
+            ),
+        )
+        store = reopenStore()
+        assertEquals(
+            ArchivePageStatus.APPLIED,
+            store.applyArchivePage(
+                archivePage(
+                    key = key,
+                    direction = ArchiveDirection.BOOTSTRAP,
+                    complete = true,
+                    hasEarlier = true,
+                    messages = listOf(tail),
+                ),
+            ).status,
+        )
+        val positionsBefore = store.archivePositions(ACCOUNT, "internal-target")
+        val messagesBefore = store.messages(ACCOUNT)
+
+        store = reopenStore()
+        val repeatedTarget = ArchivedIncomingMessage(
+            resultId = "internal-repeated-result",
+            message = incoming(
+                localId = "internal-repeated",
+                body = "same body",
+                aliases = listOf(bridge),
+            ),
+        )
+        val before = store.applyArchivePage(
+            archivePage(
+                key = key,
+                direction = ArchiveDirection.BEFORE,
+                boundaryId = "internal-tail-result",
+                complete = true,
+                hasEarlier = false,
+                messages = listOf(
+                    archived(
+                        "internal-target-new-result",
+                        "internal-target",
+                        "same body",
+                        bridge,
+                    ),
+                    repeatedTarget,
+                    tail,
+                ),
+            ),
+        )
+
+        assertEquals(ArchivePageStatus.RETRYABLE_ERROR, before.status)
+        assertEquals("Archive page repeats one logical message", before.cursor.retryableError)
+        assertEquals(positionsBefore, store.archivePositions(ACCOUNT, "internal-target"))
+        assertEquals(messagesBefore, store.messages(ACCOUNT))
+        store = reopenStore()
+        assertEquals(positionsBefore, store.archivePositions(ACCOUNT, "internal-target"))
+        assertEquals(messagesBefore, store.messages(ACCOUNT))
+    }
+
+    @Test
+    fun migratedBeforeRejectsIdentityRepeatConnectedByStoredMessageSeed() = runBlocking {
+        var store = MessageStore(database)
+        val key = archiveKey(ACCOUNT)
+        val positionedAlias = stanzaAlias("seed-positioned")
+        val firstUnpositionedAlias = stanzaAlias("seed-unpositioned-first")
+        val secondUnpositionedAlias = stanzaAlias("seed-unpositioned-second")
+        val positioned = archived(
+            "seed-positioned-result",
+            "seed-positioned-message",
+            "same body",
+            positionedAlias,
+        )
+        val tail = archived("seed-tail-result", "seed-tail-message", "tail")
+        assertEquals(
+            ArchivePageStatus.APPLIED,
+            store.applyArchivePage(
+                archivePage(
+                    key = key,
+                    direction = ArchiveDirection.BOOTSTRAP,
+                    complete = true,
+                    hasEarlier = false,
+                    messages = listOf(positioned, tail),
+                ),
+            ).status,
+        )
+        store.ingest(
+            incoming(
+                localId = "seed-unpositioned-message",
+                body = "same body",
+                aliases = listOf(firstUnpositionedAlias, secondUnpositionedAlias),
+            ),
+        )
+        database.messageDao().upsertArchiveCursor(
+            key.emptyCursor().copy(
+                hasEarlier = true,
+                retryableError = "Archive cursor reset during migration",
+            ),
+        )
+        store = reopenStore()
+        assertEquals(
+            ArchivePageStatus.APPLIED,
+            store.applyArchivePage(
+                archivePage(
+                    key = key,
+                    direction = ArchiveDirection.BOOTSTRAP,
+                    complete = true,
+                    hasEarlier = true,
+                    messages = listOf(tail),
+                ),
+            ).status,
+        )
+        val messagesBefore = store.messages(ACCOUNT)
+        val aliasesBefore = store.aliases(ACCOUNT)
+        val positionedPositionsBefore = store.archivePositions(ACCOUNT, "seed-positioned-message")
+        val unpositionedPositionsBefore = store.archivePositions(ACCOUNT, "seed-unpositioned-message")
+        val tailPositionsBefore = store.archivePositions(ACCOUNT, "seed-tail-message")
+
+        val before = store.applyArchivePage(
+            archivePage(
+                key = key,
+                direction = ArchiveDirection.BEFORE,
+                boundaryId = "seed-tail-result",
+                complete = true,
+                hasEarlier = false,
+                messages = listOf(
+                    ArchivedIncomingMessage(
+                        resultId = "seed-bridge-result",
+                        message = incoming(
+                            localId = "seed-bridge-message",
+                            body = "same body",
+                            aliases = listOf(positionedAlias, firstUnpositionedAlias),
+                        ),
+                    ),
+                    ArchivedIncomingMessage(
+                        resultId = "seed-repeat-result",
+                        message = incoming(
+                            localId = "seed-repeat-message",
+                            body = "same body",
+                            aliases = listOf(secondUnpositionedAlias),
+                        ),
+                    ),
+                    tail,
+                ),
+            ),
+        )
+
+        assertEquals(ArchivePageStatus.RETRYABLE_ERROR, before.status)
+        assertEquals("Archive page repeats one logical message", before.cursor.retryableError)
+        assertEquals(messagesBefore, store.messages(ACCOUNT))
+        assertEquals(aliasesBefore, store.aliases(ACCOUNT))
+        assertEquals(positionedPositionsBefore, store.archivePositions(ACCOUNT, "seed-positioned-message"))
+        assertEquals(unpositionedPositionsBefore, store.archivePositions(ACCOUNT, "seed-unpositioned-message"))
+        assertEquals(tailPositionsBefore, store.archivePositions(ACCOUNT, "seed-tail-message"))
+        store = reopenStore()
+        assertEquals(messagesBefore, store.messages(ACCOUNT))
+        assertEquals(aliasesBefore, store.aliases(ACCOUNT))
+        assertEquals(positionedPositionsBefore, store.archivePositions(ACCOUNT, "seed-positioned-message"))
+        assertEquals(unpositionedPositionsBefore, store.archivePositions(ACCOUNT, "seed-unpositioned-message"))
+        assertEquals(tailPositionsBefore, store.archivePositions(ACCOUNT, "seed-tail-message"))
+    }
+
+    @Test
+    fun migratedBeforePreservesStoredThreadParentDuringLocalIdPreflight() = runBlocking {
+        var store = MessageStore(database)
+        val key = archiveKey(ACCOUNT)
+        val threaded = archived(
+            resultId = "lineage-threaded-result",
+            localId = "lineage-threaded-message",
+            body = "threaded",
+            threadId = "lineage-child",
+            parentThreadId = "lineage-root",
+        )
+        val tail = archived("lineage-tail-result", "lineage-tail-message", "tail")
+        assertEquals(
+            ArchivePageStatus.APPLIED,
+            store.applyArchivePage(
+                archivePage(
+                    key = key,
+                    direction = ArchiveDirection.BOOTSTRAP,
+                    complete = true,
+                    hasEarlier = false,
+                    messages = listOf(threaded, tail),
+                ),
+            ).status,
+        )
+        database.messageDao().upsertArchiveCursor(
+            key.emptyCursor().copy(
+                hasEarlier = true,
+                retryableError = "Archive cursor reset during migration",
+            ),
+        )
+        store = reopenStore()
+        assertEquals(
+            ArchivePageStatus.APPLIED,
+            store.applyArchivePage(
+                archivePage(
+                    key = key,
+                    direction = ArchiveDirection.BOOTSTRAP,
+                    complete = true,
+                    hasEarlier = true,
+                    messages = listOf(tail),
+                ),
+            ).status,
+        )
+
+        val before = store.applyArchivePage(
+            archivePage(
+                key = key,
+                direction = ArchiveDirection.BEFORE,
+                boundaryId = "lineage-tail-result",
+                complete = true,
+                hasEarlier = false,
+                messages = listOf(
+                    archived(
+                        resultId = "lineage-new-result",
+                        localId = "lineage-threaded-message",
+                        body = "threaded",
+                        threadId = "lineage-child",
+                        parentThreadId = null,
+                    ),
+                    tail,
+                ),
+            ),
+        )
+
+        assertEquals(ArchivePageStatus.APPLIED, before.status)
+        assertEquals(0L, store.archivePositions(ACCOUNT, "lineage-threaded-message").single().archiveOrdinal)
+        assertEquals(1L, store.archivePositions(ACCOUNT, "lineage-tail-message").single().archiveOrdinal)
+        val stored = store.messages(ACCOUNT).single { it.localMessageId == "lineage-threaded-message" }
+        assertEquals("lineage-root", stored.parentThreadId)
+        assertEquals(2, store.messages(ACCOUNT).size)
+        store = reopenStore()
+        assertEquals(before.cursor, store.archiveCursor(key))
+        assertEquals(0L, store.archivePositions(ACCOUNT, "lineage-threaded-message").single().archiveOrdinal)
+        assertEquals("lineage-root", store.messages(ACCOUNT).single {
+            it.localMessageId == "lineage-threaded-message"
+        }.parentThreadId)
+    }
+
+    @Test
     fun migratedResetFullyMappedBeforePagesAdvanceAcrossBoundaryForms() = runBlocking {
         var store = MessageStore(database)
         val key = archiveKey(ACCOUNT)

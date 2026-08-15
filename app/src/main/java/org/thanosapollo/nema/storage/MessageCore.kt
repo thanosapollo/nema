@@ -1402,43 +1402,125 @@ class MessageStore private constructor(
         }
 
         val aliasAuthority = page.key.aliasAuthority()
-        suspend fun archivedMessageId(resultId: String): String? =
-            dao.trustedAlias(
-                page.key.accountId,
-                IdentityAliasKind.MAM_RESULT,
-                aliasAuthority,
-                resultId,
-            )?.messageId
+        suspend fun preserveStoredThreadLineage(message: IncomingMessage): IncomingMessage {
+            val threadId = message.threadId ?: return message.copy(parentThreadId = null)
+            val existing = dao.thread(
+                message.accountId,
+                message.peerJid,
+                message.messageKind,
+                threadId,
+            ) ?: return message
+            val parentThreadId = when {
+                existing.parentThreadId == message.parentThreadId -> message.parentThreadId
+                message.parentThreadId == null -> existing.parentThreadId
+                existing.parentThreadId != null -> existing.parentThreadId
+                dao.threadHasMessages(
+                    message.accountId,
+                    message.peerJid,
+                    message.messageKind,
+                    threadId,
+                ) -> null
+                else -> message.parentThreadId
+            }
+            return message.copy(parentThreadId = parentThreadId)
+        }
+        data class PageIdentityKey(
+            val kind: IdentityAliasKind?,
+            val authority: String,
+            val value: String,
+        )
+        data class PageIdentityCandidate(
+            val index: Int,
+            val keys: Set<PageIdentityKey>,
+            val seededMessageIds: Set<String>,
+        )
 
-        suspend fun mappedArchivePosition(
-            index: Int,
-            archived: ArchivedIncomingMessage,
-        ): MappedArchivePosition? {
-            val candidateIds = mutableListOf<String>()
-            archivedMessageId(archived.resultId)?.let(candidateIds::add)
-            archived.message?.aliases.orEmpty().forEach { alias ->
-                dao.trustedAlias(
+        val candidates = mutableListOf<PageIdentityCandidate>()
+        page.messages.forEachIndexed { index, archived ->
+            val message = archived.message ?: return@forEachIndexed
+            val archiveAlias = TrustedIdentityAlias(
+                kind = IdentityAliasKind.MAM_RESULT,
+                authority = aliasAuthority,
+                value = archived.resultId,
+            )
+            val aliases = (message.aliases + archiveAlias).distinct()
+            val normalizedMessage = preserveStoredThreadLineage(message)
+            val keys = mutableSetOf(
+                PageIdentityKey(null, "", message.localMessageId),
+            )
+            val seededMessageIds = mutableSetOf<String>()
+            dao.message(page.key.accountId, message.localMessageId)
+                ?.takeIf { it.isCompatibleWith(normalizedMessage) }
+                ?.localMessageId
+                ?.let(seededMessageIds::add)
+            aliases.forEach { alias ->
+                val stored = dao.identityAlias(
                     page.key.accountId,
                     alias.kind,
                     alias.authority,
                     alias.value,
-                )?.messageId?.let(candidateIds::add)
+                )
+                if (stored?.status != IdentityAliasStatus.QUARANTINED) {
+                    keys += PageIdentityKey(alias.kind, alias.authority, alias.value)
+                }
+                stored?.takeIf { it.status == IdentityAliasStatus.TRUSTED }
+                    ?.messageId
+                    ?.let(seededMessageIds::add)
             }
-            return candidateIds.distinct().firstNotNullOfOrNull { messageId ->
+            candidates += PageIdentityCandidate(index, keys, seededMessageIds)
+        }
+
+        val components = mutableListOf<List<PageIdentityCandidate>>()
+        val remaining = candidates.toMutableList()
+        while (remaining.isNotEmpty()) {
+            val component = mutableListOf(remaining.removeAt(0))
+            val keys = component.single().keys.toMutableSet()
+            val seededMessageIds = component.single().seededMessageIds.toMutableSet()
+            var expanded: Boolean
+            do {
+                expanded = false
+                val connected = remaining.filter { candidate ->
+                    candidate.keys.any(keys::contains) ||
+                        candidate.seededMessageIds.any(seededMessageIds::contains)
+                }
+                if (connected.isNotEmpty()) {
+                    remaining.removeAll(connected.toSet())
+                    component += connected
+                    connected.forEach { candidate ->
+                        keys += candidate.keys
+                        seededMessageIds += candidate.seededMessageIds
+                    }
+                    expanded = true
+                }
+            } while (expanded)
+            components += component
+        }
+
+        val mappedCandidates = mutableListOf<MappedArchivePosition>()
+        for (component in components) {
+            val positioned = mutableListOf<ArchiveMessagePositionEntity>()
+            for (messageId in component.flatMap { it.seededMessageIds }.distinct()) {
                 dao.archivePosition(
                     page.key.accountId,
                     page.key.archiveAuthority,
                     page.key.scope,
                     messageId,
-                )?.let { position ->
-                    MappedArchivePosition(index, messageId, position.archiveOrdinal)
-                }
+                )?.let(positioned::add)
+            }
+            if (positioned.map(ArchiveMessagePositionEntity::archiveOrdinal).distinct().size > 1) {
+                return@withTransaction retryable("Archive page identity evidence has conflicting positions")
+            }
+            val position = positioned.minByOrNull(ArchiveMessagePositionEntity::messageId)
+                ?: continue
+            component.forEach { candidate ->
+                mappedCandidates += MappedArchivePosition(
+                    candidate.index,
+                    position.messageId,
+                    position.archiveOrdinal,
+                )
             }
         }
-
-        var mapped = page.messages.mapIndexedNotNull { index, archived ->
-            mappedArchivePosition(index, archived)
-        }
+        var mapped = mappedCandidates.sortedBy(MappedArchivePosition::index)
         val migrationResetBootstrap = page.direction == ArchiveDirection.BOOTSTRAP &&
             current?.let { cursor ->
                 cursor.oldestId == null && cursor.newestId == null &&
