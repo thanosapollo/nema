@@ -1304,6 +1304,7 @@ internal fun restoredTimelineIndex(
     return if (exact >= 0) exact else anchor.fallbackIndex.coerceIn(0, messages.lastIndex)
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MessageTimeline(
     messages: List<TimelineMessage>,
@@ -1399,6 +1400,7 @@ fun MessageTimeline(
                                     role = Role.Button,
                                     onLongClickLabel = "Message actions",
                                     onClick = {},
+                                    onDoubleClick = { messageActionsOpen = true },
                                     onLongClick = { messageActionsOpen = true },
                                 ),
                             color = bubbleContainerColor,
@@ -1452,16 +1454,18 @@ fun MessageTimeline(
                                         modifier = Modifier.align(Alignment.End),
                                     )
                                 }
-                                message.thread?.let { thread ->
-                                    Text(
-                                        "Thread",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        modifier = Modifier
-                                            .testTag("thread-chip")
-                                            .clickable { onContinueThread(thread) },
-                                    )
-                                }
                             }
+                        }
+                        message.thread?.let { thread ->
+                            Text(
+                                "Thread",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier
+                                    .padding(top = 4.dp)
+                                    .testTag("thread-chip")
+                                    .clickable { onContinueThread(thread) },
+                            )
                         }
                         DropdownMenu(
                             expanded = messageActionsOpen,

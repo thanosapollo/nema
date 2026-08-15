@@ -38,6 +38,7 @@ import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.click
+import androidx.compose.ui.test.doubleClick
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.unit.dp
@@ -1992,6 +1993,30 @@ class DirectChatContentTest {
         composeRule.onNodeWithTag("thread-chip").performClick()
         composeRule.waitForIdle()
         assertEquals(thread, opened)
+    }
+
+    @Test
+    fun doubleTapOnThreadedBubbleOpensMessageActions() {
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(
+                        TimelineMessage(
+                            id = "incoming-thread",
+                            senderJid = PEER_A,
+                            body = "incoming",
+                            outgoing = false,
+                            delivery = null,
+                            retryUncertainKey = null,
+                            thread = ThreadRef(ThreadId.require("thread")),
+                        ),
+                    ),
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("incoming").performTouchInput { doubleClick() }
+        composeRule.onNodeWithText("Open thread").assertIsDisplayed()
     }
 
     private fun state(accountId: String, peer: String, draft: String = "") = DirectChatState(
