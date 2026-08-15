@@ -995,6 +995,73 @@ class MessageStoreTest {
     }
 
     @Test
+    fun migratedBeforeRejectsUnseededPageInternalIdentityRepeat() = runBlocking {
+        var store = MessageStore(database)
+        val key = archiveKey(ACCOUNT)
+        val tail = archived("unseeded-tail-result", "unseeded-tail-message", "tail")
+        assertEquals(
+            ArchivePageStatus.APPLIED,
+            store.applyArchivePage(
+                archivePage(
+                    key = key,
+                    direction = ArchiveDirection.BOOTSTRAP,
+                    complete = true,
+                    hasEarlier = false,
+                    messages = listOf(tail),
+                ),
+            ).status,
+        )
+        database.messageDao().upsertArchiveCursor(
+            key.emptyCursor().copy(
+                hasEarlier = true,
+                retryableError = "Archive cursor reset during migration",
+            ),
+        )
+        store = reopenStore()
+        assertEquals(
+            ArchivePageStatus.APPLIED,
+            store.applyArchivePage(
+                archivePage(
+                    key = key,
+                    direction = ArchiveDirection.BOOTSTRAP,
+                    complete = true,
+                    hasEarlier = true,
+                    messages = listOf(tail),
+                ),
+            ).status,
+        )
+        val messagesBefore = store.messages(ACCOUNT)
+        val aliasesBefore = store.aliases(ACCOUNT)
+        val tailPositionsBefore = store.archivePositions(ACCOUNT, "unseeded-tail-message")
+        val bridge = stanzaAlias("unseeded-page-bridge")
+
+        val before = store.applyArchivePage(
+            archivePage(
+                key = key,
+                direction = ArchiveDirection.BEFORE,
+                boundaryId = "unseeded-tail-result",
+                complete = true,
+                hasEarlier = false,
+                messages = listOf(
+                    archived("unseeded-first-result", "unseeded-first", "same body", bridge),
+                    archived("unseeded-second-result", "unseeded-second", "same body", bridge),
+                    tail,
+                ),
+            ),
+        )
+
+        assertEquals(ArchivePageStatus.RETRYABLE_ERROR, before.status)
+        assertEquals("Archive page repeats one logical message", before.cursor.retryableError)
+        assertEquals(messagesBefore, store.messages(ACCOUNT))
+        assertEquals(aliasesBefore, store.aliases(ACCOUNT))
+        assertEquals(tailPositionsBefore, store.archivePositions(ACCOUNT, "unseeded-tail-message"))
+        store = reopenStore()
+        assertEquals(messagesBefore, store.messages(ACCOUNT))
+        assertEquals(aliasesBefore, store.aliases(ACCOUNT))
+        assertEquals(tailPositionsBefore, store.archivePositions(ACCOUNT, "unseeded-tail-message"))
+    }
+
+    @Test
     fun migratedBeforeRejectsIdentityRepeatConnectedByStoredMessageSeed() = runBlocking {
         var store = MessageStore(database)
         val key = archiveKey(ACCOUNT)

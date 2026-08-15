@@ -1495,6 +1495,9 @@ class MessageStore private constructor(
             } while (expanded)
             components += component
         }
+        if (components.any { it.size > 1 }) {
+            return@withTransaction retryable("Archive page repeats one logical message")
+        }
 
         val mappedCandidates = mutableListOf<MappedArchivePosition>()
         for (component in components) {
