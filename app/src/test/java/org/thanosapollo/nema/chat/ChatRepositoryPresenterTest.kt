@@ -93,6 +93,31 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
+    fun correctionProjectsOneStableEditedMessageAndUpdatedPreview() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(
+            incoming(ACCOUNT, "original", "original body").copy(
+                aliases = listOf(TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "wire-original")),
+            ),
+        )
+        store.ingest(
+            incoming(ACCOUNT, "correction", "corrected body").copy(
+                aliases = listOf(TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "wire-correction")),
+                replaceId = "wire-original",
+            ),
+        )
+
+        val timeline = ChatRepository(database).observeTimeline(ACCOUNT, PEER).first()
+        val summary = ChatRepository(database).observeConversations(ACCOUNT).first().single()
+
+        assertEquals(1, timeline.size)
+        assertEquals("original", timeline.single().id)
+        assertEquals("corrected body", timeline.single().body)
+        assertTrue(timeline.single().edited)
+        assertEquals("corrected body", summary.preview)
+    }
+
+    @Test
     fun archiveBackfillDoesNotReplaceLatestConversationPreview() = runBlocking {
         val store = MessageStore(database)
         store.ingest(

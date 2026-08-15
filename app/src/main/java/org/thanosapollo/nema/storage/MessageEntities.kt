@@ -120,6 +120,7 @@ enum class MessageDirection {
         Index(value = ["accountId", "localSequence"], unique = true),
         Index(value = ["accountId", "peerJid"]),
         Index(value = ["accountId", "peerJid", "messageKind", "threadId"]),
+        Index(value = ["accountId", "correctionTargetMessageId"]),
     ],
 )
 data class MessageEntity(
@@ -145,6 +146,8 @@ data class MessageEntity(
     val replyFallbackBody: String? = null,
     val markable: Boolean = false,
     val markerTargetId: String? = null,
+    val replaceId: String? = null,
+    val correctionTargetMessageId: String? = null,
 )
 
 @Entity(

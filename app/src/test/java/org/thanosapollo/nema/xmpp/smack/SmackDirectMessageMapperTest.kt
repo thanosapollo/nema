@@ -15,6 +15,7 @@ import org.jivesoftware.smackx.carbons.packet.CarbonExtension
 import org.jivesoftware.smackx.delay.packet.DelayInformation
 import org.jivesoftware.smackx.forward.packet.Forwarded
 import org.jivesoftware.smackx.disco.ServiceDiscoveryManager
+import org.jivesoftware.smackx.message_correct.element.MessageCorrectExtension
 import org.jivesoftware.smackx.receipts.DeliveryReceipt
 import org.jivesoftware.smackx.receipts.DeliveryReceiptRequest
 import org.jivesoftware.smackx.sid.element.OriginIdElement
@@ -86,6 +87,91 @@ class SmackDirectMessageMapperTest {
         assertEquals(envelope.thread, message.toThreadRef())
         assertTrue(DeliveryReceiptRequest.from(message) != null)
         assertTrue(message.getExtensionElement("markable", "urn:xmpp:chat-markers:0") != null)
+    }
+
+    @Test
+    fun `direct correction retains one typed replacement reference on send and receive`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        val outgoing = OutgoingMessageEnvelope(
+            accountId = attempt.accountId,
+            generation = attempt.generation,
+            attempt = 1,
+            operationId = "correction-operation",
+            originId = "correction-origin",
+            recipient = "peer@example.org",
+            body = "corrected body",
+            thread = null,
+            replaceId = "original-wire-id",
+        ).toSmackMessage()
+        val incoming = StanzaBuilder.buildMessage("correction-message")
+            .from(JidCreate.entityFullFrom("peer@example.org/device"))
+            .to(JidCreate.entityFullFrom("account@example.org/device"))
+            .ofType(Message.Type.chat)
+            .setBody("peer corrected body")
+            .addExtension(MessageCorrectExtension("peer-original-id"))
+            .build()
+
+        assertEquals(
+            "original-wire-id",
+            MessageCorrectExtension.from(outgoing).idInitialMessage,
+        )
+        assertEquals(
+            "peer-original-id",
+            requireNotNull(incoming.toIncomingEnvelope(attempt, "account@example.org")).replaceId,
+        )
+    }
+
+    @Test
+    fun `correction authority requires one typed direct replacement`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        fun message(
+            type: Message.Type,
+            vararg extensions: org.jivesoftware.smack.packet.ExtensionElement,
+        ): Message {
+            val builder = StanzaBuilder.buildMessage()
+                .from(JidCreate.entityFullFrom("peer@example.org/device"))
+                .to(JidCreate.entityFullFrom("account@example.org/device"))
+                .ofType(type)
+                .setBody("body")
+            extensions.forEach(builder::addExtension)
+            return builder.build()
+        }
+        val duplicate = message(
+            Message.Type.chat,
+            MessageCorrectExtension("original"),
+            MessageCorrectExtension("other"),
+        )
+        val spoofed = message(
+            Message.Type.chat,
+            StandardExtensionElement.builder("replace", MessageCorrectExtension.NAMESPACE)
+                .addAttribute("id", "original")
+                .build(),
+        )
+        val mixedDuplicate = message(
+            Message.Type.chat,
+            MessageCorrectExtension("original"),
+            StandardExtensionElement.builder("replace", MessageCorrectExtension.NAMESPACE)
+                .addAttribute("id", "other")
+                .build(),
+        )
+        val groupChat = message(Message.Type.groupchat, MessageCorrectExtension("original"))
+        val normal = message(Message.Type.normal, MessageCorrectExtension("original"))
+
+        assertNull(requireNotNull(duplicate.toIncomingEnvelope(attempt, "account@example.org")).replaceId)
+        assertNull(requireNotNull(spoofed.toIncomingEnvelope(attempt, "account@example.org")).replaceId)
+        assertNull(requireNotNull(mixedDuplicate.toIncomingEnvelope(attempt, "account@example.org")).replaceId)
+        assertNull(requireNotNull(groupChat.toIncomingEnvelope(attempt, "account@example.org")).replaceId)
+        assertNull(requireNotNull(normal.toIncomingEnvelope(attempt, "account@example.org")).replaceId)
     }
 
     @Test
@@ -471,7 +557,7 @@ class SmackDirectMessageMapperTest {
     }
 
     @Test
-    fun `Nema advertises semantic reply support`() {
+    fun `Nema advertises semantic reply and correction support`() {
         val connection = XMPPTCPConnection(
             XMPPTCPConnectionConfiguration.builder()
                 .setXmppDomain(JidCreate.domainBareFrom("example.org"))
@@ -482,6 +568,10 @@ class SmackDirectMessageMapperTest {
         advertiseNemaFeatures(connection)
 
         assertTrue(ServiceDiscoveryManager.getInstanceFor(connection).includesFeature(REPLY_NAMESPACE))
+        assertTrue(
+            ServiceDiscoveryManager.getInstanceFor(connection)
+                .includesFeature(MessageCorrectExtension.NAMESPACE),
+        )
     }
 
     @Test
@@ -575,6 +665,7 @@ class SmackDirectMessageMapperTest {
             .to(JidCreate.entityFullFrom("account@example.org/device"))
             .ofType(Message.Type.chat)
             .setBody("received")
+            .addExtension(MessageCorrectExtension("received-original"))
             .build()
         fun wrapper(
             from: String,
@@ -601,6 +692,27 @@ class SmackDirectMessageMapperTest {
             received,
             wrapper("account@example.org", CarbonExtension.Direction.received, received)
                 .toTrustedCarbonMessage("account@example.org")?.message,
+        )
+        val receivedCarbon = requireNotNull(
+            wrapper("account@example.org", CarbonExtension.Direction.received, received)
+                .toTrustedCarbonMessage("account@example.org"),
+        )
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        assertEquals(
+            "received-original",
+            requireNotNull(
+                receivedCarbon.message.toIncomingEnvelope(
+                    attempt,
+                    "account@example.org",
+                    suppliedSentAtEpochMs = receivedCarbon.sentAtEpochMs,
+                    suppliedSentTimeSource = receivedCarbon.sentTimeSource,
+                ),
+            ).replaceId,
         )
         assertNull(
             wrapper("peer@example.org", CarbonExtension.Direction.sent, sent)
@@ -971,6 +1083,124 @@ class SmackDirectMessageMapperTest {
         assertEquals(MessageReceiptStage.DISPLAYED, archived.signal?.stage)
         assertEquals("sent-operation", archived.signal?.targetId)
         requireMamPageBoundaries("marker-result", "marker-result", listOf(archived))
+    }
+
+    @Test
+    fun `account MAM preserves direct correction metadata and trusted time`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        val correction = StanzaBuilder.buildMessage("correction")
+            .from(JidCreate.entityFullFrom("peer@example.org/device"))
+            .to(JidCreate.entityFullFrom("account@example.org/device"))
+            .ofType(Message.Type.chat)
+            .setBody("corrected body")
+            .addExtension(MessageCorrectExtension("original-wire-id"))
+            .build()
+        val archived = normalizeMamResults(
+            carriers = listOf(
+                StanzaBuilder.buildMessage()
+                    .from(JidCreate.entityBareFrom("account@example.org"))
+                    .build(),
+            ),
+            results = listOf(
+                NemaMamResultExtension(
+                    queryId = "query",
+                    id = "correction-result",
+                    actualMessage = correction,
+                    delay = DelayInformation(Date.from(Instant.ofEpochMilli(2_000))),
+                ),
+            ),
+            attempt = attempt,
+            expectedArchiveAuthority = "account@example.org",
+            trustStableIds = true,
+        ).single()
+
+        assertEquals("original-wire-id", archived.message?.replaceId)
+        assertEquals("corrected body", archived.message?.body)
+        assertEquals(2_000L, archived.message?.sentAtEpochMs)
+        assertEquals(MessageTimeSource.MAM, archived.message?.sentTimeSource)
+        assertNull(archived.signal)
+    }
+
+    @Test
+    fun `room MAM cannot grant direct correction authority`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        val correction = StanzaBuilder.buildMessage("forged-correction")
+            .from(JidCreate.entityFullFrom("peer@example.org/device"))
+            .to(JidCreate.entityFullFrom("account@example.org/device"))
+            .ofType(Message.Type.chat)
+            .setBody("forged corrected body")
+            .addExtension(MessageCorrectExtension("direct-target"))
+            .build()
+        val archived = normalizeMamResults(
+            carriers = listOf(
+                StanzaBuilder.buildMessage()
+                    .from(JidCreate.entityBareFrom("room@conference.example.org"))
+                    .build(),
+            ),
+            results = listOf(
+                NemaMamResultExtension(
+                    queryId = "query",
+                    id = "room-correction-result",
+                    actualMessage = correction,
+                    delay = DelayInformation(Date.from(Instant.ofEpochMilli(1_000))),
+                ),
+            ),
+            attempt = attempt,
+            expectedArchiveAuthority = "room@conference.example.org",
+            mappingBareJid = "account@example.org",
+            trustStableIds = false,
+        ).single()
+
+        assertNull(archived.message)
+        assertNull(archived.signal)
+    }
+
+    @Test
+    fun `room MAM retains groupchat content under room authority`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        val roomMessage = StanzaBuilder.buildMessage("room-message")
+            .from(JidCreate.entityFullFrom("room@conference.example.org/alice"))
+            .ofType(Message.Type.groupchat)
+            .setBody("room body")
+            .build()
+        val archived = normalizeMamResults(
+            carriers = listOf(
+                StanzaBuilder.buildMessage()
+                    .from(JidCreate.entityBareFrom("room@conference.example.org"))
+                    .build(),
+            ),
+            results = listOf(
+                NemaMamResultExtension(
+                    queryId = "query",
+                    id = "room-message-result",
+                    actualMessage = roomMessage,
+                    delay = DelayInformation(Date.from(Instant.ofEpochMilli(1_000))),
+                ),
+            ),
+            attempt = attempt,
+            expectedArchiveAuthority = "room@conference.example.org",
+            mappingBareJid = "account@example.org",
+            trustStableIds = false,
+        ).single()
+
+        assertEquals(org.thanosapollo.nema.thread.MessageKind.GROUPCHAT, archived.message?.kind)
+        assertEquals("room body", archived.message?.body)
+        assertNull(archived.signal)
     }
 
     @Test

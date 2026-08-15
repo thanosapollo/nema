@@ -5,6 +5,19 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 internal object MessageSchema {
+    val MIGRATION_11_12: Migration = object : Migration(11, 12) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN replaceId TEXT")
+            db.execSQL("ALTER TABLE messages ADD COLUMN correctionTargetMessageId TEXT")
+            db.execSQL(
+                """
+                CREATE INDEX IF NOT EXISTS index_messages_accountId_correctionTargetMessageId
+                ON messages(accountId, correctionTargetMessageId)
+                """.trimIndent(),
+            )
+        }
+    }
+
     val MIGRATION_10_11: Migration = object : Migration(10, 11) {
         override fun migrate(db: SupportSQLiteDatabase) {
             db.execSQL("ALTER TABLE message_outbox ADD COLUMN receiptStage TEXT")

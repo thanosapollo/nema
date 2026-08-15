@@ -342,6 +342,46 @@ class NemaDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migration11To12PreservesMessagesAndAddsNeutralCorrectionState() {
+        helper.createDatabase(DATABASE_NAME, 11).apply {
+            execSQL(
+                "INSERT INTO accounts (id, bareJid, authenticationId, serviceDomain) " +
+                    "VALUES ('account-a', 'self@example.org', 'self', 'example.org')",
+            )
+            execSQL(
+                "INSERT INTO peers (accountId, jid, room) " +
+                    "VALUES ('account-a', 'peer@example.org', 0)",
+            )
+            execSQL(
+                """
+                INSERT INTO messages (
+                    accountId, localMessageId, peerJid, senderJid, direction,
+                    messageKind, body, localSequence, markable
+                ) VALUES ('account-a', 'legacy', 'peer@example.org',
+                    'peer@example.org', 'INBOUND', 'CHAT', 'legacy', 1, 0)
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_NAME,
+            12,
+            true,
+            MessageSchema.MIGRATION_11_12,
+        ).use { database ->
+            database.query(
+                "SELECT body, replaceId, correctionTargetMessageId FROM messages WHERE localMessageId = 'legacy'",
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals("legacy", cursor.getString(0))
+                assertTrue(cursor.isNull(1))
+                assertTrue(cursor.isNull(2))
+            }
+        }
+    }
+
     private companion object {
         const val DATABASE_NAME = "nema-migration-test"
     }

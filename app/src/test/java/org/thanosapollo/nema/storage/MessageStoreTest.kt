@@ -159,6 +159,155 @@ class MessageStoreTest {
     }
 
     @Test
+    fun directCorrectionsReconcileDeferredIdempotentlyAndPreserveBaseIdentity() = runBlocking {
+        var store = MessageStore(database)
+        val targetAlias = TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "original-wire-id")
+        val correctionAlias = TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "correction-wire-id")
+        store.ingest(
+            incoming(
+                localId = "correction-first",
+                body = "corrected body",
+                aliases = listOf(correctionAlias),
+                replaceId = "original-wire-id",
+            ).copy(sentAtEpochMs = 2_000L, sentTimeSource = MessageTimeSource.MAM),
+        )
+        assertTrue(database.messageDao().observeDirectTimeline(ACCOUNT, PEER).first().isEmpty())
+
+        store.ingest(
+            incoming(
+                localId = "original-later",
+                body = "original body",
+                aliases = listOf(targetAlias),
+            ).copy(sentAtEpochMs = 1_000L, sentTimeSource = MessageTimeSource.MAM),
+        )
+        var row = database.messageDao().observeDirectTimeline(ACCOUNT, PEER).first().single()
+        assertEquals("original-later", row.localMessageId)
+        assertEquals("corrected body", row.correctedBody)
+        assertTrue(row.edited)
+
+        store.ingest(
+            incoming(
+                localId = "older-correction",
+                body = "stale correction",
+                aliases = listOf(TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "older-correction-id")),
+                replaceId = "original-wire-id",
+            ).copy(sentAtEpochMs = 1_500L, sentTimeSource = MessageTimeSource.MAM),
+        )
+        store.ingest(
+            incoming(
+                localId = "correction-replay",
+                body = "corrected body",
+                aliases = listOf(correctionAlias),
+                replaceId = "original-wire-id",
+            ).copy(sentAtEpochMs = 2_000L, sentTimeSource = MessageTimeSource.MAM),
+        )
+        assertEquals(3, store.messages(ACCOUNT).size)
+        store = reopenStore()
+        row = database.messageDao().observeDirectTimeline(ACCOUNT, PEER).first().single()
+        assertEquals("original-later", row.localMessageId)
+        assertEquals("corrected body", row.correctedBody)
+        assertTrue(row.edited)
+        assertEquals("correction-first", store.messages(ACCOUNT).single { it.body == "corrected body" }.localMessageId)
+    }
+
+    @Test
+    fun correctionTargetSurvivesDuplicateOriginalMergeAndRestart() = runBlocking {
+        var store = MessageStore(database)
+        val originAlias = TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "original-origin")
+        val targetAlias = TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "original-message-id")
+        store.ingest(
+            incoming(localId = "origin-original", body = "original", aliases = listOf(originAlias)),
+        )
+        store.ingest(
+            incoming(localId = "message-original", body = "original", aliases = listOf(targetAlias)),
+        )
+        store.ingest(
+            incoming(
+                localId = "correction",
+                body = "corrected",
+                aliases = listOf(
+                    TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "correction-message-id"),
+                ),
+                replaceId = "original-message-id",
+            ),
+        )
+
+        store.ingest(
+            incoming(
+                localId = "bridging-replay",
+                body = "original",
+                aliases = listOf(originAlias, targetAlias),
+            ),
+        )
+        store = reopenStore()
+
+        val row = database.messageDao().observeDirectTimeline(ACCOUNT, PEER).first().single()
+        assertEquals("origin-original", row.localMessageId)
+        assertEquals("corrected", row.correctedBody)
+        assertTrue(row.edited)
+        assertEquals(
+            "origin-original",
+            store.messages(ACCOUNT).single { it.replaceId != null }.correctionTargetMessageId,
+        )
+    }
+
+    @Test
+    fun directCorrectionsFailClosedOutsideExactInboundConversationAuthority() = runBlocking {
+        addAccount(OTHER_ACCOUNT)
+        val store = MessageStore(database)
+        val targetAlias = TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "target-wire-id")
+        store.ingest(incoming(localId = "target", body = "original", aliases = listOf(targetAlias)))
+
+        val invalid = listOf(
+            incoming(
+                accountId = OTHER_ACCOUNT,
+                localId = "wrong-account",
+                body = "wrong account",
+                replaceId = "target-wire-id",
+            ),
+            incoming(
+                localId = "wrong-peer",
+                peerJid = "other@example.org",
+                sender = "other@example.org",
+                body = "wrong peer",
+                replaceId = "target-wire-id",
+            ),
+            incoming(
+                localId = "wrong-sender",
+                sender = "attacker@example.org",
+                body = "wrong sender",
+                replaceId = "target-wire-id",
+            ),
+            incoming(
+                localId = "wrong-thread",
+                threadId = "different-thread",
+                body = "wrong thread",
+                replaceId = "target-wire-id",
+            ),
+            incoming(
+                localId = "attachment-correction",
+                body = "attachment correction",
+                replaceId = "target-wire-id",
+            ).copy(attachmentUrl = "https://example.org/file"),
+            incoming(
+                localId = "reply-correction",
+                body = "reply correction",
+                replaceId = "target-wire-id",
+            ).copy(replyToId = "another-message"),
+        )
+        invalid.forEach { store.ingest(it) }
+
+        val row = database.messageDao().observeDirectTimeline(ACCOUNT, PEER).first().single()
+        assertEquals("target", row.localMessageId)
+        assertEquals("original", row.body)
+        assertEquals(null, row.correctedBody)
+        assertFalse(row.edited)
+        assertTrue(store.messages(ACCOUNT).filter { it.replaceId != null }.all {
+            it.correctionTargetMessageId == null
+        })
+    }
+
+    @Test
     fun groupchatIngestMarksPeerAsRoom() = runBlocking {
         val store = MessageStore(database)
         store.ingest(
@@ -2857,6 +3006,7 @@ class MessageStoreTest {
         aliases: List<TrustedIdentityAlias> = emptyList(),
         threadId: String? = null,
         parentThreadId: String? = null,
+        replaceId: String? = null,
     ) = IncomingMessage(
         accountId = accountId,
         localMessageId = localId,
@@ -2871,6 +3021,7 @@ class MessageStoreTest {
         archiveAuthority = archiveAuthority,
         archiveScope = archiveScope,
         aliases = aliases,
+        replaceId = replaceId,
     )
 
     private fun outbound(suffix: String) = OutboundIntent(

@@ -95,11 +95,13 @@ data class IncomingMessageEnvelope(
     val sentTimeSource: MessageTimeSource? = null,
     val receiptRequested: Boolean = false,
     val markable: Boolean = false,
+    val replaceId: String? = null,
 ) {
     init {
         require(peer.isNotEmpty()) { "Peer must not be empty" }
         require(sender.isNotEmpty()) { "Sender must not be empty" }
         require(originId == null || originId.isNotEmpty()) { "Origin ID must not be empty" }
+        require(replaceId == null || replaceId.isNotEmpty()) { "Correction target must not be empty" }
         require(body.isNotEmpty()) { "Message body must not be empty" }
         require(stanzaIds.distinct().size == stanzaIds.size) { "Stanza IDs must be unique" }
         require((sentAtEpochMs == null) == (sentTimeSource == null)) {
@@ -234,6 +236,7 @@ data class OutgoingMessageEnvelope(
     val attachmentMime: String? = null,
     val attachmentSize: Long? = null,
     val reply: MessageReplyEnvelope? = null,
+    val replaceId: String? = null,
 ) {
     init {
         require(attempt > 0) { "Send attempt must be positive" }
@@ -241,6 +244,8 @@ data class OutgoingMessageEnvelope(
         require(originId.isNotEmpty()) { "Origin ID must not be empty" }
         require(recipient.isNotEmpty()) { "Recipient must not be empty" }
         require(body.isNotEmpty()) { "Message body must not be empty" }
+        require(replaceId == null || replaceId.isNotEmpty()) { "Correction target must not be empty" }
+        require(kind == MessageKind.CHAT || replaceId == null) { "Only direct chat messages may be corrected" }
     }
 }
 

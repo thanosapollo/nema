@@ -5,6 +5,7 @@ import androidx.room.Delete
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.RewriteQueriesToDropUnusedColumns
 import androidx.room.Transaction
 import androidx.room.Update
 import androidx.room.Upsert
@@ -237,6 +238,34 @@ abstract class MessageDao {
     @Update
     abstract suspend fun updateMessage(message: MessageEntity)
 
+    @Query(
+        """
+        UPDATE messages SET correctionTargetMessageId = :winnerId
+        WHERE accountId = :accountId AND correctionTargetMessageId = :loserId
+        """,
+    )
+    abstract suspend fun reparentCorrections(accountId: String, loserId: String, winnerId: String): Int
+
+    @Query(
+        """
+        SELECT * FROM messages
+        WHERE accountId = :accountId
+          AND peerJid = :peerJid
+          AND senderJid = :senderJid
+          AND messageKind = 'CHAT'
+          AND direction = 'INBOUND'
+          AND replaceId = :replaceId
+          AND correctionTargetMessageId IS NULL
+        ORDER BY localSequence, localMessageId
+        """,
+    )
+    abstract suspend fun unresolvedCorrections(
+        accountId: String,
+        peerJid: String,
+        senderJid: String,
+        replaceId: String,
+    ): List<MessageEntity>
+
     @Delete
     abstract suspend fun deleteMessage(message: MessageEntity)
 
@@ -362,7 +391,20 @@ abstract class MessageDao {
           SELECT messages.accountId AS accountId,
             messages.localMessageId AS localMessageId,
             messages.peerJid AS peerJid,
-            messages.body AS preview,
+            COALESCE(
+              (
+                SELECT correction.body
+                FROM messages AS correction
+                WHERE correction.accountId = messages.accountId
+                  AND correction.correctionTargetMessageId = messages.localMessageId
+                ORDER BY correction.sentAtEpochMs IS NULL,
+                  correction.sentAtEpochMs DESC,
+                  correction.localSequence DESC,
+                  correction.localMessageId DESC
+                LIMIT 1
+              ),
+              messages.body
+            ) AS preview,
             messages.localSequence AS localSequence,
             messages.messageKind AS messageKind,
             messages.sentAtEpochMs AS sentAtEpochMs,
@@ -391,6 +433,7 @@ abstract class MessageDao {
            END
           WHERE messages.accountId = :accountId
             AND messages.messageKind IN ('CHAT', 'GROUPCHAT')
+            AND messages.replaceId IS NULL
         ),
         latest_archive_ordinals AS (
           SELECT peerJid, conversationArchiveAuthority, conversationArchiveScope,
@@ -498,11 +541,13 @@ abstract class MessageDao {
         """
         SELECT * FROM messages
         WHERE accountId = :accountId AND messageKind = 'CHAT'
+          AND replaceId IS NULL
         ORDER BY archiveOrdinal IS NULL, archiveOrdinal, localSequence, localMessageId
         """,
     )
     abstract fun observeConversationMessages(accountId: String): Flow<List<MessageEntity>>
 
+    @RewriteQueriesToDropUnusedColumns
     @Query(
         """
         SELECT messages.*, message_outbox.operationId AS operationId,
@@ -510,6 +555,22 @@ abstract class MessageDao {
           message_outbox.receiptStage AS receiptStage,
           message_outbox.generation AS outboxGeneration,
           message_outbox.attempt AS outboxAttempt,
+          (
+            SELECT correction.body
+            FROM messages AS correction
+            WHERE correction.accountId = messages.accountId
+              AND correction.correctionTargetMessageId = messages.localMessageId
+            ORDER BY correction.sentAtEpochMs IS NULL,
+              correction.sentAtEpochMs DESC,
+              correction.localSequence DESC,
+              correction.localMessageId DESC
+            LIMIT 1
+          ) AS correctedBody,
+          EXISTS(
+            SELECT 1 FROM messages AS correction
+            WHERE correction.accountId = messages.accountId
+              AND correction.correctionTargetMessageId = messages.localMessageId
+          ) AS edited,
           (
             SELECT alias.value
             FROM trusted_identity_aliases AS alias
@@ -556,6 +617,7 @@ abstract class MessageDao {
          AND message_outbox.messageId = messages.localMessageId
         WHERE messages.accountId = :accountId AND messages.peerJid = :peerJid
           AND messages.messageKind IN ('CHAT', 'GROUPCHAT')
+          AND messages.replaceId IS NULL
         ORDER BY (
           SELECT position.archiveOrdinal
           FROM archive_message_positions AS position
@@ -1023,6 +1085,8 @@ data class TimelineRow(
     val replyFallbackBody: String? = null,
     val markable: Boolean = false,
     val markerTargetId: String? = null,
+    val correctedBody: String? = null,
+    val edited: Boolean = false,
     val replyReferenceId: String? = null,
     val conversationArchiveOrdinal: Long? = null,
     val conversationArchiveAuthority: String,
@@ -1091,6 +1155,7 @@ data class IncomingMessage(
     val sentTimeSource: MessageTimeSource? = null,
     val markable: Boolean = false,
     val markerTargetId: String? = null,
+    val replaceId: String? = null,
 ) {
     init {
         require(accountId.isNotEmpty()) { "Account ID must not be empty" }
@@ -1115,6 +1180,10 @@ data class IncomingMessage(
             "Message time and provenance must be stored together"
         }
         require(!markable || !markerTargetId.isNullOrEmpty()) { "Markable messages require a target ID" }
+        require(replaceId == null || replaceId.isNotEmpty()) { "Correction target must not be empty" }
+        require(replaceId == null || (messageKind == MessageKind.CHAT && direction == MessageDirection.INBOUND)) {
+            "Only inbound direct messages may correct stored content"
+        }
     }
 }
 
@@ -1457,6 +1526,7 @@ class MessageStore private constructor(
         }
         writeBoundary(MessageWriteBoundary.AFTER_ALIAS)
 
+        winner = reconcileCorrections(dao, incoming, winner)
         val reconciled = winner
             .withPreferredTime(incoming.sentAtEpochMs, incoming.sentTimeSource)
             .withMarkerMetadata(incoming)
@@ -1468,6 +1538,44 @@ class MessageStore private constructor(
         confirmMatchingOutbox(incoming, winner.localMessageId)
         writeBoundary(MessageWriteBoundary.AFTER_OUTBOX)
         return IngestionResult(winner.localMessageId, mergedRows, identityConflict)
+    }
+
+    private suspend fun reconcileCorrections(
+        dao: MessageDao,
+        incoming: IncomingMessage,
+        stored: MessageEntity,
+    ): MessageEntity {
+        var winner = stored
+        val replaceId = winner.replaceId
+        if (replaceId != null && winner.correctionTargetMessageId == null) {
+            val target = dao.trustedAlias(
+                winner.accountId,
+                IdentityAliasKind.MESSAGE_ID,
+                winner.senderJid,
+                replaceId,
+            )?.messageId?.let { dao.message(winner.accountId, it) }
+            if (target != null && winner.canCorrect(target)) {
+                winner = winner.copy(correctionTargetMessageId = target.localMessageId)
+                dao.updateMessage(winner)
+            }
+        }
+        if (winner.replaceId == null) {
+            val resolved = mutableSetOf<String>()
+            for (alias in incoming.aliases) {
+                if (alias.kind != IdentityAliasKind.MESSAGE_ID || alias.authority != winner.senderJid) continue
+                for (correction in dao.unresolvedCorrections(
+                    winner.accountId,
+                    winner.peerJid,
+                    winner.senderJid,
+                    alias.value,
+                )) {
+                    if (resolved.add(correction.localMessageId) && correction.canCorrect(winner)) {
+                        dao.updateMessage(correction.copy(correctionTargetMessageId = winner.localMessageId))
+                    }
+                }
+            }
+        }
+        return winner
     }
 
     private suspend fun attachArchivePosition(
@@ -2063,6 +2171,7 @@ class MessageStore private constructor(
         dao.reparentOutbox(winner.accountId, loser.localMessageId, winner.localMessageId)
         reparentConflicts(loser, winner)
         reparentArchivePositions(loser, winner)
+        dao.reparentCorrections(winner.accountId, loser.localMessageId, winner.localMessageId)
         writeBoundary(MessageWriteBoundary.AFTER_DEPENDENT_REPARENT)
         dao.deleteMessage(loser)
         val withArchive = if (winner.archiveOrdinal == null && loser.archiveOrdinal != null) {
@@ -2276,6 +2385,7 @@ private fun IncomingMessage.toEntity(localSequence: Long) = MessageEntity(
     replyFallbackBody = replyFallbackBody,
     markable = markable,
     markerTargetId = markerTargetId,
+    replaceId = replaceId,
 )
 
 private fun TrustedIdentityAlias.toEntity(accountId: String, messageId: String) =
@@ -2317,7 +2427,25 @@ private fun MessageEntity.isCompatibleWith(incoming: IncomingMessage): Boolean =
         attachmentSize == incoming.attachmentSize &&
         replyToId == incoming.replyToId &&
         replyToJid == incoming.replyToJid &&
-        replyFallbackBody == incoming.replyFallbackBody
+        replyFallbackBody == incoming.replyFallbackBody &&
+        replaceId == incoming.replaceId
+
+private fun MessageEntity.canCorrect(target: MessageEntity): Boolean =
+    replaceId != null &&
+        localMessageId != target.localMessageId &&
+        accountId == target.accountId &&
+        peerJid == target.peerJid &&
+        senderJid == peerJid &&
+        senderJid == target.senderJid &&
+        direction == MessageDirection.INBOUND &&
+        direction == target.direction &&
+        messageKind == MessageKind.CHAT &&
+        target.messageKind == MessageKind.CHAT &&
+        target.replaceId == null &&
+        threadId == target.threadId &&
+        parentThreadId == target.parentThreadId &&
+        attachmentUrl == null &&
+        replyToId == null
 
 private data class ArchivePosition(
     val authority: String,

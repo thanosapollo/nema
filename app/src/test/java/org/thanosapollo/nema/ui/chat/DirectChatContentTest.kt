@@ -697,6 +697,19 @@ class DirectChatContentTest {
     }
 
     @Test
+    fun correctedMessageExposesAccessibleEditedIndicator() {
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(message("edited", outgoing = false).copy(edited = true)),
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Edited").assertIsDisplayed()
+    }
+
+    @Test
     fun visibleMarkableMessageReportsOnceWhenReadReceiptsAreEnabled() {
         var displayedCalls = 0
         composeRule.setContent {

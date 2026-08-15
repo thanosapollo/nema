@@ -41,6 +41,7 @@ import org.jivesoftware.smackx.httpfileupload.HttpFileUploadManager
 import org.jivesoftware.smackx.iqprivate.PrivateDataManager
 import org.jivesoftware.smackx.mam.MamManager
 import org.jivesoftware.smackx.mam.element.MamElements.MamResultExtension
+import org.jivesoftware.smackx.message_correct.element.MessageCorrectExtension
 import org.jivesoftware.smackx.muc.MultiUserChat
 import org.jivesoftware.smackx.muc.MultiUserChatException
 import org.jivesoftware.smackx.muc.MultiUserChatManager
@@ -172,6 +173,7 @@ internal fun advertiseNemaFeatures(connection: XMPPConnection) {
         addFeature(REPLY_NAMESPACE)
         addFeature(RECEIPTS_NAMESPACE)
         addFeature(CHAT_MARKERS_NAMESPACE)
+        addFeature(MessageCorrectExtension.NAMESPACE)
     }
 }
 
@@ -920,6 +922,7 @@ internal fun OutgoingMessageEnvelope.toSmackMessage(): Message {
         )
     }
     if (kind == MessageKind.CHAT) {
+        replaceId?.let { builder.addExtension(MessageCorrectExtension(it)) }
         DeliveryReceiptRequest.addTo(builder)
         builder.addMarkable()
     }
@@ -992,6 +995,18 @@ internal fun Message.toIncomingEnvelope(
         it.elementName == org.thanosapollo.nema.xmpp.markers.MARKABLE_ELEMENT &&
             it.namespace == CHAT_MARKERS_NAMESPACE && it is StandardExtensionElement
     } == 1
+    val replaceId = if (type == Message.Type.chat) {
+        extensions.filter {
+            it.elementName == MessageCorrectExtension.ELEMENT &&
+                it.namespace == MessageCorrectExtension.NAMESPACE
+        }
+            .singleOrNull()
+            ?.let { it as? MessageCorrectExtension }
+            ?.idInitialMessage
+            ?.takeIf(String::isNotEmpty)
+    } else {
+        null
+    }
     val share = oobShare()
     val reply = replyReference()
     val parsed = if (reply == null) null else parseReplyBody()
@@ -1057,6 +1072,7 @@ internal fun Message.toIncomingEnvelope(
             sentTimeSource = sentTimeSource,
             receiptRequested = receiptRequested,
             markable = markable,
+            replaceId = replaceId,
         )
     }
 }
@@ -1179,20 +1195,23 @@ internal fun normalizeMamResults(
         val signal = owned.actualMessage
             ?.takeIf { expectedArchiveAuthority == mappingBareJid }
             ?.toIncomingSignal(attempt, mappingBareJid)
+        val mappedMessage = if (signal == null) {
+            owned.actualMessage?.toIncomingEnvelope(
+                attempt,
+                mappingBareJid,
+                trustStableIds,
+                ownRoomNick,
+                owned.forwarded.delayInformation?.stamp?.time,
+                owned.forwarded.delayInformation?.let { MessageTimeSource.MAM },
+                receivedAtEpochMs,
+            )
+        } else {
+            null
+        }
         ArchiveMessageEnvelope(
             resultId = owned.id,
-            message = if (signal == null) {
-                owned.actualMessage?.toIncomingEnvelope(
-                    attempt,
-                    mappingBareJid,
-                    trustStableIds,
-                    ownRoomNick,
-                    owned.forwarded.delayInformation?.stamp?.time,
-                    owned.forwarded.delayInformation?.let { MessageTimeSource.MAM },
-                    receivedAtEpochMs,
-                )
-            } else {
-                null
+            message = mappedMessage?.takeIf {
+                expectedArchiveAuthority == mappingBareJid || it.kind == MessageKind.GROUPCHAT
             },
             signal = signal,
         )

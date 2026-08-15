@@ -1510,6 +1510,9 @@ fun MessageTimeline(
                                         Text(it, style = MaterialTheme.typography.bodyMedium)
                                     }
                                 }
+                                if (message.edited) {
+                                    Text("Edited", style = MaterialTheme.typography.labelSmall)
+                                }
                                 if (!conversationGroupChat && !message.groupChat) {
                                     message.threadSummaries.forEach { summary ->
                                         ThreadSummaryButton(

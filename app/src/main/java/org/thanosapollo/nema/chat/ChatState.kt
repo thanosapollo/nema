@@ -146,6 +146,7 @@ data class TimelineMessage(
     val reply: MessageReplyPresentation? = null,
     val markable: Boolean = false,
     val markerTargetId: String? = null,
+    val edited: Boolean = false,
     val sentAtEpochMs: Long? = null,
     val threadSummaries: List<ThreadSummary> = emptyList(),
 )
@@ -623,7 +624,7 @@ internal fun canonicalDirectPeer(value: String): String? = runCatching {
 private fun TimelineRow.toPresentation(replyReferenceIds: Set<String>) = TimelineMessage(
     id = localMessageId,
     senderJid = senderJid,
-    body = body,
+    body = correctedBody ?: body,
     outgoing = direction == MessageDirection.OUTBOUND,
     delivery = if (direction == MessageDirection.OUTBOUND) {
         receiptStage?.let(org.thanosapollo.nema.xmpp.transport.MessageReceiptStage::valueOf)
@@ -660,6 +661,7 @@ private fun TimelineRow.toPresentation(replyReferenceIds: Set<String>) = Timelin
     replyFallbackBody = replyFallbackBody,
     markable = markable,
     markerTargetId = markerTargetId,
+    edited = edited,
     sentAtEpochMs = sentAtEpochMs,
 )
 
