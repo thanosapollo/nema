@@ -41,6 +41,33 @@ enum class MessageTimeSource {
     MAM,
 }
 
+enum class MessageReceiptStage {
+    RECEIVED,
+    DISPLAYED,
+    ACKNOWLEDGED,
+}
+
+enum class MessageSignalProtocol {
+    DELIVERY_RECEIPT,
+    CHAT_MARKER,
+}
+
+data class IncomingMessageSignal(
+    val accountId: AccountId,
+    val generation: ConnectionGeneration,
+    val peer: String,
+    val sender: String,
+    val targetId: String,
+    val stage: MessageReceiptStage,
+    val protocol: MessageSignalProtocol,
+) {
+    init {
+        require(peer.isNotEmpty()) { "Peer must not be empty" }
+        require(sender.isNotEmpty()) { "Sender must not be empty" }
+        require(targetId.isNotEmpty()) { "Receipt target must not be empty" }
+    }
+}
+
 data class ConnectionEnvelope(
     val accountId: AccountId,
     val generation: ConnectionGeneration,
@@ -66,6 +93,8 @@ data class IncomingMessageEnvelope(
     val reply: MessageReplyEnvelope? = null,
     val sentAtEpochMs: Long? = null,
     val sentTimeSource: MessageTimeSource? = null,
+    val receiptRequested: Boolean = false,
+    val markable: Boolean = false,
 ) {
     init {
         require(peer.isNotEmpty()) { "Peer must not be empty" }
@@ -75,6 +104,23 @@ data class IncomingMessageEnvelope(
         require(stanzaIds.distinct().size == stanzaIds.size) { "Stanza IDs must be unique" }
         require((sentAtEpochMs == null) == (sentTimeSource == null)) {
             "Message time and provenance must be stored together"
+        }
+    }
+}
+
+data class OutgoingMessageSignal(
+    val accountId: AccountId,
+    val generation: ConnectionGeneration,
+    val recipient: String,
+    val targetId: String,
+    val stage: MessageReceiptStage,
+    val protocol: MessageSignalProtocol,
+) {
+    init {
+        require(recipient.isNotEmpty()) { "Signal recipient must not be empty" }
+        require(targetId.isNotEmpty()) { "Signal target must not be empty" }
+        require(protocol == MessageSignalProtocol.CHAT_MARKER || stage == MessageReceiptStage.RECEIVED) {
+            "Delivery receipts can only acknowledge receipt"
         }
     }
 }
@@ -149,9 +195,11 @@ data class ArchivePageRequest(
 data class ArchiveMessageEnvelope(
     val resultId: String,
     val message: IncomingMessageEnvelope?,
+    val signal: IncomingMessageSignal? = null,
 ) {
     init {
         require(resultId.isNotEmpty()) { "MAM result ID must not be empty" }
+        require(message == null || signal == null) { "MAM result cannot be both content and control" }
     }
 }
 

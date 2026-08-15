@@ -75,6 +75,7 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -163,6 +164,9 @@ fun DirectChatContent(
     ownPhotoBytes: ByteArray? = null,
     onOpenOwnProfile: () -> Unit = {},
     onUploadFile: suspend (String, String?, ByteArray) -> org.thanosapollo.nema.xmpp.httpupload.UploadedFile? = { _, _, _ -> null },
+    readReceiptsEnabled: Boolean = false,
+    activityResumed: Boolean = false,
+    onMessageDisplayed: suspend (TimelineMessage) -> Boolean = { false },
     modifier: Modifier = Modifier,
 ) {
     key(state.accountId) {
@@ -481,6 +485,9 @@ fun DirectChatContent(
                         MessageTimeline(
                             messages = state.messages,
                             conversationGroupChat = state.selectedPeerGroupChat,
+                            readReceiptsEnabled = readReceiptsEnabled,
+                            activityResumed = activityResumed,
+                            onMessageDisplayed = onMessageDisplayed,
                             latestFocusRequest = latestFocusRequest,
                             initialViewport = timelineViewports[conversationKey],
                             onViewportChanged = { anchor ->
@@ -1305,11 +1312,31 @@ internal fun restoredTimelineIndex(
     return if (exact >= 0) exact else anchor.fallbackIndex.coerceIn(0, messages.lastIndex)
 }
 
+internal fun displayedMarkerCandidates(
+    messages: List<TimelineMessage>,
+    visibleMessageIds: Set<String>,
+    enabled: Boolean,
+    resumed: Boolean,
+    conversationGroupChat: Boolean,
+): List<TimelineMessage> {
+    if (!enabled || !resumed || conversationGroupChat || visibleMessageIds.isEmpty()) return emptyList()
+    return messages.filter { message ->
+        message.id in visibleMessageIds &&
+            !message.outgoing &&
+            !message.groupChat &&
+            message.markable &&
+            !message.markerTargetId.isNullOrEmpty()
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MessageTimeline(
     messages: List<TimelineMessage>,
     conversationGroupChat: Boolean = false,
+    readReceiptsEnabled: Boolean = false,
+    activityResumed: Boolean = false,
+    onMessageDisplayed: suspend (TimelineMessage) -> Boolean = { false },
     latestFocusRequest: Long = 0L,
     initialViewport: TimelineViewportAnchor? = null,
     onViewportChanged: (TimelineViewportAnchor) -> Unit = {},
@@ -1322,6 +1349,7 @@ fun MessageTimeline(
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val currentOnViewportChanged by rememberUpdatedState(onViewportChanged)
+    val currentOnMessageDisplayed by rememberUpdatedState(onMessageDisplayed)
     val atLatest by remember {
         derivedStateOf {
             listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
@@ -1330,8 +1358,11 @@ fun MessageTimeline(
     var previousLatestId by remember { mutableStateOf<String?>(null) }
     var newIncoming by remember { mutableIntStateOf(0) }
     var viewportRestored by remember { mutableStateOf(initialViewport == null) }
+    var visibleMessageIds by remember { mutableStateOf(emptySet<String>()) }
+    var reportedMarkerTargets by remember { mutableStateOf(emptySet<String>()) }
     val latestId = messages.lastOrNull()?.id
     val viewportMessageIds = messages.map(TimelineMessage::id)
+    val markerEvidence = messages.map { Triple(it.id, it.markable, it.markerTargetId) }
     LaunchedEffect(initialViewport, viewportMessageIds, viewportRestored) {
         if (!viewportRestored && messages.isNotEmpty()) {
             val anchor = requireNotNull(initialViewport)
@@ -1349,6 +1380,38 @@ fun MessageTimeline(
                 val bounded = index.coerceIn(0, reversed.lastIndex)
                 currentOnViewportChanged(TimelineViewportAnchor(reversed[bounded], offset, bounded))
             }
+    }
+    LaunchedEffect(listState, viewportRestored) {
+        if (!viewportRestored) return@LaunchedEffect
+        withFrameNanos { }
+        visibleMessageIds = listState.layoutInfo.visibleItemsInfo
+            .mapNotNull { it.key as? String }
+            .toSet()
+        snapshotFlow {
+            listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }.toSet()
+        }.distinctUntilChanged().collect { visibleMessageIds = it }
+    }
+    LaunchedEffect(
+        markerEvidence,
+        visibleMessageIds,
+        viewportRestored,
+        readReceiptsEnabled,
+        activityResumed,
+        conversationGroupChat,
+    ) {
+        if (!viewportRestored) return@LaunchedEffect
+        displayedMarkerCandidates(
+            messages = messages,
+            visibleMessageIds = visibleMessageIds,
+            enabled = readReceiptsEnabled,
+            resumed = activityResumed,
+            conversationGroupChat = conversationGroupChat,
+        ).forEach { message ->
+            val target = requireNotNull(message.markerTargetId)
+            if (target !in reportedMarkerTargets && currentOnMessageDisplayed(message)) {
+                reportedMarkerTargets += target
+            }
+        }
     }
     LaunchedEffect(atLatest) {
         if (atLatest) newIncoming = 0
@@ -1690,8 +1753,10 @@ private fun DeliveryPresentation.visibleLabel(): String? = when (this) {
     DeliveryPresentation.QUEUED -> "Queued"
     DeliveryPresentation.SENDING -> "Sending"
     DeliveryPresentation.FAILED -> "Failed"
+    DeliveryPresentation.DELIVERED -> "Delivered"
+    DeliveryPresentation.READ -> "Read"
     DeliveryPresentation.SENT,
     DeliveryPresentation.CONFIRMED,
-    DeliveryPresentation.UNCERTAIN,
-    -> null
+    -> "Sent"
+    DeliveryPresentation.UNCERTAIN -> null
 }

@@ -1,5 +1,7 @@
 package org.thanosapollo.nema.storage
 
+import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
+
 enum class ArchiveDirection {
     BOOTSTRAP,
     BEFORE,
@@ -21,9 +23,24 @@ data class ArchiveCursorKey(
 data class ArchivedIncomingMessage(
     val resultId: String,
     val message: IncomingMessage?,
+    val signal: ArchivedReceiptSignal? = null,
 ) {
     init {
         require(resultId.isNotEmpty()) { "MAM result ID must not be empty" }
+        require(message == null || signal == null) { "Archive result cannot be both content and control" }
+    }
+}
+
+data class ArchivedReceiptSignal(
+    val peerJid: String,
+    val senderJid: String,
+    val targetId: String,
+    val stage: MessageReceiptStage,
+) {
+    init {
+        require(peerJid.isNotEmpty()) { "Receipt peer must not be empty" }
+        require(senderJid.isNotEmpty()) { "Receipt sender must not be empty" }
+        require(targetId.isNotEmpty()) { "Receipt target must not be empty" }
     }
 }
 

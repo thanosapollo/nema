@@ -90,6 +90,8 @@ enum class DeliveryPresentation {
     SENDING,
     SENT,
     CONFIRMED,
+    DELIVERED,
+    READ,
     UNCERTAIN,
     FAILED,
 }
@@ -142,6 +144,8 @@ data class TimelineMessage(
     val replyToJid: String? = null,
     val replyFallbackBody: String? = null,
     val reply: MessageReplyPresentation? = null,
+    val markable: Boolean = false,
+    val markerTargetId: String? = null,
     val sentAtEpochMs: Long? = null,
     val threadSummaries: List<ThreadSummary> = emptyList(),
 )
@@ -622,7 +626,9 @@ private fun TimelineRow.toPresentation(replyReferenceIds: Set<String>) = Timelin
     body = body,
     outgoing = direction == MessageDirection.OUTBOUND,
     delivery = if (direction == MessageDirection.OUTBOUND) {
-        outboxStatus?.let(OutboxStatus::valueOf).toPresentation()
+        receiptStage?.let(org.thanosapollo.nema.xmpp.transport.MessageReceiptStage::valueOf)
+            ?.toPresentation()
+            ?: outboxStatus?.let(OutboxStatus::valueOf).toPresentation()
     } else {
         null
     },
@@ -652,6 +658,8 @@ private fun TimelineRow.toPresentation(replyReferenceIds: Set<String>) = Timelin
     replyToId = replyToId,
     replyToJid = replyToJid,
     replyFallbackBody = replyFallbackBody,
+    markable = markable,
+    markerTargetId = markerTargetId,
     sentAtEpochMs = sentAtEpochMs,
 )
 
@@ -855,3 +863,11 @@ private fun OutboxStatus?.toPresentation(): DeliveryPresentation? = when (this) 
     OutboxStatus.FAILED -> DeliveryPresentation.FAILED
     null -> null
 }
+
+private fun org.thanosapollo.nema.xmpp.transport.MessageReceiptStage.toPresentation(): DeliveryPresentation =
+    when (this) {
+        org.thanosapollo.nema.xmpp.transport.MessageReceiptStage.RECEIVED -> DeliveryPresentation.DELIVERED
+        org.thanosapollo.nema.xmpp.transport.MessageReceiptStage.DISPLAYED,
+        org.thanosapollo.nema.xmpp.transport.MessageReceiptStage.ACKNOWLEDGED,
+        -> DeliveryPresentation.READ
+    }

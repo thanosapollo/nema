@@ -2,6 +2,7 @@ package org.thanosapollo.nema.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -10,8 +11,10 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Switch
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import org.thanosapollo.nema.account.AccountConfiguration
 import org.thanosapollo.nema.ui.theme.AppearanceScope
@@ -38,6 +41,8 @@ fun AccountSettingsContent(
     onChooseBackground: () -> Unit = {},
     onClearBackground: () -> Unit = {},
     onUseInheritedAppearance: () -> Unit = {},
+    readReceiptsEnabled: Boolean = false,
+    onSetReadReceiptsEnabled: (Boolean) -> Unit = {},
     accounts: List<AccountConfiguration> = emptyList(),
     switchingAccount: Boolean = false,
     onSelectAccount: (AccountId) -> Unit = {},
@@ -73,6 +78,25 @@ fun AccountSettingsContent(
             onAddAccount = onAddAccount,
             modifier = Modifier.fillMaxWidth(),
         )
+        Text("Privacy", style = MaterialTheme.typography.titleMedium)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Send read receipts")
+                Text(
+                    "Tell direct-chat contacts when a visible message has been read.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(
+                checked = readReceiptsEnabled,
+                onCheckedChange = onSetReadReceiptsEnabled,
+                modifier = Modifier.testTag("read-receipts-toggle"),
+            )
+        }
         Text("Session", style = MaterialTheme.typography.titleMedium)
         TextButton(onClick = onStop, modifier = Modifier.fillMaxWidth()) {
             Text("Stop")

@@ -14,6 +14,7 @@ import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.thread.ThreadRef
 import org.thanosapollo.nema.thread.draftKey
 import org.thanosapollo.nema.xmpp.transport.MessageTimeSource
+import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
 
 @Dao
 abstract class MessageDao {
@@ -506,6 +507,7 @@ abstract class MessageDao {
         """
         SELECT messages.*, message_outbox.operationId AS operationId,
           message_outbox.status AS outboxStatus,
+          message_outbox.receiptStage AS receiptStage,
           message_outbox.generation AS outboxGeneration,
           message_outbox.attempt AS outboxAttempt,
           (
@@ -1009,6 +1011,7 @@ data class TimelineRow(
     val sentTimeSource: MessageTimeSource?,
     val operationId: String?,
     val outboxStatus: String?,
+    val receiptStage: String? = null,
     val outboxGeneration: Long?,
     val outboxAttempt: Int?,
     val attachmentUrl: String? = null,
@@ -1018,6 +1021,8 @@ data class TimelineRow(
     val replyToId: String? = null,
     val replyToJid: String? = null,
     val replyFallbackBody: String? = null,
+    val markable: Boolean = false,
+    val markerTargetId: String? = null,
     val replyReferenceId: String? = null,
     val conversationArchiveOrdinal: Long? = null,
     val conversationArchiveAuthority: String,
@@ -1084,6 +1089,8 @@ data class IncomingMessage(
     val replyFallbackBody: String? = null,
     val sentAtEpochMs: Long? = null,
     val sentTimeSource: MessageTimeSource? = null,
+    val markable: Boolean = false,
+    val markerTargetId: String? = null,
 ) {
     init {
         require(accountId.isNotEmpty()) { "Account ID must not be empty" }
@@ -1107,6 +1114,7 @@ data class IncomingMessage(
         require((sentAtEpochMs == null) == (sentTimeSource == null)) {
             "Message time and provenance must be stored together"
         }
+        require(!markable || !markerTargetId.isNullOrEmpty()) { "Markable messages require a target ID" }
     }
 }
 
@@ -1187,6 +1195,44 @@ class MessageStore private constructor(
 
     suspend fun compose(intent: OutboundIntent): OutboxEntity = database.withTransaction {
         composeInTransaction(intent)
+    }
+
+    suspend fun recordReceiptSignal(
+        accountId: String,
+        peerJid: String,
+        senderJid: String,
+        targetId: String,
+        stage: MessageReceiptStage,
+    ): OutboxEntity? = database.withTransaction {
+        recordReceiptSignalInTransaction(
+            dao = database.messageDao(),
+            accountId = accountId,
+            peerJid = peerJid,
+            senderJid = senderJid,
+            targetId = targetId,
+            stage = stage,
+        )
+    }
+
+    private suspend fun recordReceiptSignalInTransaction(
+        dao: MessageDao,
+        accountId: String,
+        peerJid: String,
+        senderJid: String,
+        targetId: String,
+        stage: MessageReceiptStage,
+    ): OutboxEntity? {
+        if (senderJid != peerJid) return null
+        val outbox = dao.outbox(accountId, targetId) ?: return null
+        val message = dao.message(accountId, outbox.messageId) ?: return null
+        if (message.direction != MessageDirection.OUTBOUND ||
+            message.messageKind != MessageKind.CHAT ||
+            message.peerJid != peerJid
+        ) {
+            return null
+        }
+        if ((outbox.receiptStage?.ordinal ?: -1) >= stage.ordinal) return outbox
+        return outbox.copy(receiptStage = stage).also { dao.updateOutbox(it) }
     }
 
     suspend fun composeDirectDraft(
@@ -1411,7 +1457,9 @@ class MessageStore private constructor(
         }
         writeBoundary(MessageWriteBoundary.AFTER_ALIAS)
 
-        val reconciled = winner.withPreferredTime(incoming.sentAtEpochMs, incoming.sentTimeSource)
+        val reconciled = winner
+            .withPreferredTime(incoming.sentAtEpochMs, incoming.sentTimeSource)
+            .withMarkerMetadata(incoming)
         if (reconciled != winner) {
             dao.updateMessage(reconciled)
             winner = reconciled
@@ -1774,6 +1822,17 @@ class MessageStore private constructor(
 
         var ingested = 0
         page.messages.forEachIndexed { index, archived ->
+            archived.signal?.let { signal ->
+                recordReceiptSignalInTransaction(
+                    dao = dao,
+                    accountId = page.key.accountId,
+                    peerJid = signal.peerJid,
+                    senderJid = signal.senderJid,
+                    targetId = signal.targetId,
+                    stage = signal.stage,
+                )
+                return@forEachIndexed
+            }
             val message = archived.message ?: return@forEachIndexed
             val archiveAlias = TrustedIdentityAlias(
                 kind = IdentityAliasKind.MAM_RESULT,
@@ -2215,6 +2274,8 @@ private fun IncomingMessage.toEntity(localSequence: Long) = MessageEntity(
     replyToId = replyToId,
     replyToJid = replyToJid,
     replyFallbackBody = replyFallbackBody,
+    markable = markable,
+    markerTargetId = markerTargetId,
 )
 
 private fun TrustedIdentityAlias.toEntity(accountId: String, messageId: String) =
@@ -2303,6 +2364,13 @@ private fun MessageEntity.withPreferredTime(
         sentTimeSource = candidateSource,
     ) else this
 }
+
+private fun MessageEntity.withMarkerMetadata(incoming: IncomingMessage): MessageEntity =
+    if (!markable && incoming.markable) {
+        copy(markable = true, markerTargetId = incoming.markerTargetId)
+    } else {
+        this
+    }
 
 private val MessageTimeSource.authorityRank: Int
     get() = when (this) {

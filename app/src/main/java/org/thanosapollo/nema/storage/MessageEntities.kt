@@ -7,6 +7,7 @@ import androidx.room.Index
 import androidx.room.TypeConverter
 import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.xmpp.transport.MessageTimeSource
+import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
 
 @Entity(
     tableName = "peers",
@@ -142,6 +143,8 @@ data class MessageEntity(
     val replyToId: String? = null,
     val replyToJid: String? = null,
     val replyFallbackBody: String? = null,
+    val markable: Boolean = false,
+    val markerTargetId: String? = null,
 )
 
 @Entity(
@@ -296,6 +299,7 @@ data class OutboxEntity(
     val generation: Long?,
     val attempt: Int,
     val failureReason: String?,
+    val receiptStage: MessageReceiptStage? = null,
 )
 
 @Entity(
@@ -416,6 +420,12 @@ class MessageConverters {
 
     @TypeConverter
     fun outboxStatus(value: String): OutboxStatus = OutboxStatus.valueOf(value)
+
+    @TypeConverter
+    fun messageReceiptStage(value: MessageReceiptStage?): String? = value?.name
+
+    @TypeConverter
+    fun messageReceiptStage(value: String?): MessageReceiptStage? = value?.let(MessageReceiptStage::valueOf)
 
     @TypeConverter
     fun messageTimeSource(value: MessageTimeSource?): String? = value?.name

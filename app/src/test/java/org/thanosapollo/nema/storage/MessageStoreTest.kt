@@ -25,6 +25,7 @@ import org.thanosapollo.nema.thread.ThreadId
 import org.thanosapollo.nema.thread.ThreadRef
 import org.thanosapollo.nema.thread.draftKey
 import org.thanosapollo.nema.xmpp.transport.MessageTimeSource
+import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
@@ -45,6 +46,116 @@ class MessageStoreTest {
     fun tearDown() {
         database.close()
         context.deleteDatabase(databaseName)
+    }
+
+    @Test
+    fun directReceiptStateIsExactScopedMonotonicAndDurable() = runBlocking {
+        var store = MessageStore(database)
+        val intent = outbound("receipt")
+        store.compose(intent)
+
+        val displayed = requireNotNull(
+            store.recordReceiptSignal(
+                ACCOUNT,
+                PEER,
+                PEER,
+                intent.operationId,
+                MessageReceiptStage.DISPLAYED,
+            ),
+        )
+        assertEquals(MessageReceiptStage.DISPLAYED, displayed.receiptStage)
+        assertEquals(
+            MessageReceiptStage.DISPLAYED,
+            store.recordReceiptSignal(
+                ACCOUNT,
+                PEER,
+                PEER,
+                intent.operationId,
+                MessageReceiptStage.RECEIVED,
+            )?.receiptStage,
+        )
+        assertNull(
+            store.recordReceiptSignal(
+                ACCOUNT,
+                "other@example.org",
+                "other@example.org",
+                intent.operationId,
+                MessageReceiptStage.ACKNOWLEDGED,
+            ),
+        )
+
+        store = reopenStore()
+        assertEquals(
+            MessageReceiptStage.DISPLAYED,
+            store.outbox(ACCOUNT, intent.operationId)?.receiptStage,
+        )
+    }
+
+    @Test
+    fun archivedReceiptControlAdvancesCursorAndUpdatesExactOutboundMessage() = runBlocking {
+        val store = MessageStore(database)
+        val intent = outbound("archived-receipt")
+        store.compose(intent)
+        val control = ArchivedIncomingMessage(
+            resultId = "receipt-result",
+            message = null,
+            signal = ArchivedReceiptSignal(
+                peerJid = PEER,
+                senderJid = PEER,
+                targetId = intent.operationId,
+                stage = MessageReceiptStage.DISPLAYED,
+            ),
+        )
+
+        val result = store.applyArchivePage(
+            archivePage(
+                key = archiveKey(ACCOUNT),
+                direction = ArchiveDirection.BOOTSTRAP,
+                complete = true,
+                hasEarlier = false,
+                messages = listOf(control),
+            ),
+        )
+
+        assertEquals(ArchivePageStatus.APPLIED, result.status)
+        assertEquals("receipt-result", result.cursor.oldestId)
+        assertEquals("receipt-result", result.cursor.newestId)
+        assertEquals(
+            MessageReceiptStage.DISPLAYED,
+            store.outbox(ACCOUNT, intent.operationId)?.receiptStage,
+        )
+    }
+
+    @Test
+    fun roomControlPlaceholderAdvancesCursorWithoutChangingDirectOutbox() = runBlocking {
+        val store = MessageStore(database)
+        val intent = outbound("room-control")
+        store.compose(intent)
+
+        val result = store.applyArchivePage(
+            archivePage(
+                key = archiveKey(ACCOUNT),
+                direction = ArchiveDirection.BOOTSTRAP,
+                complete = true,
+                hasEarlier = false,
+                messages = listOf(
+                    ArchivedIncomingMessage(
+                        resultId = "room-control-result",
+                        message = null,
+                        signal = null,
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(ArchivePageStatus.APPLIED, result.status)
+        assertEquals("room-control-result", result.cursor.oldestId)
+        assertEquals("room-control-result", result.cursor.newestId)
+        assertEquals(null, store.outbox(ACCOUNT, intent.operationId)?.receiptStage)
+        assertEquals(
+            listOf(intent.localMessageId),
+            database.messageDao().observeDirectTimeline(ACCOUNT, PEER).first().map(TimelineRow::localMessageId),
+        )
     }
 
     @Test

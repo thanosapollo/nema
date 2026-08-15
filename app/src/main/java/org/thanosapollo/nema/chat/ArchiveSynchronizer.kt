@@ -14,6 +14,7 @@ import org.thanosapollo.nema.storage.ArchivePageRejectedException
 import org.thanosapollo.nema.storage.ArchivePageResult
 import org.thanosapollo.nema.storage.ArchivePageStatus
 import org.thanosapollo.nema.storage.ArchivedIncomingMessage
+import org.thanosapollo.nema.storage.ArchivedReceiptSignal
 import org.thanosapollo.nema.storage.MessageStore
 import org.thanosapollo.nema.xmpp.transport.ACCOUNT_ARCHIVE_SCOPE
 import org.thanosapollo.nema.xmpp.transport.ArchivePageDirection
@@ -227,9 +228,11 @@ class ArchiveSynchronizer(
             require(page.request == request) { "MAM response scope mismatch" }
             require(
                 page.messages.all {
-                    it.message == null ||
-                        (it.message.accountId == request.accountId &&
-                            it.message.generation == request.generation)
+                    listOfNotNull(it.message?.accountId, it.signal?.accountId).all { account ->
+                        account == request.accountId
+                    } && listOfNotNull(it.message?.generation, it.signal?.generation).all { generation ->
+                        generation == request.generation
+                    }
                 },
             ) { "MAM response message scope mismatch" }
         }
@@ -300,6 +303,17 @@ private fun ArchivePageEnvelope.toStoragePage(localIds: () -> String): ArchivePa
     firstId = firstId,
     lastId = lastId,
     messages = messages.map {
-        ArchivedIncomingMessage(it.resultId, it.message?.toIncomingMessage(localIds()))
+        ArchivedIncomingMessage(
+            resultId = it.resultId,
+            message = it.message?.toIncomingMessage(localIds()),
+            signal = it.signal?.let { signal ->
+                ArchivedReceiptSignal(
+                    peerJid = signal.peer,
+                    senderJid = signal.sender,
+                    targetId = signal.targetId,
+                    stage = signal.stage,
+                )
+            },
+        )
     },
 )

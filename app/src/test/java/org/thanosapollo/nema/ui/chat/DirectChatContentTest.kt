@@ -20,6 +20,7 @@ import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHeightIsEqualTo
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
@@ -31,6 +32,7 @@ import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -59,6 +61,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.thanosapollo.nema.chat.DirectChatState
 import org.thanosapollo.nema.chat.DirectConversationKey
+import org.thanosapollo.nema.chat.DeliveryPresentation
 import org.thanosapollo.nema.chat.DraftSnapshot
 import org.thanosapollo.nema.chat.MessageReplyPresentation
 import org.thanosapollo.nema.chat.ThreadSummary
@@ -639,6 +642,116 @@ class DirectChatContentTest {
 
         composeRule.runOnIdle(recompose)
         composeRule.onNodeWithTag("timeline-1").assertIsDisplayed()
+    }
+
+    @Test
+    fun displayedMarkersRequireOptInForegroundVisibleDirectInboundEvidence() {
+        val eligible = message("eligible", outgoing = false).copy(
+            markable = true,
+            markerTargetId = "wire-eligible",
+        )
+        val outgoing = message("outgoing", outgoing = true).copy(
+            markable = true,
+            markerTargetId = "wire-outgoing",
+        )
+        val room = message("room", outgoing = false).copy(
+            groupChat = true,
+            markable = true,
+            markerTargetId = "wire-room",
+        )
+        val messages = listOf(eligible, outgoing, room)
+
+        assertEquals(
+            listOf(eligible),
+            displayedMarkerCandidates(
+                messages = messages,
+                visibleMessageIds = messages.map(TimelineMessage::id).toSet(),
+                enabled = true,
+                resumed = true,
+                conversationGroupChat = false,
+            ),
+        )
+        assertTrue(displayedMarkerCandidates(messages, setOf("eligible"), false, true, false).isEmpty())
+        assertTrue(displayedMarkerCandidates(messages, setOf("eligible"), true, false, false).isEmpty())
+        assertTrue(displayedMarkerCandidates(messages, setOf("eligible"), true, true, true).isEmpty())
+    }
+
+    @Test
+    fun outgoingMessagesExposeHonestSentDeliveredAndReadLabels() {
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(
+                        message("sent", outgoing = true).copy(delivery = DeliveryPresentation.SENT),
+                        message("confirmed", outgoing = true).copy(delivery = DeliveryPresentation.CONFIRMED),
+                        message("delivered", outgoing = true).copy(delivery = DeliveryPresentation.DELIVERED),
+                        message("read", outgoing = true).copy(delivery = DeliveryPresentation.READ),
+                    ),
+                )
+            }
+        }
+
+        composeRule.onAllNodesWithText("Sent").assertCountEquals(2)
+        composeRule.onNodeWithText("Delivered").assertIsDisplayed()
+        composeRule.onNodeWithText("Read").assertIsDisplayed()
+    }
+
+    @Test
+    fun visibleMarkableMessageReportsOnceWhenReadReceiptsAreEnabled() {
+        var displayedCalls = 0
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(
+                        message("same-id", outgoing = false).copy(
+                            markable = true,
+                            markerTargetId = "wire-same-id",
+                        ),
+                    ),
+                    readReceiptsEnabled = true,
+                    activityResumed = true,
+                    onMessageDisplayed = {
+                        displayedCalls++
+                        true
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("same-id").assertIsDisplayed()
+        composeRule.waitUntil(timeoutMillis = 5_000) { displayedCalls == 1 }
+        composeRule.waitForIdle()
+        assertEquals(1, displayedCalls)
+    }
+
+    @Test
+    fun visibleMessageReportsWhenMarkableEvidenceArrivesWithoutChangingItsId() {
+        lateinit var addMarkerEvidence: () -> Unit
+        var displayedCalls = 0
+        composeRule.setContent {
+            MaterialTheme {
+                var current by remember { mutableStateOf(message("same-id", outgoing = false)) }
+                addMarkerEvidence = {
+                    current = current.copy(markable = true, markerTargetId = "wire-same-id")
+                }
+                MessageTimeline(
+                    messages = listOf(current),
+                    readReceiptsEnabled = true,
+                    activityResumed = true,
+                    onMessageDisplayed = {
+                        displayedCalls++
+                        true
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("same-id").assertIsDisplayed()
+        composeRule.runOnIdle(addMarkerEvidence)
+        composeRule.waitForIdle()
+        composeRule.waitUntil(timeoutMillis = 5_000) { displayedCalls == 1 }
+        composeRule.waitForIdle()
+        assertEquals(1, displayedCalls)
     }
 
     @Test

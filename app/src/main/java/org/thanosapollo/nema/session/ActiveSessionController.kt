@@ -26,8 +26,10 @@ import org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope
 import org.thanosapollo.nema.xmpp.transport.ArchivePageRequest
 import org.thanosapollo.nema.xmpp.transport.ConnectionGeneration
 import org.thanosapollo.nema.xmpp.transport.IncomingMessageEnvelope
+import org.thanosapollo.nema.xmpp.transport.IncomingMessageSignal
 import org.thanosapollo.nema.xmpp.transport.OutgoingFailureEnvelope
 import org.thanosapollo.nema.xmpp.transport.OutgoingMessageEnvelope
+import org.thanosapollo.nema.xmpp.transport.OutgoingMessageSignal
 import org.thanosapollo.nema.xmpp.transport.SendNotAttemptedException
 import org.thanosapollo.nema.xmpp.transport.SessionCapabilities
 import org.thanosapollo.nema.xmpp.blocking.PeerBlockingState
@@ -92,6 +94,10 @@ sealed interface SessionEvent {
         val attempt: SessionAttemptIdentity,
         val message: IncomingMessageEnvelope,
     ) : SessionEvent
+    data class Signal(
+        val attempt: SessionAttemptIdentity,
+        val signal: IncomingMessageSignal,
+    ) : SessionEvent
     data class OutgoingFailure(
         val attempt: SessionAttemptIdentity,
         val failure: OutgoingFailureEnvelope,
@@ -109,6 +115,9 @@ interface SessionConnection {
     suspend fun reconnect(attempt: SessionAttemptIdentity)
     fun updateAttempt(attempt: SessionAttemptIdentity)
     suspend fun send(message: OutgoingMessageEnvelope, entered: () -> Unit)
+    suspend fun sendSignal(signal: OutgoingMessageSignal) {
+        throw UnsupportedOperationException("Message signals are unsupported")
+    }
     suspend fun discoverCapabilities(
         accountId: AccountId,
         generation: ConnectionGeneration,
@@ -372,6 +381,10 @@ internal class ActiveSessionController(
         target.send(message, entered)
     }
 
+    suspend fun sendSignal(signal: OutgoingMessageSignal) {
+        exactConnection(signal.accountId, signal.generation).sendSignal(signal)
+    }
+
     suspend fun discoverCapabilities(
         accountId: AccountId,
         generation: ConnectionGeneration,
@@ -581,6 +594,7 @@ internal class ActiveSessionController(
                 controllerScope.launch { handleConnectionLoss(event) }
             }
             is SessionEvent.Incoming -> runBlocking { handleDurableEvent(event.attempt, event) }
+            is SessionEvent.Signal -> runBlocking { handleDurableEvent(event.attempt, event) }
             is SessionEvent.OutgoingFailure -> runBlocking { handleDurableEvent(event.attempt, event) }
             is SessionEvent.RoomUpdated -> runBlocking { handleIncomingRoom(event) }
         }

@@ -290,6 +290,58 @@ class NemaDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migration10To11PreservesRowsAndAddsNeutralReceiptMarkerState() {
+        helper.createDatabase(DATABASE_NAME, 10).apply {
+            execSQL(
+                "INSERT INTO accounts (id, bareJid, authenticationId, serviceDomain) " +
+                    "VALUES ('account-a', 'self@example.org', 'self', 'example.org')",
+            )
+            execSQL(
+                "INSERT INTO peers (accountId, jid, room) " +
+                    "VALUES ('account-a', 'peer@example.org', 0)",
+            )
+            execSQL(
+                """
+                INSERT INTO messages (
+                    accountId, localMessageId, peerJid, senderJid, direction,
+                    messageKind, body, localSequence
+                ) VALUES ('account-a', 'legacy', 'peer@example.org',
+                    'self@example.org', 'OUTBOUND', 'CHAT', 'legacy', 1)
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO message_outbox (
+                    accountId, operationId, messageId, originId, status, attempt
+                ) VALUES ('account-a', 'op-1', 'legacy', 'origin-1', 'SENT', 1)
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_NAME,
+            11,
+            true,
+            MessageSchema.MIGRATION_10_11,
+        ).use { database ->
+            database.query(
+                "SELECT markable, markerTargetId FROM messages WHERE localMessageId = 'legacy'",
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(0, cursor.getInt(0))
+                assertTrue(cursor.isNull(1))
+            }
+            database.query(
+                "SELECT receiptStage FROM message_outbox WHERE operationId = 'op-1'",
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertTrue(cursor.isNull(0))
+            }
+        }
+    }
+
     private companion object {
         const val DATABASE_NAME = "nema-migration-test"
     }

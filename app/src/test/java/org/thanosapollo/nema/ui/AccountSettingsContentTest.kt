@@ -13,6 +13,7 @@ import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
@@ -93,6 +94,22 @@ class AccountSettingsContentTest {
         composeRule.onNodeWithText("Add account").performScrollTo().performClick()
         assertEquals(listOf(SECOND), selected)
         assertEquals(1, addCalls)
+    }
+
+    @Test
+    fun readReceiptPrivacyControlIsOffByDefaultAndReportsExplicitOptIn() {
+        val selected = mutableListOf<Boolean>()
+        composeRule.setContent {
+            MaterialTheme {
+                AccountSettingsContent(
+                    activeAccountId = FIRST,
+                    onSetReadReceiptsEnabled = { selected += it },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("read-receipts-toggle").performScrollTo().performClick()
+        assertEquals(listOf(true), selected)
     }
 
     private fun account(id: AccountId) = AccountConfiguration.create(

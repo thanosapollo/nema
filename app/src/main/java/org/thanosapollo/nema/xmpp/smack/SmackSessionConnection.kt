@@ -20,6 +20,7 @@ import org.jivesoftware.smack.filter.IQReplyFilter
 import org.jivesoftware.smack.filter.StanzaTypeFilter
 import org.jivesoftware.smack.packet.IQ
 import org.jivesoftware.smack.packet.Message
+import org.jivesoftware.smack.packet.StandardExtensionElement
 import org.jivesoftware.smack.packet.StanzaError
 import org.jivesoftware.smack.packet.StanzaBuilder
 import org.jivesoftware.smack.parsing.ParsingExceptionCallback
@@ -48,6 +49,8 @@ import org.jivesoftware.smackx.pubsub.Item
 import org.jivesoftware.smackx.pubsub.PayloadItem
 import org.jivesoftware.smackx.pubsub.PubSubManager
 import org.jivesoftware.smackx.pubsub.SimplePayload
+import org.jivesoftware.smackx.receipts.DeliveryReceipt
+import org.jivesoftware.smackx.receipts.DeliveryReceiptRequest
 import org.jivesoftware.smackx.sid.StableUniqueStanzaIdManager
 import org.jivesoftware.smackx.sid.element.OriginIdElement
 import org.jivesoftware.smackx.sid.element.StanzaIdElement
@@ -79,6 +82,13 @@ import org.thanosapollo.nema.xmpp.bookmarks.parseStorageBookmarks
 import org.thanosapollo.nema.xmpp.bookmarks.preferredRoomNick
 import org.thanosapollo.nema.xmpp.muc.RoomOccupant
 import org.thanosapollo.nema.xmpp.muc.RoomView
+import org.thanosapollo.nema.xmpp.markers.ACKNOWLEDGED_ELEMENT
+import org.thanosapollo.nema.xmpp.markers.CHAT_MARKERS_NAMESPACE
+import org.thanosapollo.nema.xmpp.markers.DISPLAYED_ELEMENT
+import org.thanosapollo.nema.xmpp.markers.RECEIPTS_NAMESPACE
+import org.thanosapollo.nema.xmpp.markers.RECEIVED_ELEMENT
+import org.thanosapollo.nema.xmpp.markers.addMarkable
+import org.thanosapollo.nema.xmpp.markers.installNemaChatMarkerProviders
 import org.thanosapollo.nema.xmpp.httpupload.LocalUploadRequest
 import org.thanosapollo.nema.xmpp.httpupload.UploadedFile
 import org.thanosapollo.nema.xmpp.oob.OutOfBandShare
@@ -97,6 +107,10 @@ import org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope
 import org.thanosapollo.nema.xmpp.transport.ArchivePageRequest
 import org.thanosapollo.nema.xmpp.transport.ConnectionGeneration
 import org.thanosapollo.nema.xmpp.transport.IncomingMessageEnvelope
+import org.thanosapollo.nema.xmpp.transport.IncomingMessageSignal
+import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
+import org.thanosapollo.nema.xmpp.transport.MessageSignalProtocol
+import org.thanosapollo.nema.xmpp.transport.OutgoingMessageSignal
 import org.thanosapollo.nema.xmpp.transport.MessageTimeSource
 import org.thanosapollo.nema.xmpp.transport.OutgoingFailureEnvelope
 import org.thanosapollo.nema.xmpp.transport.OutgoingMessageEnvelope
@@ -113,6 +127,7 @@ class SmackSessionConnectionFactory : SessionConnectionFactory {
     ): SessionConnection {
         requireNemaMamResultProvider()
         installNemaReplyProviders()
+        installNemaChatMarkerProviders()
         require(identity.accountId == configuration.id) { "Session account does not match configuration" }
         val connection = XMPPTCPConnection(configurationFor(configuration)).apply {
             setUseStreamManagement(false)
@@ -153,7 +168,11 @@ class SmackSessionConnectionFactory : SessionConnectionFactory {
 }
 
 internal fun advertiseNemaFeatures(connection: XMPPConnection) {
-    ServiceDiscoveryManager.getInstanceFor(connection).addFeature(REPLY_NAMESPACE)
+    ServiceDiscoveryManager.getInstanceFor(connection).apply {
+        addFeature(REPLY_NAMESPACE)
+        addFeature(RECEIPTS_NAMESPACE)
+        addFeature(CHAT_MARKERS_NAMESPACE)
+    }
 }
 
 internal class SmackSessionConnection(
@@ -180,6 +199,10 @@ internal class SmackSessionConnection(
             return@StanzaListener
         }
         val message = wrapper.toTrustedCarbonMessage(expectedBareJid) ?: return@StanzaListener
+        message.message.toIncomingSignal(attempt, expectedBareJid)?.let {
+            event(SessionEvent.Signal(attempt, it))
+            return@StanzaListener
+        }
         stableIdGate.accept(attempt, message).forEach(::deliver)
     }
     init {
@@ -234,6 +257,14 @@ internal class SmackSessionConnection(
                 throw SendNotAttemptedException()
             }
             entered()
+        }
+        connection.sendStanza(stanza)
+    }
+
+    override suspend fun sendSignal(signal: OutgoingMessageSignal) = runInterruptible(Dispatchers.IO) {
+        val stanza = signal.toSmackMessage()
+        synchronized(entryGate) {
+            requireExactAttemptLocked(signal.accountId, signal.generation)
         }
         connection.sendStanza(stanza)
     }
@@ -857,6 +888,20 @@ internal fun shouldResetSmackTransport(
     authenticated: Boolean,
 ): Boolean = connected && !authenticated
 
+internal fun OutgoingMessageSignal.toSmackMessage(): Message {
+    val builder = StanzaBuilder.buildMessage()
+        .to(JidCreate.entityBareFrom(recipient))
+        .ofType(Message.Type.chat)
+    val extension = when (protocol) {
+        MessageSignalProtocol.DELIVERY_RECEIPT -> DeliveryReceipt(targetId)
+        MessageSignalProtocol.CHAT_MARKER -> StandardExtensionElement
+            .builder(stage.name.lowercase(), CHAT_MARKERS_NAMESPACE)
+            .addAttribute("id", targetId)
+            .build()
+    }
+    return builder.addExtension(extension).build()
+}
+
 internal fun OutgoingMessageEnvelope.toSmackMessage(): Message {
     val builder = StanzaBuilder.buildMessage(operationId)
         .to(JidCreate.entityBareFrom(recipient))
@@ -874,7 +919,53 @@ internal fun OutgoingMessageEnvelope.toSmackMessage(): Message {
             ),
         )
     }
+    if (kind == MessageKind.CHAT) {
+        DeliveryReceiptRequest.addTo(builder)
+        builder.addMarkable()
+    }
     return builder.build()
+}
+
+internal fun Message.toIncomingSignal(
+    attempt: SessionAttemptIdentity,
+    expectedBareJid: String,
+): IncomingMessageSignal? {
+    if (type != Message.Type.chat || body != null) return null
+    val sender = from?.asBareJid()?.takeIf { it.isEntityBareJid }?.toString() ?: return null
+    val recipient = to?.asBareJid()?.takeIf { it.isEntityBareJid }?.toString() ?: return null
+    if (sender == expectedBareJid || recipient != expectedBareJid) return null
+    val signals = extensions.mapNotNull { extension ->
+        when {
+            extension.elementName == RECEIVED_ELEMENT && extension.namespace == RECEIPTS_NAMESPACE ->
+                (extension as? DeliveryReceipt)?.id?.let {
+                    Triple(MessageReceiptStage.RECEIVED, MessageSignalProtocol.DELIVERY_RECEIPT, it)
+                }
+            extension.namespace == CHAT_MARKERS_NAMESPACE && extension is StandardExtensionElement -> {
+                val stage = when (extension.elementName) {
+                    RECEIVED_ELEMENT -> MessageReceiptStage.RECEIVED
+                    DISPLAYED_ELEMENT -> MessageReceiptStage.DISPLAYED
+                    ACKNOWLEDGED_ELEMENT -> MessageReceiptStage.ACKNOWLEDGED
+                    else -> null
+                }
+                stage?.let {
+                    Triple(it, MessageSignalProtocol.CHAT_MARKER, extension.getAttributeValue("id"))
+                }
+            }
+            else -> null
+        }
+    }
+    if (signals.size != 1) return null
+    val (stage, protocol, targetId) = signals.single()
+    if (targetId.isNullOrEmpty()) return null
+    return IncomingMessageSignal(
+        accountId = attempt.accountId,
+        generation = attempt.generation,
+        peer = sender,
+        sender = sender,
+        targetId = targetId,
+        stage = stage,
+        protocol = protocol,
+    )
 }
 
 internal fun Message.toIncomingEnvelope(
@@ -895,6 +986,12 @@ internal fun Message.toIncomingEnvelope(
     val groupChat = type == Message.Type.groupchat
     if (!groupChat && type != Message.Type.chat && type != Message.Type.normal) return null
     val fromJid = from ?: return null
+    val receiptRequested = type == Message.Type.chat &&
+        extensions.count { it is DeliveryReceiptRequest } == 1
+    val markable = type == Message.Type.chat && extensions.count {
+        it.elementName == org.thanosapollo.nema.xmpp.markers.MARKABLE_ELEMENT &&
+            it.namespace == CHAT_MARKERS_NAMESPACE && it is StandardExtensionElement
+    } == 1
     val share = oobShare()
     val reply = replyReference()
     val parsed = if (reply == null) null else parseReplyBody()
@@ -958,6 +1055,8 @@ internal fun Message.toIncomingEnvelope(
             reply = replyEnvelope,
             sentAtEpochMs = sentAtEpochMs,
             sentTimeSource = sentTimeSource,
+            receiptRequested = receiptRequested,
+            markable = markable,
         )
     }
 }
@@ -1077,17 +1176,25 @@ internal fun normalizeMamResults(
     return results.map { result ->
         val owned = result as? NemaMamResultExtension
             ?: error("MAM result bypassed Nema normalization")
+        val signal = owned.actualMessage
+            ?.takeIf { expectedArchiveAuthority == mappingBareJid }
+            ?.toIncomingSignal(attempt, mappingBareJid)
         ArchiveMessageEnvelope(
             resultId = owned.id,
-            message = owned.actualMessage?.toIncomingEnvelope(
-                attempt,
-                mappingBareJid,
-                trustStableIds,
-                ownRoomNick,
-                owned.forwarded.delayInformation?.stamp?.time,
-                owned.forwarded.delayInformation?.let { MessageTimeSource.MAM },
-                receivedAtEpochMs,
-            ),
+            message = if (signal == null) {
+                owned.actualMessage?.toIncomingEnvelope(
+                    attempt,
+                    mappingBareJid,
+                    trustStableIds,
+                    ownRoomNick,
+                    owned.forwarded.delayInformation?.stamp?.time,
+                    owned.forwarded.delayInformation?.let { MessageTimeSource.MAM },
+                    receivedAtEpochMs,
+                )
+            } else {
+                null
+            },
+            signal = signal,
         )
     }
 }

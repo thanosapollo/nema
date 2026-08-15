@@ -12,6 +12,7 @@ import org.thanosapollo.nema.storage.NemaDatabase
 import org.thanosapollo.nema.storage.MessageStore
 import org.thanosapollo.nema.storage.PeerIdentityStore
 import org.thanosapollo.nema.ui.theme.AppearanceRepository
+import org.thanosapollo.nema.ui.MessagingPreferencesRepository
 import org.thanosapollo.nema.xmpp.smack.SmackAndroid
 import org.thanosapollo.nema.xmpp.smack.installNemaMamResultProvider
 
@@ -27,6 +28,8 @@ class NemaApplication : Application() {
         private set
     lateinit var appearanceRepository: AppearanceRepository
         private set
+    lateinit var messagingPreferences: MessagingPreferencesRepository
+        private set
     override fun onCreate() {
         super.onCreate()
         SmackAndroid.initialize(applicationContext)
@@ -36,6 +39,7 @@ class NemaApplication : Application() {
         chatRepository = ChatRepository(database)
         peerIdentityStore = PeerIdentityStore(database.messageDao())
         appearanceRepository = AppearanceRepository.create(applicationContext)
+        messagingPreferences = MessagingPreferencesRepository.create(applicationContext)
         val credentials = CredentialVault(
             NoBackupCredentialBlobStore(applicationContext),
             AndroidKeystoreCredentialCipher(),

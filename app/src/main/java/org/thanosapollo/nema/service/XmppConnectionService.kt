@@ -162,8 +162,18 @@ class SessionRuntime(
             factory = connectionFactory,
             durableEvent = { event ->
                 when (event) {
-                    is org.thanosapollo.nema.session.SessionEvent.Incoming ->
+                    is org.thanosapollo.nema.session.SessionEvent.Incoming -> {
                         liveMessages.ingest(event.message)
+                        acknowledgeReceiptRequest(event.message)
+                    }
+                    is org.thanosapollo.nema.session.SessionEvent.Signal ->
+                        messages.recordReceiptSignal(
+                            accountId = event.signal.accountId.value,
+                            peerJid = event.signal.peer,
+                            senderJid = event.signal.sender,
+                            targetId = event.signal.targetId,
+                            stage = event.signal.stage,
+                        )
                     is org.thanosapollo.nema.session.SessionEvent.OutgoingFailure ->
                         messages.recordProtocolFailure(
                             accountId = event.attempt.accountId.value,
@@ -620,7 +630,53 @@ class SessionRuntime(
 
     suspend fun stop() = accountCommands.withLock { controller.stop() }
 
+    suspend fun markDisplayed(accountId: String, peerJid: String, targetId: String): Boolean {
+        if (accountId.isEmpty() || peerJid.isEmpty() || targetId.isEmpty()) return false
+        val connected = state.value as? ConnectionState.Connected ?: return false
+        if (connected.accountId.value != accountId) return false
+        return try {
+            controller.sendSignal(
+                org.thanosapollo.nema.xmpp.transport.OutgoingMessageSignal(
+                    accountId = connected.accountId,
+                    generation = connected.generation,
+                    recipient = peerJid,
+                    targetId = targetId,
+                    stage = org.thanosapollo.nema.xmpp.transport.MessageReceiptStage.DISPLAYED,
+                    protocol = org.thanosapollo.nema.xmpp.transport.MessageSignalProtocol.CHAT_MARKER,
+                ),
+            )
+            true
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     suspend fun serviceDestroyed() = accountCommands.withLock { controller.serviceDestroyed() }
+
+    private suspend fun acknowledgeReceiptRequest(
+        message: org.thanosapollo.nema.xmpp.transport.IncomingMessageEnvelope,
+    ) {
+        val targetId = message.messageId?.takeIf(String::isNotEmpty) ?: return
+        if (message.outbound || message.kind != MessageKind.CHAT || !message.receiptRequested) return
+        try {
+            controller.sendSignal(
+                org.thanosapollo.nema.xmpp.transport.OutgoingMessageSignal(
+                    accountId = message.accountId,
+                    generation = message.generation,
+                    recipient = message.peer,
+                    targetId = targetId,
+                    stage = org.thanosapollo.nema.xmpp.transport.MessageReceiptStage.RECEIVED,
+                    protocol = org.thanosapollo.nema.xmpp.transport.MessageSignalProtocol.DELIVERY_RECEIPT,
+                ),
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // The message is durable even when this best-effort protocol acknowledgement cannot be sent.
+        }
+    }
 
     private fun outcome(): ConnectionCommandOutcome = when (state.value) {
         is ConnectionState.NeedsCredentials -> ConnectionCommandOutcome.NEEDS_CREDENTIALS

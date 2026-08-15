@@ -12,9 +12,8 @@ class LiveMessageAdapter(
     private val store: MessageStore,
     private val localIds: () -> String = { UUID.randomUUID().toString() },
 ) {
-    suspend fun ingest(envelope: IncomingMessageEnvelope) {
+    suspend fun ingest(envelope: IncomingMessageEnvelope): org.thanosapollo.nema.storage.IngestionResult =
         store.ingest(envelope.toIncomingMessage(localIds()))
-    }
 }
 
 internal fun IncomingMessageEnvelope.toIncomingMessage(localMessageId: String): IncomingMessage =
@@ -55,4 +54,8 @@ internal fun IncomingMessageEnvelope.toIncomingMessage(localMessageId: String): 
         replyFallbackBody = reply?.fallbackBody,
         sentAtEpochMs = sentAtEpochMs,
         sentTimeSource = sentTimeSource,
+        markable = markable && !outbound && kind == org.thanosapollo.nema.thread.MessageKind.CHAT,
+        markerTargetId = messageId?.takeIf {
+            markable && !outbound && kind == org.thanosapollo.nema.thread.MessageKind.CHAT
+        },
     )

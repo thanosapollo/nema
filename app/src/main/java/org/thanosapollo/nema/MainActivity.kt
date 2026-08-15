@@ -53,6 +53,8 @@ import org.thanosapollo.nema.ui.theme.NemaTheme
 import org.thanosapollo.nema.xmpp.transport.AccountId
 
 class MainActivity : ComponentActivity() {
+    private val activityResumed = mutableStateOf(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
@@ -61,7 +63,22 @@ class MainActivity : ComponentActivity() {
             savedProcessToken = savedInstanceState?.getString(STATE_PROCESS_TOKEN),
             processToken = processToken,
         )
-        setContent { AccountConnectionScreen(restoreChatRouteOnStart = restoreChatRoute) }
+        setContent {
+            AccountConnectionScreen(
+                restoreChatRouteOnStart = restoreChatRoute,
+                activityResumed = activityResumed.value,
+            )
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        activityResumed.value = true
+    }
+
+    override fun onPause() {
+        activityResumed.value = false
+        super.onPause()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -188,7 +205,7 @@ internal fun rememberPrimaryDestination(processToken: String): MutableState<Prim
 }
 
 @Composable
-private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean) {
+private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean, activityResumed: Boolean) {
     val context = LocalContext.current
     val application = context.applicationContext as NemaApplication
     val scope = rememberCoroutineScope()
@@ -232,6 +249,9 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean) {
             onDispose(presenter::close)
         }
         val chatState by presenter.state.collectAsState()
+        val readReceiptsEnabled by remember(account.id) {
+            application.messagingPreferences.readReceipts(account.id.value)
+        }.collectAsState(initial = false)
         val blockingSession = (connectionState as? ConnectionState.Connected)?.let {
             SessionIdentity(it.accountId, it.generation)
         }
@@ -332,6 +352,21 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean) {
                                     org.thanosapollo.nema.xmpp.httpupload.LocalUploadRequest(name, mime, bytes),
                                 )
                             },
+                            readReceiptsEnabled = readReceiptsEnabled,
+                            activityResumed = activityResumed,
+                            onMessageDisplayed = { message ->
+                                val peer = chatState.selectedPeer
+                                val target = message.markerTargetId
+                                if (peer == null || target == null || message.outgoing || message.groupChat) {
+                                    false
+                                } else {
+                                    application.sessionRuntime.markDisplayed(
+                                        account.id.value,
+                                        peer,
+                                        target,
+                                    )
+                                }
+                            },
                             modifier = Modifier
                                 .padding(contentPadding)
                                 .statusBarsPadding(),
@@ -368,6 +403,10 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean) {
                             onUseInheritedAppearance = {
                                 val target = appearanceScope
                                 scope.launch { application.appearanceRepository.clear(target) }
+                            },
+                            readReceiptsEnabled = readReceiptsEnabled,
+                            onSetReadReceiptsEnabled = { enabled ->
+                                application.messagingPreferences.setReadReceipts(account.id.value, enabled)
                             },
                             accounts = configuredAccounts,
                             switchingAccount = connectionState is ConnectionState.Switching,

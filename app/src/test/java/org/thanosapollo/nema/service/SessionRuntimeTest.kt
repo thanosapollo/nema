@@ -40,8 +40,11 @@ import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmark
 import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmarkSnapshot
 import org.thanosapollo.nema.xmpp.transport.AccountId
+import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
+import org.thanosapollo.nema.xmpp.transport.MessageSignalProtocol
 import org.thanosapollo.nema.xmpp.transport.OutgoingFailureEnvelope
 import org.thanosapollo.nema.xmpp.transport.OutgoingMessageEnvelope
+import org.thanosapollo.nema.xmpp.transport.OutgoingMessageSignal
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -473,6 +476,48 @@ class SessionRuntimeTest {
         assertEquals("Council of Oberon", identities.peer(active.id.value, room)?.displayName)
     }
 
+    @Test
+    fun `displayed marker uses only the current connected account and exact target`() = runTest {
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val connections = RecordingConnectionFactory()
+        val runtime = SessionRuntime(
+            accounts = accounts,
+            credentials = credentials,
+            messages = MessageStore(database),
+            peerIdentities = PeerIdentityStore(database.messageDao()),
+            runtimeScope = backgroundScope,
+            connectionFactory = connections,
+        )
+        val active = account("active")
+        assertTrue(
+            runtime.prepareActivation(
+                token = runtime.beginPendingActivation(),
+                configuration = active,
+                credential = "secret".toCharArray(),
+                emitActivation = {},
+            ),
+        )
+        accounts.activate(active.id)
+        assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
+
+        assertTrue(runtime.markDisplayed(active.id.value, "peer@example.org", "wire-1"))
+        assertEquals(false, runtime.markDisplayed("other", "peer@example.org", "wire-2"))
+        assertEquals(
+            listOf(
+                OutgoingMessageSignal(
+                    accountId = active.id,
+                    generation = connections.created.single().attemptIdentity.generation,
+                    recipient = "peer@example.org",
+                    targetId = "wire-1",
+                    stage = MessageReceiptStage.DISPLAYED,
+                    protocol = MessageSignalProtocol.CHAT_MARKER,
+                ),
+            ),
+            connections.created.single().sentSignals,
+        )
+    }
+
     private fun account(id: String, bareJid: String = "$id@example.org") = AccountConfiguration.create(
         id = AccountId.require(id),
         bareJid = bareJid,
@@ -532,6 +577,7 @@ class SessionRuntimeTest {
         var bookmarkReadComplete = true
         var nextBookmarkReadGate: CompletableDeferred<Unit>? = null
         val publishedBookmarks = mutableListOf<RoomBookmark>()
+        val sentSignals = mutableListOf<OutgoingMessageSignal>()
 
         override fun revoke() {
             isUsable = false
@@ -554,6 +600,10 @@ class SessionRuntimeTest {
         }
 
         override suspend fun send(message: OutgoingMessageEnvelope, entered: () -> Unit) = entered()
+
+        override suspend fun sendSignal(signal: OutgoingMessageSignal) {
+            sentSignals += signal
+        }
 
         override suspend fun joinMuc(
             accountId: AccountId,

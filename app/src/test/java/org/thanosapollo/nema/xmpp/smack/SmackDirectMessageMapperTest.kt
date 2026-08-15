@@ -15,6 +15,8 @@ import org.jivesoftware.smackx.carbons.packet.CarbonExtension
 import org.jivesoftware.smackx.delay.packet.DelayInformation
 import org.jivesoftware.smackx.forward.packet.Forwarded
 import org.jivesoftware.smackx.disco.ServiceDiscoveryManager
+import org.jivesoftware.smackx.receipts.DeliveryReceipt
+import org.jivesoftware.smackx.receipts.DeliveryReceiptRequest
 import org.jivesoftware.smackx.sid.element.OriginIdElement
 import org.jivesoftware.smackx.sid.element.StanzaIdElement
 import org.jxmpp.jid.impl.JidCreate
@@ -34,6 +36,7 @@ import org.thanosapollo.nema.session.SessionAttemptIdentity
 import org.thanosapollo.nema.thread.ThreadId
 import org.thanosapollo.nema.thread.ThreadRef
 import org.thanosapollo.nema.xmpp.oob.oobShare
+import org.thanosapollo.nema.xmpp.markers.installNemaChatMarkerProviders
 import org.thanosapollo.nema.xmpp.reply.installNemaReplyProviders
 import org.thanosapollo.nema.xmpp.reply.parseReplyBody
 import org.thanosapollo.nema.xmpp.reply.REPLY_NAMESPACE
@@ -45,6 +48,9 @@ import org.thanosapollo.nema.xmpp.transport.ConnectionGeneration
 import org.thanosapollo.nema.xmpp.transport.MessageReplyEnvelope
 import org.thanosapollo.nema.xmpp.transport.MessageTimeSource
 import org.thanosapollo.nema.xmpp.transport.OutgoingMessageEnvelope
+import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
+import org.thanosapollo.nema.xmpp.transport.MessageSignalProtocol
+import org.thanosapollo.nema.xmpp.transport.OutgoingMessageSignal
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
@@ -53,6 +59,7 @@ class SmackDirectMessageMapperTest {
     fun initializeSmack() {
         SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
         installNemaReplyProviders()
+        installNemaChatMarkerProviders()
     }
 
     @Test
@@ -77,6 +84,197 @@ class SmackDirectMessageMapperTest {
         assertEquals("body", message.body)
         assertEquals("origin", message.getExtension(OriginIdElement::class.java).id)
         assertEquals(envelope.thread, message.toThreadRef())
+        assertTrue(DeliveryReceiptRequest.from(message) != null)
+        assertTrue(message.getExtensionElement("markable", "urn:xmpp:chat-markers:0") != null)
+    }
+
+    @Test
+    fun `bodyless direct receipts and markers map without creating timeline content`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        fun control(extension: org.jivesoftware.smack.packet.ExtensionElement) =
+            StanzaBuilder.buildMessage()
+                .from(JidCreate.entityFullFrom("peer@example.org/device"))
+                .to(JidCreate.entityFullFrom("account@example.org/device"))
+                .ofType(Message.Type.chat)
+                .addExtension(extension)
+                .build()
+        val received = control(DeliveryReceipt("sent-operation"))
+        val displayed = control(
+            StandardExtensionElement.builder("displayed", "urn:xmpp:chat-markers:0")
+                .addAttribute("id", "sent-operation")
+                .build(),
+        )
+
+        val receiptSignal = requireNotNull(received.toIncomingSignal(attempt, "account@example.org"))
+        val displaySignal = requireNotNull(displayed.toIncomingSignal(attempt, "account@example.org"))
+
+        assertEquals("peer@example.org", receiptSignal.peer)
+        assertEquals("peer@example.org", receiptSignal.sender)
+        assertEquals("sent-operation", receiptSignal.targetId)
+        assertEquals("RECEIVED", receiptSignal.stage.name)
+        assertEquals("DISPLAYED", displaySignal.stage.name)
+        assertEquals(MessageSignalProtocol.DELIVERY_RECEIPT, receiptSignal.protocol)
+        assertEquals(MessageSignalProtocol.CHAT_MARKER, displaySignal.protocol)
+        assertNull(received.toIncomingEnvelope(attempt, "account@example.org"))
+        assertNull(displayed.toIncomingEnvelope(attempt, "account@example.org"))
+    }
+
+    @Test
+    fun `receipt controls with message content remain ordinary messages`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        val message = StanzaBuilder.buildMessage()
+            .from(JidCreate.entityFullFrom("peer@example.org/device"))
+            .to(JidCreate.entityFullFrom("account@example.org/device"))
+            .ofType(Message.Type.chat)
+            .setBody("must survive")
+            .addExtension(DeliveryReceipt("sent-operation"))
+            .build()
+
+        assertNull(message.toIncomingSignal(attempt, "account@example.org"))
+        assertEquals(
+            "must survive",
+            requireNotNull(message.toIncomingEnvelope(attempt, "account@example.org")).body,
+        )
+    }
+
+    @Test
+    fun `incoming direct request metadata and outgoing acknowledgements map exactly`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        val incoming = StanzaBuilder.buildMessage("peer-message")
+            .from(JidCreate.entityFullFrom("peer@example.org/device"))
+            .to(JidCreate.entityFullFrom("account@example.org/device"))
+            .ofType(Message.Type.chat)
+            .setBody("hello")
+            .addExtension(DeliveryReceiptRequest())
+            .addExtension(
+                StandardExtensionElement.builder("markable", "urn:xmpp:chat-markers:0").build(),
+            )
+            .build()
+
+        val envelope = requireNotNull(incoming.toIncomingEnvelope(attempt, "account@example.org"))
+        assertTrue(envelope.receiptRequested)
+        assertTrue(envelope.markable)
+        assertEquals("peer-message", envelope.messageId)
+
+        val receipt = OutgoingMessageSignal(
+            accountId = attempt.accountId,
+            generation = attempt.generation,
+            recipient = envelope.peer,
+            targetId = requireNotNull(envelope.messageId),
+            stage = MessageReceiptStage.RECEIVED,
+            protocol = MessageSignalProtocol.DELIVERY_RECEIPT,
+        ).toSmackMessage()
+        assertEquals("peer-message", DeliveryReceipt.from(receipt)?.id)
+        assertEquals(Message.Type.chat, receipt.type)
+        assertEquals("peer@example.org", receipt.to.toString())
+    }
+
+    @Test
+    fun `request metadata requires typed direct chat extensions`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        fun message(type: Message.Type, request: org.jivesoftware.smack.packet.ExtensionElement) =
+            StanzaBuilder.buildMessage("peer-message")
+                .from(JidCreate.entityBareFrom("peer@example.org"))
+                .to(JidCreate.entityBareFrom("account@example.org"))
+                .ofType(type)
+                .setBody("hello")
+                .addExtension(request)
+                .addExtension(
+                    StandardExtensionElement.builder("markable", "urn:xmpp:chat-markers:0").build(),
+                )
+                .build()
+
+        val normal = requireNotNull(
+            message(Message.Type.normal, DeliveryReceiptRequest())
+                .toIncomingEnvelope(attempt, "account@example.org"),
+        )
+        val untyped = requireNotNull(
+            message(
+                Message.Type.chat,
+                StandardExtensionElement.builder("request", "urn:xmpp:receipts").build(),
+            ).toIncomingEnvelope(attempt, "account@example.org"),
+        )
+
+        assertEquals(false, normal.receiptRequested)
+        assertEquals(false, normal.markable)
+        assertEquals(false, untyped.receiptRequested)
+        assertTrue(untyped.markable)
+    }
+
+    @Test
+    fun `ambiguous or non-direct controls fail closed`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        val duplicate = StanzaBuilder.buildMessage()
+            .from(JidCreate.entityBareFrom("peer@example.org"))
+            .to(JidCreate.entityBareFrom("account@example.org"))
+            .ofType(Message.Type.chat)
+            .addExtension(DeliveryReceipt("one"))
+            .addExtension(
+                StandardExtensionElement.builder("displayed", "urn:xmpp:chat-markers:0")
+                    .addAttribute("id", "one")
+                    .build(),
+            )
+            .build()
+        val room = StanzaBuilder.buildMessage()
+            .from(JidCreate.entityFullFrom("room@conference.example.org/nick"))
+            .ofType(Message.Type.groupchat)
+            .addExtension(DeliveryReceipt("one"))
+            .build()
+        val empty = StanzaBuilder.buildMessage()
+            .from(JidCreate.entityBareFrom("peer@example.org"))
+            .to(JidCreate.entityBareFrom("account@example.org"))
+            .ofType(Message.Type.chat)
+            .addExtension(DeliveryReceipt(""))
+            .build()
+
+        assertNull(duplicate.toIncomingSignal(attempt, "account@example.org"))
+        assertNull(room.toIncomingSignal(attempt, "account@example.org"))
+        assertNull(empty.toIncomingSignal(attempt, "account@example.org"))
+    }
+
+    @Test
+    fun `outgoing public groupchat omits direct receipt and marker requests`() {
+        val envelope = OutgoingMessageEnvelope(
+            accountId = AccountId.require("account"),
+            generation = ConnectionGeneration.require(3),
+            attempt = 1,
+            operationId = "operation",
+            originId = "origin",
+            recipient = "room@conference.example.org",
+            body = "hello room",
+            thread = null,
+            kind = org.thanosapollo.nema.thread.MessageKind.GROUPCHAT,
+        )
+
+        val message = envelope.toSmackMessage()
+
+        assertNull(DeliveryReceiptRequest.from(message))
+        assertNull(message.getExtensionElement("markable", "urn:xmpp:chat-markers:0"))
     }
 
     @Test
@@ -731,6 +929,90 @@ class SmackDirectMessageMapperTest {
             }
             requireMamPageBoundaries("first", "last", normalized)
         }
+    }
+
+    @Test
+    fun `MAM bodyless marker remains a control result and not timeline content`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        val control = StanzaBuilder.buildMessage()
+            .from(JidCreate.entityFullFrom("peer@example.org/device"))
+            .to(JidCreate.entityFullFrom("account@example.org/device"))
+            .ofType(Message.Type.chat)
+            .addExtension(
+                StandardExtensionElement.builder("displayed", "urn:xmpp:chat-markers:0")
+                    .addAttribute("id", "sent-operation")
+                    .build(),
+            )
+            .build()
+        val carrier = StanzaBuilder.buildMessage()
+            .from(JidCreate.entityBareFrom("account@example.org"))
+            .build()
+        val result = NemaMamResultExtension(
+            queryId = "query",
+            id = "marker-result",
+            actualMessage = control,
+            delay = DelayInformation(Date.from(Instant.ofEpochMilli(1_000))),
+        )
+
+        val archived = normalizeMamResults(
+            carriers = listOf(carrier),
+            results = listOf(result),
+            attempt = attempt,
+            expectedArchiveAuthority = "account@example.org",
+            trustStableIds = true,
+        ).single()
+
+        assertNull(archived.message)
+        assertEquals(MessageReceiptStage.DISPLAYED, archived.signal?.stage)
+        assertEquals("sent-operation", archived.signal?.targetId)
+        requireMamPageBoundaries("marker-result", "marker-result", listOf(archived))
+    }
+
+    @Test
+    fun `room MAM bodyless direct marker remains cursor-only`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        val control = StanzaBuilder.buildMessage()
+            .from(JidCreate.entityFullFrom("peer@example.org/device"))
+            .to(JidCreate.entityFullFrom("account@example.org/device"))
+            .ofType(Message.Type.chat)
+            .addExtension(
+                StandardExtensionElement.builder("displayed", "urn:xmpp:chat-markers:0")
+                    .addAttribute("id", "direct-operation")
+                    .build(),
+            )
+            .build()
+        val result = NemaMamResultExtension(
+            queryId = "query",
+            id = "room-control-result",
+            actualMessage = control,
+            delay = DelayInformation(Date.from(Instant.ofEpochMilli(1_000))),
+        )
+        val archived = normalizeMamResults(
+            carriers = listOf(
+                StanzaBuilder.buildMessage()
+                    .from(JidCreate.entityBareFrom("room@conference.example.org"))
+                    .build(),
+            ),
+            results = listOf(result),
+            attempt = attempt,
+            expectedArchiveAuthority = "room@conference.example.org",
+            mappingBareJid = "account@example.org",
+            trustStableIds = false,
+        ).single()
+
+        assertNull(archived.signal)
+        assertNull(archived.message)
+        requireMamPageBoundaries("room-control-result", "room-control-result", listOf(archived))
     }
 
     @Test
