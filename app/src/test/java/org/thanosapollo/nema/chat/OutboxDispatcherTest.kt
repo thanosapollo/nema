@@ -179,6 +179,43 @@ class OutboxDispatcherTest {
     }
 
     @Test
+    fun correctionDispatchPreservesExactTargetAndUnrelatedDraft() = runBlocking {
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "original-wire-id",
+            localMessageId = "original-local-id",
+            originId = "original-origin-id",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "original",
+        )
+        val original = requireNotNull(store.outbox(ACCOUNT, "original-wire-id"))
+        database.messageDao().updateOutbox(original.copy(status = OutboxStatus.ACKNOWLEDGED))
+        database.messageDao().saveDraft(ACCOUNT, PEER, "", "unrelated draft")
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "correction-wire-id",
+            localMessageId = "correction-local-id",
+            originId = "correction-origin-id",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "corrected",
+            replaceId = "original-wire-id",
+            correctionTargetMessageId = "original-local-id",
+        )
+        var sent: OutgoingMessageEnvelope? = null
+
+        OutboxDispatcher(store) { envelope, entered ->
+            entered()
+            sent = envelope
+        }.dispatch(this, 1)
+
+        assertEquals("original-wire-id", requireNotNull(sent).replaceId)
+        assertEquals("correction-wire-id", sent?.operationId)
+        assertEquals("unrelated draft", database.messageDao().draft(ACCOUNT, PEER, "")?.body)
+    }
+
+    @Test
     fun preCallRejectionReturnsExactClaimToPendingAndRetryCapturesNextAttempt() = runBlocking {
         val intent = outbound("retry")
         store.compose(intent)

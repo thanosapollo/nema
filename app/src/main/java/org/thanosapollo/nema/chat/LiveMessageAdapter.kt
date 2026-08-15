@@ -59,6 +59,6 @@ internal fun IncomingMessageEnvelope.toIncomingMessage(localMessageId: String): 
             markable && !outbound && kind == org.thanosapollo.nema.thread.MessageKind.CHAT
         },
         replaceId = replaceId?.takeIf {
-            !outbound && kind == org.thanosapollo.nema.thread.MessageKind.CHAT
+            kind == org.thanosapollo.nema.thread.MessageKind.CHAT
         },
     )

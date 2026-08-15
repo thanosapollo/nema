@@ -147,6 +147,7 @@ data class TimelineMessage(
     val markable: Boolean = false,
     val markerTargetId: String? = null,
     val edited: Boolean = false,
+    val correctionReferenceId: String? = null,
     val sentAtEpochMs: Long? = null,
     val threadSummaries: List<ThreadSummary> = emptyList(),
 )
@@ -222,6 +223,18 @@ data class ChatRoute(
     val thread: ThreadRef? = null,
 )
 
+data class DraftCorrection(
+    val localMessageId: String,
+    val referenceId: String,
+    val originalBody: String,
+) {
+    init {
+        require(localMessageId.isNotEmpty()) { "Correction local target must not be empty" }
+        require(referenceId.isNotEmpty()) { "Correction wire target must not be empty" }
+        require(originalBody.isNotEmpty()) { "Correction original body must not be empty" }
+    }
+}
+
 data class DraftSnapshot(
     val key: DirectConversationKey,
     val body: String,
@@ -233,10 +246,17 @@ data class DraftSnapshot(
     val attachmentMime: String? = null,
     val attachmentSize: Long? = null,
     val reply: DraftReply? = null,
+    val correction: DraftCorrection? = null,
 ) {
     init {
         require(key.thread == null || outboundThread == null) {
             "Draft cannot target both an open thread and a new thread"
+        }
+        require(correction == null || (!groupChat && attachmentUrl == null && reply == null)) {
+            "Corrections must be direct text without attachments or replies"
+        }
+        require(correction == null || body != correction.originalBody) {
+            "Correction must change the message body"
         }
     }
 }
@@ -662,6 +682,7 @@ private fun TimelineRow.toPresentation(replyReferenceIds: Set<String>) = Timelin
     markable = markable,
     markerTargetId = markerTargetId,
     edited = edited,
+    correctionReferenceId = operationId,
     sentAtEpochMs = sentAtEpochMs,
 )
 

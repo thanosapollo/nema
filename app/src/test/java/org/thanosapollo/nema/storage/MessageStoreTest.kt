@@ -574,6 +574,130 @@ class MessageStoreTest {
     }
 
     @Test
+    fun directCorrectionAuthoringIsDurableAndProjectsOneStableOriginal() = runBlocking {
+        var store = MessageStore(database)
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "original-wire-id",
+            localMessageId = "original-local-id",
+            originId = "original-origin-id",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "original body",
+        )
+        val originalOutbox = requireNotNull(store.outbox(ACCOUNT, "original-wire-id"))
+        database.messageDao().updateOutbox(originalOutbox.copy(status = OutboxStatus.ACKNOWLEDGED))
+
+        val correction = store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "correction-wire-id",
+            localMessageId = "correction-local-id",
+            originId = "correction-origin-id",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "corrected body",
+            replaceId = "original-wire-id",
+            correctionTargetMessageId = "original-local-id",
+        )
+
+        assertEquals("correction-wire-id", requireNotNull(correction).operationId)
+        val pending = store.pendingOutbound(ACCOUNT).single()
+        assertEquals("original-wire-id", pending.replaceId)
+        assertEquals("correction-local-id", pending.localMessageId)
+        val visible = database.messageDao().observeDirectTimeline(ACCOUNT, PEER).first().single()
+        assertEquals("original-local-id", visible.localMessageId)
+        assertEquals("corrected body", visible.correctedBody)
+        assertTrue(visible.edited)
+        assertEquals("original-wire-id", visible.operationId)
+
+        store = reopenStore()
+        assertEquals("original-wire-id", store.pendingOutbound(ACCOUNT).single().replaceId)
+        assertEquals(
+            "corrected body",
+            database.messageDao().observeDirectTimeline(ACCOUNT, PEER).first().single().correctedBody,
+        )
+    }
+
+    @Test
+    fun directCorrectionAuthoringFailsClosedWithoutExactSentTargetAuthority() = runBlocking {
+        val store = MessageStore(database)
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "original-wire-id",
+            localMessageId = "original-local-id",
+            originId = "original-origin-id",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "original body",
+        )
+
+        suspend fun correction(
+            localId: String,
+            targetLocalId: String = "original-local-id",
+            targetWireId: String = "original-wire-id",
+            peer: String = PEER,
+            body: String = "corrected body",
+        ) = store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "wire-$localId",
+            localMessageId = localId,
+            originId = "origin-$localId",
+            peerJid = peer,
+            senderJid = SELF,
+            body = body,
+            replaceId = targetWireId,
+            correctionTargetMessageId = targetLocalId,
+        )
+
+        assertSuspendFailure<IllegalArgumentException> { correction("pending-target") }
+        val original = requireNotNull(store.outbox(ACCOUNT, "original-wire-id"))
+        database.messageDao().updateOutbox(original.copy(status = OutboxStatus.ACKNOWLEDGED))
+        assertSuspendFailure<IllegalArgumentException> { correction("wrong-local", "missing-local-id") }
+        assertSuspendFailure<IllegalArgumentException> { correction("wrong-peer", peer = "other@example.org") }
+        assertSuspendFailure<IllegalArgumentException> { correction("unchanged", body = "original body") }
+
+        suspend fun addSentTarget(
+            localId: String,
+            wireId: String,
+            attachmentUrl: String? = null,
+            replyToId: String? = null,
+        ) {
+            store.composeDirectDraft(
+                accountId = ACCOUNT,
+                operationId = wireId,
+                localMessageId = localId,
+                originId = "origin-$localId",
+                peerJid = PEER,
+                senderJid = SELF,
+                body = "target $localId",
+                attachmentUrl = attachmentUrl,
+                replyToId = replyToId,
+                replyToJid = replyToId?.let { PEER },
+                replyFallbackBody = replyToId?.let { "quoted body" },
+            )
+            val outbox = requireNotNull(store.outbox(ACCOUNT, wireId))
+            database.messageDao().updateOutbox(outbox.copy(status = OutboxStatus.ACKNOWLEDGED))
+        }
+
+        addSentTarget("attachment-local", "attachment-wire", attachmentUrl = "https://example.org/file")
+        addSentTarget("reply-local", "reply-wire", replyToId = "quoted-wire")
+        database.messageDao().saveDraft(ACCOUNT, PEER, "", "unrelated draft")
+        assertSuspendFailure<IllegalArgumentException> {
+            correction("attachment-edit", "attachment-local", "attachment-wire")
+        }
+        assertSuspendFailure<IllegalArgumentException> {
+            correction("reply-edit", "reply-local", "reply-wire")
+        }
+
+        assertEquals(
+            setOf("original-local-id", "attachment-local", "reply-local"),
+            store.messages(ACCOUNT).map { it.localMessageId }.toSet(),
+        )
+        assertTrue(store.pendingOutbound(ACCOUNT).isEmpty())
+        assertEquals("unrelated draft", database.messageDao().draft(ACCOUNT, PEER, "")?.body)
+    }
+
+    @Test
     fun threadDraftSendPersistsExactLineageWithoutConsumingConversationDraft() = runBlocking {
         val thread = ThreadRef(ThreadId.require("child-thread"), ThreadId.require("parent-thread"))
         database.messageDao().saveDraft(ACCOUNT, PEER, "", "conversation draft")

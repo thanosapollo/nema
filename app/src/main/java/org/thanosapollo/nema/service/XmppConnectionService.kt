@@ -464,6 +464,8 @@ class SessionRuntime(
             replyToJid = snapshot.reply?.to,
             replyFallbackBody = snapshot.reply?.body,
             replyFallbackSender = snapshot.reply?.senderLabel,
+            replaceId = snapshot.correction?.referenceId,
+            correctionTargetMessageId = snapshot.correction?.localMessageId,
         ) ?: return false
         val observation = controller.lifecycle.value
         val lease = observation.dispatchLease()

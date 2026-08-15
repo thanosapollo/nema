@@ -10,6 +10,7 @@ import org.jivesoftware.smack.packet.Message
 import org.jivesoftware.smack.packet.StandardExtensionElement
 import org.jivesoftware.smack.packet.StanzaBuilder
 import org.jivesoftware.smackx.sid.element.OriginIdElement
+import org.jivesoftware.smackx.message_correct.element.MessageCorrectExtension
 import org.jxmpp.jid.impl.JidCreate
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -149,6 +150,59 @@ class LiveMessageAdapterTest {
 
         assertEquals(OutboxStatus.CONFIRMED, store.outbox(ACCOUNT, intent.operationId)?.status)
         assertEquals(listOf(intent.localMessageId), store.messages(ACCOUNT).map { it.localMessageId })
+    }
+
+    @Test
+    fun authoritativeOwnCorrectionEchoReconcilesWithoutAnotherVisibleBubble() = runBlocking {
+        val store = MessageStore(database)
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "original-wire-id",
+            localMessageId = "original-local-id",
+            originId = "original-origin-id",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "original",
+        )
+        val original = requireNotNull(store.outbox(ACCOUNT, "original-wire-id"))
+        database.messageDao().updateOutbox(original.copy(status = OutboxStatus.ACKNOWLEDGED))
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "correction-wire-id",
+            localMessageId = "correction-local-id",
+            originId = "correction-origin-id",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "corrected",
+            replaceId = "original-wire-id",
+            correctionTargetMessageId = "original-local-id",
+        )
+        val correction = requireNotNull(store.claim(ACCOUNT, "correction-wire-id", generation = 5))
+        store.recordPotentialDelivery(correction)
+        val echo = StanzaBuilder.buildMessage("correction-wire-id")
+            .from(JidCreate.entityFullFrom("$SELF/device"))
+            .to(JidCreate.entityFullFrom("$PEER/device"))
+            .ofType(Message.Type.chat)
+            .setBody("corrected")
+            .addExtension(OriginIdElement("correction-origin-id"))
+            .addExtension(MessageCorrectExtension("original-wire-id"))
+            .build()
+        val attempt = SessionAttemptIdentity(
+            AccountId.require(ACCOUNT),
+            ConnectionGeneration.require(5),
+            ConnectionAttempt.require(1),
+            LifecycleEpoch.require(1),
+        )
+
+        LiveMessageAdapter(store, localIds = { "server-correction" })
+            .ingest(requireNotNull(echo.toIncomingEnvelope(attempt, SELF)))
+
+        assertEquals(OutboxStatus.CONFIRMED, store.outbox(ACCOUNT, "correction-wire-id")?.status)
+        assertEquals(2, store.messages(ACCOUNT).size)
+        val visible = ChatRepository(database).observeTimeline(ACCOUNT, PEER).first().single()
+        assertEquals("original-local-id", visible.id)
+        assertEquals("corrected", visible.body)
+        assertTrue(visible.edited)
     }
 
     @Test

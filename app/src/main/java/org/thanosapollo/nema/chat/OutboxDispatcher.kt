@@ -222,6 +222,7 @@ internal class OutboxDispatcher(
                                 fallbackSender = pending.replyToJid?.replySenderLabel(),
                             )
                         },
+                        replaceId = pending.replaceId,
                     )
                     send(envelope) { active.entered.set(true) }
                 } catch (cancelled: CancellationException) {

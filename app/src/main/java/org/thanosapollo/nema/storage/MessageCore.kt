@@ -253,7 +253,7 @@ abstract class MessageDao {
           AND peerJid = :peerJid
           AND senderJid = :senderJid
           AND messageKind = 'CHAT'
-          AND direction = 'INBOUND'
+          AND direction = :direction
           AND replaceId = :replaceId
           AND correctionTargetMessageId IS NULL
         ORDER BY localSequence, localMessageId
@@ -263,6 +263,7 @@ abstract class MessageDao {
         accountId: String,
         peerJid: String,
         senderJid: String,
+        direction: MessageDirection,
         replaceId: String,
     ): List<MessageEntity>
 
@@ -983,7 +984,7 @@ abstract class MessageDao {
           messages.messageKind, messages.threadId, messages.parentThreadId, messages.body,
           messages.attachmentUrl, messages.attachmentName, messages.attachmentMime,
           messages.attachmentSize, messages.replyToId, messages.replyToJid,
-          messages.replyFallbackBody
+          messages.replyFallbackBody, messages.replaceId
         FROM message_outbox
         INNER JOIN messages
           ON messages.accountId = message_outbox.accountId
@@ -1117,6 +1118,7 @@ data class PendingOutbound(
     val replyToId: String? = null,
     val replyToJid: String? = null,
     val replyFallbackBody: String? = null,
+    val replaceId: String? = null,
 )
 
 data class TrustedIdentityAlias(
@@ -1181,8 +1183,8 @@ data class IncomingMessage(
         }
         require(!markable || !markerTargetId.isNullOrEmpty()) { "Markable messages require a target ID" }
         require(replaceId == null || replaceId.isNotEmpty()) { "Correction target must not be empty" }
-        require(replaceId == null || (messageKind == MessageKind.CHAT && direction == MessageDirection.INBOUND)) {
-            "Only inbound direct messages may correct stored content"
+        require(replaceId == null || messageKind == MessageKind.CHAT) {
+            "Only direct messages may correct stored content"
         }
     }
 }
@@ -1205,6 +1207,8 @@ data class OutboundIntent(
     val replyToId: String? = null,
     val replyToJid: String? = null,
     val replyFallbackBody: String? = null,
+    val replaceId: String? = null,
+    val correctionTargetMessageId: String? = null,
 ) {
     init {
         require(accountId.isNotEmpty()) { "Account ID must not be empty" }
@@ -1221,6 +1225,15 @@ data class OutboundIntent(
         require(replyToJid == null || replyToJid.isNotEmpty()) { "Reply JID must not be empty" }
         require(replyToId != null || (replyToJid == null && replyFallbackBody == null)) {
             "Reply metadata requires a reply ID"
+        }
+        require((replaceId == null) == (correctionTargetMessageId == null)) {
+            "Correction target identity must be complete"
+        }
+        require(replaceId == null || messageKind == MessageKind.CHAT) {
+            "Only direct messages may be corrected"
+        }
+        require(replaceId == null || (attachmentUrl == null && replyToId == null)) {
+            "Corrections cannot carry attachments or replies"
         }
     }
 }
@@ -1323,6 +1336,8 @@ class MessageStore private constructor(
         replyToJid: String? = null,
         replyFallbackBody: String? = null,
         replyFallbackSender: String? = null,
+        replaceId: String? = null,
+        correctionTargetMessageId: String? = null,
     ): OutboxEntity? = database.withTransaction {
         val dao = database.messageDao()
         if (body.isBlank()) return@withTransaction null
@@ -1333,16 +1348,18 @@ class MessageStore private constructor(
         } else {
             replyFallbackSender ?: replyToJid?.substringAfterLast('/')?.substringBefore('@') ?: "message"
         }
-        dao.saveDraft(
-            accountId,
-            peerJid,
-            threadKey,
-            body,
-            replyToId,
-            replyToJid,
-            durableReplyBody,
-            durableReplySender,
-        )
+        if (replaceId == null) {
+            dao.saveDraft(
+                accountId,
+                peerJid,
+                threadKey,
+                body,
+                replyToId,
+                replyToJid,
+                durableReplyBody,
+                durableReplySender,
+            )
+        }
         val outbox = composeInTransaction(
             OutboundIntent(
                 accountId = accountId,
@@ -1362,10 +1379,14 @@ class MessageStore private constructor(
                 replyToId = replyToId,
                 replyToJid = replyToJid,
                 replyFallbackBody = replyFallbackBody,
+                replaceId = replaceId,
+                correctionTargetMessageId = correctionTargetMessageId,
             ),
         )
-        check(dao.deleteDraft(accountId, peerJid, threadKey) == 1) {
-            "Direct draft changed during send transaction"
+        if (replaceId == null) {
+            check(dao.deleteDraft(accountId, peerJid, threadKey) == 1) {
+                "Direct draft changed during send transaction"
+            }
         }
         outbox
     }
@@ -1411,7 +1432,21 @@ class MessageStore private constructor(
             replyToId = intent.replyToId,
             replyToJid = intent.replyToJid,
             replyFallbackBody = intent.replyFallbackBody,
+            replaceId = intent.replaceId,
+            correctionTargetMessageId = intent.correctionTargetMessageId,
         )
+        intent.replaceId?.let { referenceId ->
+            val target = requireNotNull(dao.message(intent.accountId, requireNotNull(intent.correctionTargetMessageId))) {
+                "Unknown correction target"
+            }
+            val targetOutbox = requireNotNull(dao.outbox(intent.accountId, referenceId)) {
+                "Correction target has no exact outbound identity"
+            }
+            require(targetOutbox.messageId == target.localMessageId &&
+                targetOutbox.status in setOf(OutboxStatus.ACKNOWLEDGED, OutboxStatus.CONFIRMED) &&
+                message.canCorrect(target) && message.body != target.body
+            ) { "Correction target is not eligible" }
+        }
         dao.insertMessage(message)
         writeBoundary(MessageWriteBoundary.AFTER_MESSAGE)
 
@@ -1567,6 +1602,7 @@ class MessageStore private constructor(
                     winner.accountId,
                     winner.peerJid,
                     winner.senderJid,
+                    winner.direction,
                     alias.value,
                 )) {
                     if (resolved.add(correction.localMessageId) && correction.canCorrect(winner)) {
@@ -2407,7 +2443,9 @@ private fun MessageEntity.matches(intent: OutboundIntent): Boolean =
         attachmentSize == intent.attachmentSize &&
         replyToId == intent.replyToId &&
         replyToJid == intent.replyToJid &&
-        replyFallbackBody == intent.replyFallbackBody
+        replyFallbackBody == intent.replyFallbackBody &&
+        replaceId == intent.replaceId &&
+        correctionTargetMessageId == intent.correctionTargetMessageId
 
 private fun MessageEntity.isCompatibleWith(incoming: IncomingMessage): Boolean =
     accountId == incoming.accountId &&
@@ -2435,17 +2473,24 @@ private fun MessageEntity.canCorrect(target: MessageEntity): Boolean =
         localMessageId != target.localMessageId &&
         accountId == target.accountId &&
         peerJid == target.peerJid &&
-        senderJid == peerJid &&
         senderJid == target.senderJid &&
-        direction == MessageDirection.INBOUND &&
         direction == target.direction &&
-        messageKind == MessageKind.CHAT &&
-        target.messageKind == MessageKind.CHAT &&
+        isPlainDirectText() &&
+        target.isPlainDirectText() &&
         target.replaceId == null &&
         threadId == target.threadId &&
-        parentThreadId == target.parentThreadId &&
+        parentThreadId == target.parentThreadId
+
+private fun MessageEntity.isPlainDirectText(): Boolean =
+    messageKind == MessageKind.CHAT &&
+        body.isNotBlank() &&
         attachmentUrl == null &&
-        replyToId == null
+        attachmentName == null &&
+        attachmentMime == null &&
+        attachmentSize == null &&
+        replyToId == null &&
+        replyToJid == null &&
+        replyFallbackBody == null
 
 private data class ArchivePosition(
     val authority: String,
