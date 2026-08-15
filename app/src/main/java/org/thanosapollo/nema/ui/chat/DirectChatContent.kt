@@ -7,6 +7,7 @@ import java.io.InputStream
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.LinkedHashMap
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -69,6 +70,7 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -98,6 +100,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -107,10 +110,12 @@ import org.thanosapollo.nema.chat.DirectChatState
 import org.thanosapollo.nema.chat.DirectConversationKey
 import org.thanosapollo.nema.chat.DraftReply
 import org.thanosapollo.nema.chat.DraftSnapshot
+import org.thanosapollo.nema.chat.ThreadSummary
 import org.thanosapollo.nema.chat.TimelineMessage
 import org.thanosapollo.nema.session.SessionIdentity
 import org.thanosapollo.nema.thread.ThreadId
 import org.thanosapollo.nema.thread.ThreadRef
+import org.thanosapollo.nema.thread.draftKey
 import org.thanosapollo.nema.ui.HomeContent
 import org.thanosapollo.nema.ui.quietConnectionStatus
 import org.thanosapollo.nema.ui.theme.LocalChatBackgroundUri
@@ -169,6 +174,9 @@ fun DirectChatContent(
         }
         var composerStates by remember(state.accountId) {
             mutableStateOf(emptyMap<DirectConversationKey, ComposerState>())
+        }
+        val timelineViewports = remember(state.accountId) {
+            TimelineViewportStore()
         }
         val currentConversationKey by rememberUpdatedState(
             state.selectedPeer?.let { DirectConversationKey(state.accountId, it, state.selectedThread) },
@@ -465,6 +473,10 @@ fun DirectChatContent(
                             messages = state.messages,
                             conversationGroupChat = state.selectedPeerGroupChat,
                             latestFocusRequest = latestFocusRequest,
+                            initialViewport = timelineViewports[conversationKey],
+                            onViewportChanged = { anchor ->
+                                timelineViewports[conversationKey] = anchor
+                            },
                             onContinueThread = { thread -> scope.launch { onContinueThread(thread) } },
                             onReply = { message ->
                                 val reference = requireNotNull(message.replyReferenceId)
@@ -1244,11 +1256,53 @@ private fun composerStateSaver(
     },
 )
 
+data class TimelineViewportAnchor(
+    val messageId: String,
+    val offset: Int,
+    val fallbackIndex: Int,
+)
+
+internal class TimelineViewportStore(private val capacity: Int = 32) {
+    init {
+        require(capacity > 0) { "Viewport capacity must be positive" }
+    }
+
+    private val anchors = object : LinkedHashMap<DirectConversationKey, TimelineViewportAnchor>(
+        capacity,
+        0.75f,
+        true,
+    ) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<DirectConversationKey, TimelineViewportAnchor>?,
+        ): Boolean = size > capacity
+    }
+
+    val size: Int
+        get() = anchors.size
+
+    operator fun get(key: DirectConversationKey): TimelineViewportAnchor? = anchors[key]
+
+    operator fun set(key: DirectConversationKey, anchor: TimelineViewportAnchor) {
+        anchors[key] = anchor
+    }
+}
+
+internal fun restoredTimelineIndex(
+    messages: List<TimelineMessage>,
+    anchor: TimelineViewportAnchor,
+): Int {
+    require(messages.isNotEmpty()) { "Cannot restore an empty timeline" }
+    val exact = messages.asReversed().indexOfFirst { it.id == anchor.messageId }
+    return if (exact >= 0) exact else anchor.fallbackIndex.coerceIn(0, messages.lastIndex)
+}
+
 @Composable
 fun MessageTimeline(
     messages: List<TimelineMessage>,
     conversationGroupChat: Boolean = false,
     latestFocusRequest: Long = 0L,
+    initialViewport: TimelineViewportAnchor? = null,
+    onViewportChanged: (TimelineViewportAnchor) -> Unit = {},
     onContinueThread: (ThreadRef) -> Unit = {},
     onReply: (TimelineMessage) -> Unit = {},
     onQuote: (TimelineMessage) -> Unit = {},
@@ -1257,6 +1311,7 @@ fun MessageTimeline(
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val currentOnViewportChanged by rememberUpdatedState(onViewportChanged)
     val atLatest by remember {
         derivedStateOf {
             listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
@@ -1264,7 +1319,27 @@ fun MessageTimeline(
     }
     var previousLatestId by remember { mutableStateOf<String?>(null) }
     var newIncoming by remember { mutableIntStateOf(0) }
+    var viewportRestored by remember { mutableStateOf(initialViewport == null) }
     val latestId = messages.lastOrNull()?.id
+    val viewportMessageIds = messages.map(TimelineMessage::id)
+    LaunchedEffect(initialViewport, viewportMessageIds, viewportRestored) {
+        if (!viewportRestored && messages.isNotEmpty()) {
+            val anchor = requireNotNull(initialViewport)
+            val index = restoredTimelineIndex(messages, anchor)
+            listState.scrollToItem(index, anchor.offset)
+            viewportRestored = true
+        }
+    }
+    LaunchedEffect(listState, viewportMessageIds, viewportRestored) {
+        if (!viewportRestored || messages.isEmpty()) return@LaunchedEffect
+        snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
+            .distinctUntilChanged()
+            .collect { (index, offset) ->
+                val reversed = viewportMessageIds.asReversed()
+                val bounded = index.coerceIn(0, reversed.lastIndex)
+                currentOnViewportChanged(TimelineViewportAnchor(reversed[bounded], offset, bounded))
+            }
+    }
     LaunchedEffect(atLatest) {
         if (atLatest) newIncoming = 0
     }
@@ -1351,6 +1426,14 @@ fun MessageTimeline(
                                         Text(it, style = MaterialTheme.typography.bodyMedium)
                                     }
                                 }
+                                if (!conversationGroupChat && !message.groupChat) {
+                                    message.threadSummaries.forEach { summary ->
+                                        ThreadSummaryButton(
+                                            summary = summary,
+                                            onClick = { onContinueThread(summary.thread) },
+                                        )
+                                    }
+                                }
                                 message.delivery?.visibleLabel()?.let { label ->
                                     Text(label, style = MaterialTheme.typography.labelSmall)
                                 }
@@ -1429,6 +1512,40 @@ fun MessageTimeline(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ThreadSummaryButton(
+    summary: ThreadSummary,
+    onClick: () -> Unit,
+) {
+    val replies = if (summary.replyCount == 1) "1 reply" else "${summary.replyCount} replies"
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 5.dp)
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics {
+                contentDescription = "Open thread with $replies. Latest: ${summary.latestPreview}"
+            }
+            .testTag("thread-summary-${summary.thread.draftKey()}"),
+        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.55f),
+        shape = RoundedCornerShape(10.dp),
+    ) {
+        Column(Modifier.padding(horizontal = 8.dp, vertical = 5.dp)) {
+            Text(
+                "Thread · $replies",
+                color = MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.labelMedium,
+            )
+            Text(
+                summary.latestPreview,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

@@ -389,67 +389,313 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
-    fun directProjectionIncludesRootThreadAndChildThreadExactlyOnce() = runBlocking {
+    fun rootAwareProjectionCollapsesOverviewAndPrependsRootToExactThread() = runBlocking {
         val store = MessageStore(database)
-        store.ingest(incoming(ACCOUNT, "root", "root body"))
-        store.ingest(incoming(ACCOUNT, "thread", "thread body", threadId = "thread-a"))
         store.ingest(
-            incoming(
-                ACCOUNT,
-                "child",
-                "child body",
-                threadId = "thread-b",
-                parentThreadId = "thread-a",
+            incoming(ACCOUNT, "root", "root body").copy(
+                aliases = listOf(
+                    TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "root-origin-id"),
+                    TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "root-message-id"),
+                ),
             ),
         )
+        store.ingest(
+            incoming(ACCOUNT, "thread-first", "first answer", threadId = "thread-a").copy(
+                replyToId = "root-message-id",
+                replyToJid = PEER,
+                replyFallbackBody = "> peer wrote:\n> root body\n",
+            ),
+        )
+        store.ingest(incoming(ACCOUNT, "thread-later", "latest answer", threadId = "thread-a"))
         store.ingest(incoming(OTHER_ACCOUNT, "other-account", "hidden"))
         val repository = ChatRepository(database)
+        val thread = ThreadRef(ThreadId.require("thread-a"))
 
         val conversations = repository.observeConversations(ACCOUNT).first()
-        val timeline = repository.observeTimeline(ACCOUNT, PEER).first()
+        val overview = repository.observeTimeline(ACCOUNT, PEER).first()
+        val dedicated = repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER, thread)).first()
 
-        assertEquals(listOf("child body"), conversations.map(ConversationSummary::preview))
-        assertEquals(listOf("root body", "thread body", "child body"), timeline.map(TimelineMessage::body))
-        assertEquals(listOf("root", "thread", "child"), timeline.map(TimelineMessage::id))
+        assertEquals(listOf("latest answer"), conversations.map(ConversationSummary::preview))
+        assertEquals(listOf("root"), overview.map(TimelineMessage::id))
+        assertEquals(
+            listOf(
+                ThreadSummary(
+                    thread,
+                    replyCount = 2,
+                    latestMessageId = "thread-later",
+                    latestPreview = "latest answer",
+                ),
+            ),
+            overview.single().threadSummaries,
+        )
+        assertEquals(listOf("root", "thread-first", "thread-later"), dedicated.map(TimelineMessage::id))
+        assertTrue(dedicated.first().thread == null)
+        assertTrue(dedicated.first().threadSummaries.isEmpty())
+        assertEquals(thread, dedicated[1].thread)
+        assertEquals(thread, dedicated[2].thread)
+
+        database.close()
+        database = NemaDatabase.create(context, databaseName)
+        val reopened = ChatRepository(database)
+        assertEquals(listOf("root"), reopened.observeTimeline(ACCOUNT, PEER).first().map(TimelineMessage::id))
+        assertEquals(
+            listOf("root", "thread-first", "thread-later"),
+            reopened.observeTimeline(DirectConversationKey(ACCOUNT, PEER, thread)).first().map(TimelineMessage::id),
+        )
     }
 
     @Test
-    fun exactThreadScopeKeepsMessageIdentitySeparateAndConversationFallsBackNormally() = runBlocking {
+    fun dedicatedProjectionPrependsBackfilledRootBeforeChronologicalMembers() = runBlocking {
         val store = MessageStore(database)
-        store.ingest(incoming(ACCOUNT, "ordinary-message", "ordinary body"))
-        store.ingest(incoming(ACCOUNT, "root-message", "thread A", threadId = "thread-a"))
         store.ingest(
-            incoming(
-                ACCOUNT,
-                "child-message",
-                "thread B",
-                threadId = "thread-b",
-                parentThreadId = "thread-a",
+            incoming(ACCOUNT, "thread-first", "first answer", threadId = "backfilled-thread").copy(
+                replyToId = "backfilled-root-wire",
+                replyToJid = PEER,
+            ),
+        )
+        store.ingest(incoming(ACCOUNT, "thread-later", "later answer", threadId = "backfilled-thread"))
+        store.ingest(
+            incoming(ACCOUNT, "backfilled-root", "root body").copy(
+                aliases = listOf(
+                    TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "backfilled-root-wire"),
+                ),
             ),
         )
         val repository = ChatRepository(database)
+        val thread = ThreadRef(ThreadId.require("backfilled-thread"))
 
-        val conversation = repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER)).first()
-        val threadA = repository.observeTimeline(
-            DirectConversationKey(
-                ACCOUNT,
-                PEER,
-                ThreadRef(ThreadId.require("thread-a")),
+        val overview = repository.observeTimeline(ACCOUNT, PEER).first()
+        val dedicated = repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER, thread)).first()
+
+        assertEquals(listOf("backfilled-root"), overview.map(TimelineMessage::id))
+        assertEquals(
+            listOf("backfilled-root", "thread-first", "thread-later"),
+            dedicated.map(TimelineMessage::id),
+        )
+    }
+
+    @Test
+    fun laterReplyMetadataDoesNotRetargetThreadRoot() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(
+            incoming(ACCOUNT, "first-root", "first root").copy(
+                aliases = listOf(TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "first-wire")),
             ),
-        ).first()
+        )
+        store.ingest(
+            incoming(ACCOUNT, "later-target", "later target").copy(
+                aliases = listOf(TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "later-wire")),
+            ),
+        )
+        store.ingest(
+            incoming(ACCOUNT, "thread-first", "first answer", threadId = "stable-thread").copy(
+                replyToId = "first-wire",
+                replyToJid = PEER,
+            ),
+        )
+        store.ingest(
+            incoming(ACCOUNT, "thread-later", "later answer", threadId = "stable-thread").copy(
+                replyToId = "later-wire",
+                replyToJid = PEER,
+            ),
+        )
+        val repository = ChatRepository(database)
+        val thread = ThreadRef(ThreadId.require("stable-thread"))
+
+        val overview = repository.observeTimeline(ACCOUNT, PEER).first()
+        val dedicated = repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER, thread)).first()
+
+        assertEquals(listOf("first-root", "later-target"), overview.map(TimelineMessage::id))
+        assertEquals(thread, overview.first().threadSummaries.single().thread)
+        assertTrue(overview.last().threadSummaries.isEmpty())
+        assertEquals(listOf("first-root", "thread-first", "thread-later"), dedicated.map(TimelineMessage::id))
+    }
+
+    @Test
+    fun roomConversationKeepsLegacyThreadProjectionForChatRows() = runBlocking {
+        val room = "room@conference.example.org"
+        val store = MessageStore(database)
+        store.ingest(
+            incoming(ACCOUNT, "room-root", "room root").copy(
+                peerJid = room,
+                senderJid = room,
+                aliases = listOf(TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, room, "room-wire")),
+            ),
+        )
+        store.ingest(
+            incoming(ACCOUNT, "room-thread", "room reply", threadId = "room-thread-id").copy(
+                peerJid = room,
+                senderJid = room,
+                replyToId = "room-wire",
+                replyToJid = room,
+            ),
+        )
+        ChatRepository(database).markRoom(ACCOUNT, room)
+        val repository = ChatRepository(database)
+        val thread = ThreadRef(ThreadId.require("room-thread-id"))
+
+        val overview = repository.observeTimeline(ACCOUNT, room).first()
+        val dedicated = repository.observeTimeline(DirectConversationKey(ACCOUNT, room, thread)).first()
+
+        assertEquals(listOf("room-root", "room-thread"), overview.map(TimelineMessage::id))
+        assertTrue(overview.all { it.threadSummaries.isEmpty() })
+        assertEquals(listOf("room-thread"), dedicated.map(TimelineMessage::id))
+    }
+
+    @Test
+    fun childThreadSummaryAttachesInsideParentAndPreservesFullLineage() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(
+            incoming(ACCOUNT, "root", "root body").copy(
+                aliases = listOf(TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "root-wire")),
+            ),
+        )
+        store.ingest(
+            incoming(ACCOUNT, "parent-reply", "parent answer", threadId = "parent-thread").copy(
+                replyToId = "root-wire",
+                replyToJid = PEER,
+                aliases = listOf(TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "parent-wire")),
+            ),
+        )
+        store.ingest(
+            incoming(
+                ACCOUNT,
+                "child-reply",
+                "child answer",
+                threadId = "child-thread",
+                parentThreadId = "parent-thread",
+            ).copy(
+                replyToId = "parent-wire",
+                replyToJid = PEER,
+            ),
+        )
+        val repository = ChatRepository(database)
+        val parent = ThreadRef(ThreadId.require("parent-thread"))
+        val child = ThreadRef(ThreadId.require("child-thread"), ThreadId.require("parent-thread"))
+
+        val overview = repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER)).first()
+        val parentView = repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER, parent)).first()
+        val childView = repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER, child)).first()
+
+        assertEquals(listOf("root"), overview.map(TimelineMessage::id))
+        assertEquals(parent, overview.single().threadSummaries.single().thread)
+        assertEquals(listOf("root", "parent-reply"), parentView.map(TimelineMessage::id))
+        assertEquals(child, parentView.last().threadSummaries.single().thread)
+        assertEquals(listOf("parent-reply", "child-reply"), childView.map(TimelineMessage::id))
+        assertTrue(childView.first().threadSummaries.isEmpty())
+    }
+
+    @Test
+    fun rootAwareProjectionFailsClosedOnAmbiguousRootsAndExactLineage() = runBlocking {
+        val store = MessageStore(database)
+        fun root(localId: String, kind: IdentityAliasKind) = incoming(ACCOUNT, localId, "$localId body").copy(
+            aliases = listOf(TrustedIdentityAlias(kind, PEER, "ambiguous-wire")),
+        )
+        store.ingest(root("root-a", IdentityAliasKind.ORIGIN_ID))
+        store.ingest(root("root-b", IdentityAliasKind.MESSAGE_ID))
+        store.ingest(
+            incoming(ACCOUNT, "thread-a", "first", threadId = "shared-thread").copy(
+                replyToId = "ambiguous-wire",
+                replyToJid = PEER,
+            ),
+        )
+        store.ingest(incoming(ACCOUNT, "thread-b", "later", threadId = "shared-thread"))
+        val repository = ChatRepository(database)
+        val exact = ThreadRef(ThreadId.require("shared-thread"))
+
+        val overview = repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER)).first()
+        val dedicated = repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER, exact)).first()
         val wrongLineage = repository.observeTimeline(
             DirectConversationKey(
                 ACCOUNT,
                 PEER,
-                ThreadRef(ThreadId.require("thread-a"), ThreadId.require("different-parent")),
+                ThreadRef(ThreadId.require("shared-thread"), ThreadId.require("different-parent")),
             ),
         ).first()
 
-        assertEquals(listOf("ordinary-message", "root-message", "child-message"), conversation.map { it.id })
-        assertEquals(listOf("root-message"), threadA.map { it.id })
-        assertEquals("thread-a", threadA.single().thread?.id?.value)
-        assertTrue(threadA.single().id != threadA.single().thread?.id?.value)
+        assertEquals(listOf("root-a", "root-b", "thread-a", "thread-b"), overview.map { it.id })
+        assertTrue(overview.all { it.threadSummaries.isEmpty() })
+        assertEquals(listOf("thread-a", "thread-b"), dedicated.map { it.id })
         assertTrue(wrongLineage.isEmpty())
+    }
+
+    @Test
+    fun rootAwareProjectionRejectsWrongAuthorQuarantineStanzaAndOtherAccountAliases() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(
+            incoming(ACCOUNT, "stanza-root", "stanza root").copy(
+                aliases = listOf(
+                    TrustedIdentityAlias(IdentityAliasKind.STANZA_ID, PEER, "stanza-wire"),
+                ),
+            ),
+        )
+        store.ingest(
+            incoming(ACCOUNT, "stanza-thread", "stanza answer", threadId = "stanza-thread-id").copy(
+                replyToId = "stanza-wire",
+                replyToJid = PEER,
+            ),
+        )
+        store.ingest(
+            incoming(ACCOUNT, "author-root", "author root").copy(
+                aliases = listOf(
+                    TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "author-wire"),
+                ),
+            ),
+        )
+        store.ingest(
+            incoming(ACCOUNT, "author-thread", "author answer", threadId = "author-thread-id").copy(
+                replyToId = "author-wire",
+                replyToJid = OTHER_PEER,
+            ),
+        )
+        store.ingest(
+            incoming(ACCOUNT, "quarantine-root", "quarantine root").copy(
+                aliases = listOf(
+                    TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "quarantine-wire"),
+                ),
+            ),
+        )
+        store.ingest(
+            incoming(ACCOUNT, "quarantine-thread", "quarantine answer", threadId = "quarantine-thread-id").copy(
+                replyToId = "quarantine-wire",
+                replyToJid = PEER,
+            ),
+        )
+        database.messageDao().quarantineAlias(
+            ACCOUNT,
+            IdentityAliasKind.ORIGIN_ID,
+            PEER,
+            "quarantine-wire",
+        )
+        store.ingest(
+            incoming(OTHER_ACCOUNT, "other-root", "other root").copy(
+                aliases = listOf(
+                    TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "other-wire"),
+                ),
+            ),
+        )
+        store.ingest(
+            incoming(ACCOUNT, "cross-thread", "cross answer", threadId = "cross-thread-id").copy(
+                replyToId = "other-wire",
+                replyToJid = PEER,
+            ),
+        )
+
+        val overview = ChatRepository(database).observeTimeline(ACCOUNT, PEER).first()
+
+        assertEquals(
+            listOf(
+                "stanza-root",
+                "stanza-thread",
+                "author-root",
+                "author-thread",
+                "quarantine-root",
+                "quarantine-thread",
+                "cross-thread",
+            ),
+            overview.map(TimelineMessage::id),
+        )
+        assertTrue(overview.all { it.threadSummaries.isEmpty() })
     }
 
     @Test

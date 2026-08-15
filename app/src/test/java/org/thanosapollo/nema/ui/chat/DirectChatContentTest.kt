@@ -59,6 +59,7 @@ import org.thanosapollo.nema.chat.DirectChatState
 import org.thanosapollo.nema.chat.DirectConversationKey
 import org.thanosapollo.nema.chat.DraftSnapshot
 import org.thanosapollo.nema.chat.MessageReplyPresentation
+import org.thanosapollo.nema.chat.ThreadSummary
 import org.thanosapollo.nema.chat.TimelineMessage
 import org.thanosapollo.nema.storage.RetryUncertainKey
 import org.thanosapollo.nema.session.SessionIdentity
@@ -87,6 +88,36 @@ class DirectChatContentTest {
 
         assertEquals("10:05", formatMessageTime(epoch, ZoneId.of("UTC")))
         assertEquals("13:05", formatMessageTime(epoch, ZoneId.of("Europe/Athens")))
+    }
+
+    @Test
+    fun viewportRestorePrefersStableMessageIdThenBoundedFallback() {
+        val messages = (1..5).map { message("message-$it", outgoing = false) }
+
+        assertEquals(3, restoredTimelineIndex(messages, TimelineViewportAnchor("message-2", 7, 0)))
+        assertEquals(4, restoredTimelineIndex(messages, TimelineViewportAnchor("missing", 0, 99)))
+    }
+
+    @Test
+    fun viewportStoreIsBoundedAndRetainsRecentlyUsedRoute() {
+        val store = TimelineViewportStore(capacity = 2)
+        val first = DirectConversationKey(ACCOUNT_A, PEER_A)
+        val second = DirectConversationKey(ACCOUNT_A, PEER_B)
+        val third = DirectConversationKey(
+            ACCOUNT_A,
+            PEER_A,
+            ThreadRef(ThreadId.require("third-thread")),
+        )
+        val firstAnchor = TimelineViewportAnchor("first", 4, 1)
+
+        store[first] = firstAnchor
+        store[second] = TimelineViewportAnchor("second", 5, 2)
+        assertEquals(firstAnchor, store[first])
+        store[third] = TimelineViewportAnchor("third", 6, 3)
+
+        assertEquals(2, store.size)
+        assertEquals(firstAnchor, store[first])
+        assertEquals(null, store[second])
     }
 
     @Test
@@ -1745,6 +1776,104 @@ class DirectChatContentTest {
         composeRule.onNodeWithText("Reply as a thread").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("message-composer").assertIsFocused()
+    }
+
+    @Test
+    fun rootThreadSummaryShowsCountLatestPreviewAndOpensExactLineage() {
+        val thread = ThreadRef(
+            ThreadId.require("thread-summary"),
+            ThreadId.require("parent-thread"),
+        )
+        var opened: ThreadRef? = null
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A).copy(
+                        messages = listOf(
+                            message("root body", outgoing = false).copy(
+                                threadSummaries = listOf(
+                                    ThreadSummary(
+                                        thread,
+                                        replyCount = 2,
+                                        latestMessageId = "thread-latest",
+                                        latestPreview = "latest answer",
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                    onContinueThread = { opened = it; true },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Thread · 2 replies").assertIsDisplayed()
+        composeRule.onNodeWithText("latest answer").assertIsDisplayed()
+        composeRule.onNodeWithText("Thread · 2 replies").performClick()
+        composeRule.waitForIdle()
+        assertEquals(thread, opened)
+    }
+
+    @Test
+    fun threadBackRestoresParentViewportByMessageIdentity() {
+        val thread = ThreadRef(ThreadId.require("viewport-thread"))
+        val parentMessages = (1..100).map { number ->
+            message("message-$number", outgoing = false).let { original ->
+                if (number == 21) {
+                    original.copy(
+                        threadSummaries = listOf(
+                            ThreadSummary(
+                                thread,
+                                replyCount = 1,
+                                latestMessageId = "viewport-reply",
+                                latestPreview = "viewport reply",
+                            ),
+                        ),
+                    )
+                } else {
+                    original
+                }
+            }
+        }
+        val parent = state(ACCOUNT_A, PEER_A).copy(messages = parentMessages)
+        composeRule.setContent {
+            MaterialTheme {
+                var current by remember { mutableStateOf(parent) }
+                DirectChatContent(
+                    state = current,
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                    onContinueThread = {
+                        current = parent.copy(
+                            selectedThread = thread,
+                            messages = listOf(
+                                message("message-21", outgoing = false),
+                                message("viewport reply", outgoing = false).copy(thread = thread),
+                            ),
+                        )
+                        true
+                    },
+                    onCloseThread = { current = parent },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("message-timeline").performScrollToIndex(79)
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Thread · 1 reply").assertIsDisplayed().performClick()
+        composeRule.onNodeWithContentDescription("Back to conversation").performClick()
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("Thread · 1 reply").assertIsDisplayed()
+        composeRule.onNodeWithText("message-21").assertIsDisplayed()
     }
 
     @Test

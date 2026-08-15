@@ -589,6 +589,26 @@ abstract class MessageDao {
     )
     abstract fun observeDirectTimeline(accountId: String, peerJid: String): Flow<List<TimelineRow>>
 
+    @Query(
+        """
+        SELECT alias.*
+        FROM trusted_identity_aliases AS alias
+        JOIN messages
+          ON messages.accountId = alias.accountId
+         AND messages.localMessageId = alias.messageId
+        WHERE messages.accountId = :accountId
+          AND messages.peerJid = :peerJid
+          AND messages.messageKind = 'CHAT'
+          AND alias.status = 'TRUSTED'
+          AND alias.kind IN ('ORIGIN_ID', 'MESSAGE_ID')
+        ORDER BY alias.messageId, alias.kind, alias.authority, alias.value
+        """,
+    )
+    abstract fun observeDirectReplyAliases(
+        accountId: String,
+        peerJid: String,
+    ): Flow<List<TrustedIdentityAliasEntity>>
+
     @Query("SELECT * FROM chat_navigation WHERE accountId = :accountId")
     abstract fun observeNavigation(accountId: String): Flow<ChatNavigationEntity?>
 

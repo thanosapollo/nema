@@ -33,6 +33,7 @@ import org.thanosapollo.nema.storage.OutboxStatus
 import org.thanosapollo.nema.storage.PeerEntity
 import org.thanosapollo.nema.storage.RetryUncertainKey
 import org.thanosapollo.nema.storage.TimelineRow
+import org.thanosapollo.nema.storage.TrustedIdentityAliasEntity
 import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.thread.ThreadId
 import org.thanosapollo.nema.thread.ThreadRef
@@ -98,6 +99,13 @@ data class MessageReplyPresentation(
     val body: String,
 )
 
+data class ThreadSummary(
+    val thread: ThreadRef,
+    val replyCount: Int,
+    val latestMessageId: String,
+    val latestPreview: String,
+)
+
 data class DraftReply(
     val id: String,
     val to: String?,
@@ -129,11 +137,13 @@ data class TimelineMessage(
     val attachmentMime: String? = null,
     val attachmentSize: Long? = null,
     val replyReferenceId: String? = null,
+    val replyReferenceIds: Set<String> = emptySet(),
     val replyToId: String? = null,
     val replyToJid: String? = null,
     val replyFallbackBody: String? = null,
     val reply: MessageReplyPresentation? = null,
     val sentAtEpochMs: Long? = null,
+    val threadSummaries: List<ThreadSummary> = emptyList(),
 )
 
 data class DirectChatState(
@@ -273,18 +283,24 @@ class ChatRepository(database: NemaDatabase) {
     fun observeTimeline(accountId: String, peerJid: String): Flow<List<TimelineMessage>> =
         observeTimeline(DirectConversationKey(accountId, peerJid))
 
-    fun observeTimeline(key: DirectConversationKey): Flow<List<TimelineMessage>> =
-        dao.observeDirectTimeline(key.accountId, key.canonicalBarePeer).map { rows ->
-            val visibleRows = rows
-                .filter { row ->
-                    key.thread == null ||
-                        (row.threadId == key.thread.id.value &&
-                            row.parentThreadId == key.thread.parentId?.value)
-                }
-            val visible = chronologicalTimelineRows(visibleRows)
-                .map(TimelineRow::toPresentation)
-            visible.map { it.withReplyPresentation(visible) }
+    fun observeTimeline(key: DirectConversationKey): Flow<List<TimelineMessage>> = combine(
+        dao.observeDirectTimeline(key.accountId, key.canonicalBarePeer),
+        dao.observeDirectReplyAliases(key.accountId, key.canonicalBarePeer),
+        dao.observePeer(key.accountId, key.canonicalBarePeer),
+    ) { rows, aliases, peer ->
+        val aliasesByMessage = aliases
+            .filter { it.messageId != null }
+            .groupBy(TrustedIdentityAliasEntity::messageId, TrustedIdentityAliasEntity::value)
+            .mapValues { it.value.toSet() }
+        val timeline = chronologicalTimelineRows(rows)
+            .map { row -> row.toPresentation(aliasesByMessage[row.localMessageId].orEmpty()) }
+            .let { messages -> messages.map { it.withReplyPresentation(messages) } }
+        if (peer?.room == true || timeline.any(TimelineMessage::groupChat)) {
+            timeline.filterByThread(key.thread)
+        } else {
+            timeline.projectThreads(key.thread)
         }
+    }
 
     fun observeDraft(accountId: String, peerJid: String): Flow<String> =
         observeDraft(DirectConversationKey(accountId, peerJid))
@@ -600,7 +616,7 @@ internal fun canonicalDirectPeer(value: String): String? = runCatching {
     bare.asEntityBareJidOrThrow().toString()
 }.getOrNull()
 
-private fun TimelineRow.toPresentation() = TimelineMessage(
+private fun TimelineRow.toPresentation(replyReferenceIds: Set<String>) = TimelineMessage(
     id = localMessageId,
     senderJid = senderJid,
     body = body,
@@ -632,6 +648,7 @@ private fun TimelineRow.toPresentation() = TimelineMessage(
     attachmentMime = attachmentMime,
     attachmentSize = attachmentSize,
     replyReferenceId = replyReferenceId,
+    replyReferenceIds = replyReferenceIds,
     replyToId = replyToId,
     replyToJid = replyToJid,
     replyFallbackBody = replyFallbackBody,
@@ -706,14 +723,80 @@ private fun MessageDraftEntity.toStoredDraft() = StoredDraft(
     },
 )
 
-private fun TimelineMessage.withReplyPresentation(timeline: List<TimelineMessage>): TimelineMessage {
-    val reference = replyToId ?: return this
-    val candidates = timeline.filter { it.replyReferenceId == reference }
-    val target = if (replyToJid == null) {
+private fun List<TimelineMessage>.filterByThread(thread: ThreadRef?): List<TimelineMessage> =
+    if (thread == null) {
+        this
+    } else {
+        filter { it.thread == thread }
+    }
+
+private data class ResolvedThread(
+    val thread: ThreadRef,
+    val root: TimelineMessage,
+    val members: List<TimelineMessage>,
+)
+
+private fun List<TimelineMessage>.projectThreads(selected: ThreadRef?): List<TimelineMessage> {
+    val resolved = asSequence()
+        .filter { !it.groupChat }
+        .mapNotNull(TimelineMessage::thread)
+        .distinct()
+        .mapNotNull { thread -> resolveThread(thread) }
+        .toList()
+    val visible = if (selected == null) {
+        val hidden = resolved.flatMap(ResolvedThread::members).mapTo(mutableSetOf(), TimelineMessage::id)
+        filterNot { it.id in hidden }
+    } else {
+        val resolvedThread = resolved.singleOrNull { it.thread == selected }
+        resolvedThread?.let { listOf(it.root) + it.members }
+            ?: filter { it.thread == selected }
+    }
+    val summaries = resolved.groupBy { it.root.id }
+    return visible.map { message ->
+        val attached = summaries[message.id].orEmpty()
+            .filter { it.thread != selected }
+            .map { thread ->
+                ThreadSummary(
+                    thread = thread.thread,
+                    replyCount = thread.members.size,
+                    latestMessageId = thread.members.last().id,
+                    latestPreview = thread.members.last().body,
+                )
+            }
+        message.copy(threadSummaries = attached)
+    }
+}
+
+private fun List<TimelineMessage>.resolveThread(thread: ThreadRef): ResolvedThread? {
+    val members = filter { it.thread == thread && !it.groupChat }
+    if (members.isEmpty()) return null
+    val root = members.first().resolveReplyTarget(this)
+        ?.takeIf { candidate ->
+            !candidate.groupChat && if (thread.parentId == null) {
+                candidate.thread == null
+            } else {
+                candidate.thread?.id == thread.parentId
+            }
+        }
+        ?: return null
+    return ResolvedThread(thread, root, members)
+}
+
+private fun TimelineMessage.resolveReplyTarget(timeline: List<TimelineMessage>): TimelineMessage? {
+    val reference = replyToId ?: return null
+    val candidates = timeline.filter {
+        it.replyReferenceId == reference || reference in it.replyReferenceIds
+    }
+    return if (replyToJid == null) {
         candidates.singleOrNull()
     } else {
         candidates.filter { it.matchesReplyAuthor(requireNotNull(replyToJid)) }.singleOrNull()
     }
+}
+
+private fun TimelineMessage.withReplyPresentation(timeline: List<TimelineMessage>): TimelineMessage {
+    if (replyToId == null) return this
+    val target = resolveReplyTarget(timeline)
     val fallback = replyFallbackBody?.toFallbackPreview()
     val previewBody = target?.body ?: fallback?.body ?: return this
     val sender = target?.senderJid?.replySenderLabel()
