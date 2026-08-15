@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jxmpp.jid.impl.JidCreate
 import org.thanosapollo.nema.account.AccountConfiguration
 import org.thanosapollo.nema.storage.ChatNavigationEntity
@@ -322,15 +323,38 @@ class ChatRepository(database: NemaDatabase) {
         if (route == null) {
             dao.clearNavigation(accountId)
         } else {
-            dao.saveNavigation(
-                ChatNavigationEntity(
-                    accountId = accountId,
-                    peerJid = route.peerJid,
-                    threadId = route.thread?.id?.value,
-                    parentThreadId = route.thread?.parentId?.value,
-                ),
-            )
+            dao.saveNavigation(route.toEntity(accountId))
         }
+    }
+
+    suspend fun openThreadReply(
+        accountId: String,
+        sourceRoute: ChatRoute,
+        route: ChatRoute,
+        target: TimelineMessage,
+        reply: DraftReply,
+    ): Boolean {
+        val thread = requireNotNull(route.thread) { "Thread reply route requires a thread" }
+        return dao.saveNavigationWithDraft(
+            expectedNavigation = sourceRoute.toEntity(accountId),
+            navigation = route.toEntity(accountId),
+            targetMessageId = target.id,
+            targetSenderJid = target.senderJid,
+            targetBody = target.body,
+            targetThreadId = target.thread?.id?.value,
+            targetParentThreadId = target.thread?.parentId?.value,
+            draft = MessageDraftEntity(
+                accountId = accountId,
+                peerJid = route.peerJid,
+                messageKind = MessageKind.CHAT,
+                threadKey = thread.draftKey(),
+                body = "",
+                replyToId = reply.id,
+                replyToJid = reply.to,
+                replyFallbackBody = reply.body,
+                replyFallbackSender = reply.senderLabel,
+            ),
+        )
     }
 
     fun observePeer(accountId: String, peerJid: String): Flow<PeerEntity?> =
@@ -484,6 +508,28 @@ class DirectChatPresenter(
         val route = selectedRoute.value ?: return false
         selectRoute(route.copy(thread = threadingPolicy.childOf(parent)))
         return true
+    }
+
+    suspend fun startThreadFrom(message: TimelineMessage): Boolean {
+        val route = selectedRoute.value ?: return false
+        val current = state.value
+        if (current.selectedPeer != route.peerJid || current.selectedThread != route.thread) return false
+        if (current.selectedPeerGroupChat) return false
+        if (current.messages.singleOrNull { it.id == message.id } != message) return false
+        val reference = message.replyReferenceId ?: return false
+        val thread = message.thread?.let(threadingPolicy::childOf) ?: threadingPolicy.newTopic()
+        val nextRoute = route.copy(thread = thread)
+        val reply = DraftReply(
+            id = reference,
+            to = message.senderJid,
+            body = message.body,
+            senderLabel = message.senderJid.replySenderLabel(),
+        )
+        if (selectedRoute.value != route) return false
+        if (!repository.openThreadReply(account.id.value, route, nextRoute, message, reply)) return false
+        return withTimeoutOrNull(5_000) {
+            selectedRoute.first { it != route }
+        } == nextRoute
     }
 
     fun closeThread() {
@@ -699,6 +745,13 @@ private fun String.toFallbackPreview(): FallbackReplyPreview? {
 
 private fun String.replySenderLabel(): String =
     substringAfterLast('/').takeUnless { it == this } ?: substringBefore('@')
+
+private fun ChatRoute.toEntity(accountId: String) = ChatNavigationEntity(
+    accountId = accountId,
+    peerJid = peerJid,
+    threadId = thread?.id?.value,
+    parentThreadId = thread?.parentId?.value,
+)
 
 private fun ChatNavigationEntity.toRoute() = ChatRoute(
     peerJid = peerJid,

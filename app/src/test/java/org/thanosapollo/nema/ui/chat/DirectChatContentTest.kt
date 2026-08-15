@@ -23,6 +23,8 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertHeightIsEqualTo
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.assertIsNotFocused
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.StateRestorationTester
@@ -1031,7 +1033,10 @@ class DirectChatContentTest {
                 MessageTimeline(
                     messages = listOf(
                         message("ordinary message", outgoing = false).copy(replyReferenceId = "wire-id"),
-                        message("threaded message", outgoing = false).copy(thread = parent),
+                        message("threaded message", outgoing = false).copy(
+                            thread = parent,
+                            replyReferenceId = "thread-wire-id",
+                        ),
                     ),
                     onReply = { replied = it },
                     onQuote = {},
@@ -1045,9 +1050,10 @@ class DirectChatContentTest {
         composeRule.onNodeWithText("ordinary message").performTouchInput { longClick() }
         composeRule.onNodeWithText("Reply").performClick()
         assertEquals("ordinary message", replied?.id)
+        composeRule.waitForIdle()
 
         composeRule.onNodeWithText("threaded message").performTouchInput { longClick() }
-        composeRule.onNodeWithText("Reply").assertDoesNotExist()
+        composeRule.onNodeWithText("Reply").assertIsDisplayed()
         composeRule.onNodeWithText("Quote").assertIsDisplayed()
         composeRule.onNodeWithText("Reply as a thread").performClick()
         assertEquals("threaded message", repliedAsThread?.id)
@@ -1624,10 +1630,128 @@ class DirectChatContentTest {
     }
 
     @Test
+    fun replyAsThreadIsHiddenWithoutTrustedReference() {
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A).copy(
+                        messages = listOf(message("untrusted message", outgoing = false)),
+                    ),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("untrusted message").performTouchInput { longClick() }
+
+        composeRule.onNodeWithText("Quote").assertIsDisplayed()
+        composeRule.onNodeWithText("Reply").assertDoesNotExist()
+        composeRule.onNodeWithText("Reply as a thread").assertDoesNotExist()
+    }
+
+    @Test
+    fun replyAsThreadIsHiddenForGroupChatEvenWithTrustedReference() {
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A).copy(
+                        selectedPeerGroupChat = true,
+                        messages = listOf(
+                            message("room message", outgoing = false).copy(
+                                groupChat = true,
+                                replyReferenceId = "room-stanza-id",
+                            ),
+                        ),
+                    ),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("room message").performTouchInput { longClick() }
+
+        composeRule.onNodeWithText("Reply").assertIsDisplayed()
+        composeRule.onNodeWithText("Quote").assertIsDisplayed()
+        composeRule.onNodeWithText("Reply as a thread").assertDoesNotExist()
+    }
+
+    @Test
+    fun replyAsThreadIsHiddenForChatRowInsideRoomConversation() {
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A).copy(
+                        selectedPeerGroupChat = true,
+                        messages = listOf(
+                            message("private room message", outgoing = false).copy(
+                                groupChat = false,
+                                replyReferenceId = "private-stanza-id",
+                            ),
+                        ),
+                    ),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("private room message").performTouchInput { longClick() }
+
+        composeRule.onNodeWithText("Reply").assertIsDisplayed()
+        composeRule.onNodeWithText("Quote").assertIsDisplayed()
+        composeRule.onNodeWithText("Reply as a thread").assertDoesNotExist()
+    }
+
+    @Test
+    fun replyAsThreadFocusesComposerOnlyAfterSuccessfulOpen() {
+        var succeeds = false
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A).copy(
+                        messages = listOf(
+                            message("thread target", outgoing = false).copy(replyReferenceId = "wire-id"),
+                        ),
+                    ),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                    onStartThreadFrom = { succeeds },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("message-composer").assertIsNotFocused()
+        composeRule.onNodeWithText("thread target").performTouchInput { longClick() }
+        composeRule.onNodeWithText("Reply as a thread").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("message-composer").assertIsNotFocused()
+
+        composeRule.runOnIdle { succeeds = true }
+        composeRule.onNodeWithText("thread target").performTouchInput { longClick() }
+        composeRule.onNodeWithText("Reply as a thread").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("message-composer").assertIsFocused()
+    }
+
+    @Test
     fun conversationAndThreadActionsUseThreadLineageNotMessageIdentity() {
         val thread = ThreadRef(ThreadId.require("thread-a"))
         var opened: ThreadRef? = null
-        var childParent: ThreadRef? = null
+        var threadSource: TimelineMessage? = null
         var newThreads = 0
         lateinit var show: (DirectChatState) -> Unit
 
@@ -1645,6 +1769,7 @@ class DirectChatContentTest {
                                     delivery = null,
                                     retryUncertainKey = null,
                                     thread = thread,
+                                    replyReferenceId = "thread-root-wire-id",
                                 ),
                             ),
                         ),
@@ -1661,7 +1786,7 @@ class DirectChatContentTest {
                     onStartNewThread = { newThreads++; true },
                     onContinueThread = { opened = it; true },
                     onStartChildThread = { true },
-                    onStartChildThreadOf = { childParent = it; true },
+                    onStartThreadFrom = { threadSource = it; true },
                     onCloseThread = {},
                 )
             }
@@ -1675,7 +1800,8 @@ class DirectChatContentTest {
         composeRule.onNodeWithText("thread root").performTouchInput { longClick() }
         composeRule.onNodeWithText("Reply as a thread").performClick()
         composeRule.waitForIdle()
-        assertEquals(thread, childParent)
+        assertEquals("message-identity", threadSource?.id)
+        assertEquals(thread, threadSource?.thread)
         composeRule.onNodeWithContentDescription("Conversation actions").performClick()
         composeRule.onNodeWithText("New thread").performClick()
         composeRule.waitForIdle()

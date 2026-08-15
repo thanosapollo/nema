@@ -592,6 +592,9 @@ abstract class MessageDao {
     @Query("SELECT * FROM chat_navigation WHERE accountId = :accountId")
     abstract fun observeNavigation(accountId: String): Flow<ChatNavigationEntity?>
 
+    @Query("SELECT * FROM chat_navigation WHERE accountId = :accountId")
+    protected abstract suspend fun navigation(accountId: String): ChatNavigationEntity?
+
     @Upsert
     protected abstract suspend fun upsertNavigation(navigation: ChatNavigationEntity)
 
@@ -678,6 +681,83 @@ abstract class MessageDao {
                 ),
             )
         }
+    }
+
+    @Query(
+        """
+        SELECT EXISTS(
+          SELECT 1
+          FROM messages
+          JOIN trusted_identity_aliases AS alias
+            ON alias.accountId = messages.accountId
+           AND alias.messageId = messages.localMessageId
+           AND alias.status = 'TRUSTED'
+           AND alias.kind IN ('ORIGIN_ID', 'MESSAGE_ID')
+           AND alias.value = :replyReferenceId
+          WHERE messages.accountId = :accountId
+            AND messages.localMessageId = :messageId
+            AND messages.peerJid = :peerJid
+            AND messages.senderJid = :senderJid
+            AND messages.body = :body
+            AND messages.messageKind = 'CHAT'
+            AND ((messages.threadId IS NULL AND :threadId IS NULL) OR messages.threadId = :threadId)
+            AND ((messages.parentThreadId IS NULL AND :parentThreadId IS NULL)
+              OR messages.parentThreadId = :parentThreadId)
+        )
+        """,
+    )
+    protected abstract suspend fun trustedDirectReplyTargetExists(
+        accountId: String,
+        messageId: String,
+        peerJid: String,
+        senderJid: String,
+        body: String,
+        threadId: String?,
+        parentThreadId: String?,
+        replyReferenceId: String,
+    ): Boolean
+
+    @Transaction
+    open suspend fun saveNavigationWithDraft(
+        expectedNavigation: ChatNavigationEntity,
+        navigation: ChatNavigationEntity,
+        targetMessageId: String,
+        targetSenderJid: String,
+        targetBody: String,
+        targetThreadId: String?,
+        targetParentThreadId: String?,
+        draft: MessageDraftEntity,
+    ): Boolean {
+        require(accountExists(navigation.accountId)) { "Unknown navigation account" }
+        require(expectedNavigation.accountId == navigation.accountId) {
+            "Expected and destination navigation accounts differ"
+        }
+        require(draft.accountId == navigation.accountId) { "Draft and navigation accounts differ" }
+        require(draft.peerJid == navigation.peerJid) { "Draft and navigation peers differ" }
+        require(draft.messageKind == MessageKind.CHAT) { "Navigation draft must be direct chat" }
+        val parent = navigation.parentThreadId.orEmpty()
+        val navigationThreadKey = navigation.threadId?.let { "${parent.length}:$parent$it" }.orEmpty()
+        require(draft.threadKey == navigationThreadKey) { "Draft and navigation threads differ" }
+        val replyReferenceId = requireNotNull(draft.replyToId) {
+            "Thread reply draft requires a reply reference"
+        }
+        if (navigation(expectedNavigation.accountId) != expectedNavigation) return false
+        if (peer(expectedNavigation.accountId, expectedNavigation.peerJid)?.room == true) return false
+        if (!trustedDirectReplyTargetExists(
+                accountId = expectedNavigation.accountId,
+                messageId = targetMessageId,
+                peerJid = expectedNavigation.peerJid,
+                senderJid = targetSenderJid,
+                body = targetBody,
+                threadId = targetThreadId,
+                parentThreadId = targetParentThreadId,
+                replyReferenceId = replyReferenceId,
+            )
+        ) return false
+        insertPeer(PeerEntity(navigation.accountId, navigation.peerJid))
+        upsertDraft(draft)
+        upsertNavigation(navigation)
+        return true
     }
 
     fun observeDirectDraft(accountId: String, peerJid: String): Flow<MessageDraftEntity?> =

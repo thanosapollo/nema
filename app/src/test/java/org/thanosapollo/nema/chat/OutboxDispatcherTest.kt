@@ -49,6 +49,10 @@ import org.thanosapollo.nema.session.SessionIdentity
 import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.thread.ThreadId
 import org.thanosapollo.nema.thread.ThreadRef
+import org.thanosapollo.nema.thread.draftKey
+import org.thanosapollo.nema.xmpp.reply.replyReference
+import org.thanosapollo.nema.xmpp.smack.toSmackMessage
+import org.thanosapollo.nema.xmpp.smack.toThreadRef
 import org.thanosapollo.nema.xmpp.transport.AccountId
 import org.thanosapollo.nema.xmpp.transport.ConnectionGeneration
 import org.thanosapollo.nema.xmpp.transport.OutgoingMessageEnvelope
@@ -125,6 +129,53 @@ class OutboxDispatcherTest {
         assertEquals(1, pendingReads)
         assertEquals(listOf(intent.operationId), sent.map(OutgoingMessageEnvelope::operationId))
         assertOutbox(intent.operationId, OutboxStatus.UNCERTAIN, attempt = 1)
+    }
+
+    @Test
+    fun threadReplyDraftDispatchesOneStanzaWithBothXepMetadataAndConsumesDraft() = runBlocking {
+        val thread = ThreadRef(ThreadId.require("reply-thread"), ThreadId.require("parent-thread"))
+        database.messageDao().saveDraft(
+            ACCOUNT,
+            PEER,
+            thread.draftKey(),
+            "thread answer",
+            "target-wire-id",
+            "$PEER/device",
+            "target body",
+            "device",
+        )
+        requireNotNull(
+            store.composeDirectDraft(
+                accountId = ACCOUNT,
+                operationId = "operation-thread-reply",
+                localMessageId = "local-thread-reply",
+                originId = "origin-thread-reply",
+                peerJid = PEER,
+                senderJid = SELF,
+                body = "thread answer",
+                thread = thread,
+                replyToId = "target-wire-id",
+                replyToJid = "$PEER/device",
+                replyFallbackBody = "target body",
+                replyFallbackSender = "device",
+            ),
+        )
+        var sent: OutgoingMessageEnvelope? = null
+        val dispatcher = OutboxDispatcher(store) { envelope, entered ->
+            entered()
+            sent = envelope
+        }
+
+        dispatcher.dispatch(this, 1)
+
+        val envelope = requireNotNull(sent)
+        val stanza = envelope.toSmackMessage()
+        assertEquals(thread, envelope.thread)
+        assertEquals(thread, stanza.toThreadRef())
+        assertEquals("target-wire-id", requireNotNull(envelope.reply).id)
+        assertEquals("target-wire-id", requireNotNull(stanza.replyReference()).id)
+        assertTrue(stanza.body.endsWith("thread answer"))
+        assertEquals(null, database.messageDao().draft(ACCOUNT, PEER, thread.draftKey()))
     }
 
     @Test

@@ -140,7 +140,7 @@ fun DirectChatContent(
     onStartNewThread: suspend () -> Boolean = { false },
     onContinueThread: suspend (ThreadRef) -> Boolean = { false },
     onStartChildThread: suspend () -> Boolean = { false },
-    onStartChildThreadOf: suspend (ThreadRef) -> Boolean = { false },
+    onStartThreadFrom: suspend (TimelineMessage) -> Boolean = { false },
     onCloseThread: () -> Unit = {},
     blockingSession: SessionIdentity? = null,
     onSavePeerNickname: suspend (DirectConversationKey, String) -> Boolean = { _, _ -> false },
@@ -463,6 +463,7 @@ fun DirectChatContent(
                     key(conversationKey) {
                         MessageTimeline(
                             messages = state.messages,
+                            conversationGroupChat = state.selectedPeerGroupChat,
                             latestFocusRequest = latestFocusRequest,
                             onContinueThread = { thread -> scope.launch { onContinueThread(thread) } },
                             onReply = { message ->
@@ -498,8 +499,7 @@ fun DirectChatContent(
                             },
                             onReplyAsThread = { message ->
                                 scope.launch {
-                                    val opened = message.thread?.let { onStartChildThreadOf(it) }
-                                        ?: onStartNewThread()
+                                    val opened = onStartThreadFrom(message)
                                     if (opened) focusComposerWhenReady = true
                                 }
                             },
@@ -1247,6 +1247,7 @@ private fun composerStateSaver(
 @Composable
 fun MessageTimeline(
     messages: List<TimelineMessage>,
+    conversationGroupChat: Boolean = false,
     latestFocusRequest: Long = 0L,
     onContinueThread: (ThreadRef) -> Unit = {},
     onReply: (TimelineMessage) -> Unit = {},
@@ -1374,6 +1375,15 @@ fun MessageTimeline(
                                         onReply(message)
                                     },
                                 )
+                                if (!conversationGroupChat && !message.groupChat) {
+                                    DropdownMenuItem(
+                                        text = { Text("Reply as a thread") },
+                                        onClick = {
+                                            messageActionsOpen = false
+                                            onReplyAsThread(message)
+                                        },
+                                    )
+                                }
                             }
                             DropdownMenuItem(
                                 text = { Text("Quote") },
@@ -1382,13 +1392,7 @@ fun MessageTimeline(
                                     onQuote(message)
                                 },
                             )
-                            DropdownMenuItem(
-                                text = { Text("Reply as a thread") },
-                                onClick = {
-                                    messageActionsOpen = false
-                                    onReplyAsThread(message)
-                                },
-                            )
+
                             message.thread?.let { thread ->
                                 DropdownMenuItem(
                                     text = { Text("Open thread") },

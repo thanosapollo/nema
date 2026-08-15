@@ -498,6 +498,274 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
+    fun replyAsThreadAtomicallyPersistsRootReferenceAndRouteAcrossRecreation() = runBlocking {
+        val repository = ChatRepository(database)
+        val store = MessageStore(database)
+        store.ingest(
+            incoming(ACCOUNT, "thread-target", "target body").copy(
+                senderJid = "$PEER/device",
+                aliases = listOf(
+                    TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "target-wire-id"),
+                ),
+            ),
+        )
+        repository.saveDraft(ACCOUNT, PEER, "main draft")
+        val first = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = repository,
+            scope = scope,
+            enqueue = { _, _ -> true },
+            threadingPolicy = ThreadingPolicy { ThreadId.require("thread-reply") },
+        )
+        assertTrue(first.selectPeer(PEER))
+        val target = first.state.first { it.messages.singleOrNull()?.replyReferenceId != null }.messages.single()
+
+        assertTrue(first.startThreadFrom(target))
+
+        val opened = first.state.first { it.selectedThread?.id?.value == "thread-reply" }
+        val expectedReply = DraftReply("target-wire-id", "$PEER/device", "target body", "device")
+        assertEquals(expectedReply, opened.draftReply)
+        assertEquals("", opened.draft)
+        assertEquals("main draft", repository.observeDraft(ACCOUNT, PEER).first())
+        first.close()
+
+        var sent: DraftSnapshot? = null
+        val restored = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = repository,
+            scope = scope,
+            enqueue = { _, snapshot -> sent = snapshot; true },
+            restoreRouteOnStart = true,
+        )
+        val restoredState = restored.state.first { it.selectedThread?.id?.value == "thread-reply" }
+        assertEquals(expectedReply, restoredState.draftReply)
+        assertEquals("", restoredState.draft)
+        val replyKey = DirectConversationKey(ACCOUNT, PEER, requireNotNull(restoredState.selectedThread))
+        assertTrue(
+            restored.updateDraft(
+                DraftSnapshot(replyKey, "thread answer", 1, reply = restoredState.draftReply),
+            ).await(),
+        )
+        assertTrue(
+            restored.sendDraft(
+                DraftSnapshot(replyKey, "thread answer", 2, reply = restoredState.draftReply),
+            ).await(),
+        )
+        assertEquals("thread-reply", sent?.key?.thread?.id?.value)
+        assertEquals(expectedReply, sent?.reply)
+        restored.close()
+    }
+
+    @Test
+    fun replyAsThreadUsesMessageLineageAndRejectsUntrustedOrStaleTargets() = runBlocking {
+        val repository = ChatRepository(database)
+        val store = MessageStore(database)
+        store.ingest(
+            incoming(
+                ACCOUNT,
+                "threaded-target",
+                "threaded body",
+                threadId = "parent-thread",
+            ).copy(
+                aliases = listOf(
+                    TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "threaded-wire-id"),
+                ),
+            ),
+        )
+        store.ingest(incoming(ACCOUNT, "untrusted-target", "ordinary body"))
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = repository,
+            scope = scope,
+            enqueue = { _, _ -> true },
+            threadingPolicy = ThreadingPolicy { ThreadId.require("child-thread") },
+        )
+        assertTrue(presenter.selectPeer(PEER))
+        val selected = presenter.state.first { it.messages.size == 2 }
+        val threaded = selected.messages.single { it.id == "threaded-target" }
+        val untrusted = selected.messages.single { it.id == "untrusted-target" }
+
+        assertTrue(!presenter.startThreadFrom(untrusted))
+        assertEquals(null, presenter.state.value.selectedThread)
+        assertTrue(presenter.selectPeer(OTHER_PEER))
+        presenter.state.first { it.selectedPeer == OTHER_PEER }
+        assertTrue(!presenter.startThreadFrom(threaded))
+        assertEquals(OTHER_PEER, presenter.state.value.selectedPeer)
+        assertTrue(presenter.selectPeer(PEER))
+        val currentThreaded = presenter.state.first { it.messages.size == 2 }
+            .messages.single { it.id == "threaded-target" }
+
+        assertTrue(presenter.startThreadFrom(currentThreaded))
+
+        val opened = presenter.state.first { it.selectedThread?.id?.value == "child-thread" }
+        assertEquals("parent-thread", opened.selectedThread?.parentId?.value)
+        assertEquals("threaded-wire-id", opened.draftReply?.id)
+        presenter.close()
+    }
+
+    @Test
+    fun replyAsThreadTransactionRejectsStaleRouteAndPreservesEveryDraft() = runBlocking {
+        val repository = ChatRepository(database)
+        MessageStore(database).ingest(
+            incoming(ACCOUNT, "race-target", "target body").copy(
+                senderJid = "$PEER/device",
+                aliases = listOf(
+                    TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "race-wire-id"),
+                ),
+            ),
+        )
+        val source = ChatRoute(PEER)
+        val destinationThread = ThreadRef(ThreadId.require("race-thread"))
+        val destination = source.copy(thread = destinationThread)
+        val target = repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER)).first().single()
+        val reply = DraftReply("race-wire-id", "$PEER/device", "target body", "device")
+        repository.saveRoute(ACCOUNT, source)
+        repository.saveDraft(DirectConversationKey(ACCOUNT, PEER), "source draft")
+        repository.saveDraft(DirectConversationKey(ACCOUNT, PEER, destinationThread), "destination draft")
+        repository.saveDraft(DirectConversationKey(OTHER_ACCOUNT, PEER), "unrelated draft")
+
+        repository.saveRoute(ACCOUNT, ChatRoute(OTHER_PEER))
+        assertTrue(!repository.openThreadReply(ACCOUNT, source, destination, target, reply))
+
+        assertEquals(ChatRoute(OTHER_PEER), repository.observeRoute(ACCOUNT).first())
+        assertEquals("source draft", repository.observeDraft(ACCOUNT, PEER).first())
+        assertEquals(
+            "destination draft",
+            repository.observeDraft(DirectConversationKey(ACCOUNT, PEER, destinationThread)).first(),
+        )
+        assertEquals("unrelated draft", repository.observeDraft(OTHER_ACCOUNT, PEER).first())
+    }
+
+    @Test
+    fun replyAsThreadTransactionRevalidatesTrustedTargetAndRejectsMucOrReplacement() = runBlocking {
+        val repository = ChatRepository(database)
+        val store = MessageStore(database)
+        store.ingest(
+            incoming(ACCOUNT, "trusted-target", "target body").copy(
+                senderJid = "$PEER/device",
+                aliases = listOf(
+                    TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "trusted-wire-id"),
+                ),
+            ),
+        )
+        val source = ChatRoute(PEER)
+        val destination = source.copy(thread = ThreadRef(ThreadId.require("trusted-thread")))
+        val target = repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER)).first().single()
+        val reply = DraftReply("trusted-wire-id", "$PEER/device", "target body", "device")
+        repository.saveRoute(ACCOUNT, source)
+
+        assertTrue(
+            !repository.openThreadReply(
+                ACCOUNT,
+                source,
+                destination,
+                target.copy(body = "same ID, replaced content"),
+                reply,
+            ),
+        )
+        assertEquals(source, repository.observeRoute(ACCOUNT).first())
+        assertEquals("", repository.observeDraft(DirectConversationKey(ACCOUNT, PEER, destination.thread)).first())
+
+        database.messageDao().quarantineAlias(
+            ACCOUNT,
+            IdentityAliasKind.ORIGIN_ID,
+            PEER,
+            "trusted-wire-id",
+        )
+        assertTrue(!repository.openThreadReply(ACCOUNT, source, destination, target, reply))
+        assertEquals(source, repository.observeRoute(ACCOUNT).first())
+
+        val room = "room@conference.example.org"
+        store.ingest(
+            IncomingMessage(
+                accountId = ACCOUNT,
+                localMessageId = "room-target",
+                peerJid = room,
+                senderJid = "$room/alice",
+                direction = MessageDirection.INBOUND,
+                messageKind = MessageKind.GROUPCHAT,
+                threadId = null,
+                parentThreadId = null,
+                body = "room body",
+                archiveOrdinal = null,
+                aliases = listOf(
+                    TrustedIdentityAlias(IdentityAliasKind.STANZA_ID, room, "room-wire-id"),
+                ),
+            ),
+        )
+        val roomSource = ChatRoute(room)
+        val roomDestination = roomSource.copy(thread = ThreadRef(ThreadId.require("room-thread")))
+        val roomTarget = repository.observeTimeline(DirectConversationKey(ACCOUNT, room)).first().single()
+        repository.saveRoute(ACCOUNT, roomSource)
+        assertTrue(
+            !repository.openThreadReply(
+                ACCOUNT,
+                roomSource,
+                roomDestination,
+                roomTarget,
+                DraftReply("room-wire-id", "$room/alice", "room body", "alice"),
+            ),
+        )
+        assertEquals(roomSource, repository.observeRoute(ACCOUNT).first())
+    }
+
+    @Test
+    fun replyAsThreadRejectsChatTargetInsidePersistedRoomWithoutMutation() = runBlocking {
+        val room = "private-room@conference.example.org"
+        val repository = ChatRepository(database)
+        MessageStore(database).ingest(
+            incoming(ACCOUNT, "private-room-target", "private room body").copy(
+                peerJid = room,
+                senderJid = "$room/alice",
+                aliases = listOf(
+                    TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, room, "private-room-wire-id"),
+                ),
+            ),
+        )
+        repository.markRoom(ACCOUNT, room)
+        val source = ChatRoute(room)
+        val thread = ThreadRef(ThreadId.require("private-room-thread"))
+        val destination = source.copy(thread = thread)
+        val target = repository.observeTimeline(DirectConversationKey(ACCOUNT, room)).first().single()
+        val reply = DraftReply(
+            "private-room-wire-id",
+            "$room/alice",
+            "private room body",
+            "alice",
+        )
+        repository.saveRoute(ACCOUNT, source)
+        repository.saveDraft(DirectConversationKey(ACCOUNT, room), "source room draft")
+        repository.saveDraft(DirectConversationKey(ACCOUNT, room, thread), "destination room draft")
+
+        assertTrue(!repository.openThreadReply(ACCOUNT, source, destination, target, reply))
+        assertEquals(source, repository.observeRoute(ACCOUNT).first())
+        assertEquals("source room draft", repository.observeDraft(ACCOUNT, room).first())
+        assertEquals(
+            "destination room draft",
+            repository.observeDraft(DirectConversationKey(ACCOUNT, room, thread)).first(),
+        )
+
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = repository,
+            scope = scope,
+            enqueue = { _, _ -> true },
+        )
+        assertTrue(presenter.selectPeer(room))
+        val selected = presenter.state.first {
+            it.selectedPeerGroupChat && it.messages.singleOrNull()?.replyReferenceId != null
+        }
+        assertTrue(!presenter.startThreadFrom(selected.messages.single()))
+        assertEquals(source, repository.observeRoute(ACCOUNT).first())
+        assertEquals("source room draft", repository.observeDraft(ACCOUNT, room).first())
+        assertEquals(
+            "destination room draft",
+            repository.observeDraft(DirectConversationKey(ACCOUNT, room, thread)).first(),
+        )
+        presenter.close()
+    }
+
+    @Test
     fun semanticReplyDraftSurvivesPresenterRecreationAndSend() = runBlocking {
         val repository = ChatRepository(database)
         val reply = DraftReply("target-id", "$PEER/device", "target body", "Peer")
