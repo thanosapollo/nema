@@ -1339,6 +1339,7 @@ internal suspend fun <T> InputStream.useCancellable(block: (InputStream) -> T): 
     }
 
 private const val MAX_BACKGROUND_EDGE = 2048
+private const val NEAR_LATEST_ITEM_THRESHOLD = 1
 
 private const val COMPOSER_STATE_VERSION = 4
 
@@ -1671,9 +1672,9 @@ fun MessageTimeline(
     val scope = rememberCoroutineScope()
     val currentOnViewportChanged by rememberUpdatedState(onViewportChanged)
     val currentOnMessageDisplayed by rememberUpdatedState(onMessageDisplayed)
-    val atLatest by remember {
+    val nearLatest by remember {
         derivedStateOf {
-            listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
+            listState.firstVisibleItemIndex <= NEAR_LATEST_ITEM_THRESHOLD
         }
     }
     var previousLatestId by remember { mutableStateOf<String?>(null) }
@@ -1734,8 +1735,8 @@ fun MessageTimeline(
             }
         }
     }
-    LaunchedEffect(atLatest) {
-        if (atLatest) newIncoming = 0
+    LaunchedEffect(nearLatest) {
+        if (nearLatest) newIncoming = 0
     }
     LaunchedEffect(latestFocusRequest) {
         if (latestFocusRequest > 0L && messages.isNotEmpty()) {
@@ -1747,7 +1748,9 @@ fun MessageTimeline(
         val previous = previousLatestId
         if (previous != null) {
             val appended = appendedMessages(previous, messages)
-            if (atLatest) {
+            val followedBeforeAppend =
+                listState.firstVisibleItemIndex - appended.size <= NEAR_LATEST_ITEM_THRESHOLD
+            if (followedBeforeAppend) {
                 if (appended.isNotEmpty()) listState.scrollToItem(0)
                 newIncoming = 0
             } else {
@@ -1896,7 +1899,7 @@ fun MessageTimeline(
                 }
             }
         }
-        if (!atLatest) {
+        if (!nearLatest) {
             SmallFloatingActionButton(
                 onClick = {
                     newIncoming = 0

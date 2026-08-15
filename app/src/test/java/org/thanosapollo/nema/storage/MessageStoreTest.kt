@@ -1520,6 +1520,96 @@ class MessageStoreTest {
     }
 
     @Test
+    fun archiveEchoNormalizesReplyFallbackWithoutPoisoningCatchUp() = runBlocking {
+        val store = MessageStore(database)
+        val intent = OutboundIntent(
+            accountId = ACCOUNT,
+            operationId = "reply-operation",
+            localMessageId = "reply-local",
+            originId = "reply-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            messageKind = MessageKind.CHAT,
+            threadId = null,
+            parentThreadId = null,
+            body = "answer",
+            replyToId = "reply-target",
+            replyToJid = SELF,
+            replyFallbackBody = "quoted body\n",
+        )
+        store.compose(intent)
+        val stored = store.messages(ACCOUNT).single()
+
+        val result = store.applyArchivePage(
+            archivePage(
+                key = archiveKey(ACCOUNT),
+                direction = ArchiveDirection.BOOTSTRAP,
+                complete = true,
+                hasEarlier = false,
+                messages = listOf(
+                    archived(
+                        resultId = "reply-result",
+                        localId = "reply-archive-copy",
+                        body = intent.body,
+                        alias = TrustedIdentityAlias(
+                            IdentityAliasKind.ORIGIN_ID,
+                            MessageStore.OUTBOUND_ORIGIN_AUTHORITY,
+                            intent.originId,
+                        ),
+                        direction = MessageDirection.OUTBOUND,
+                        sender = SELF,
+                        threadId = stored.threadId,
+                        parentThreadId = stored.parentThreadId,
+                        replyToId = intent.replyToId,
+                        replyToJid = intent.replyToJid,
+                        replyFallbackBody = "quoted body",
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(ArchivePageStatus.APPLIED, result.status)
+        assertEquals("reply-result", result.cursor.newestId)
+        assertEquals(listOf(intent.localMessageId), store.messages(ACCOUNT).map(MessageEntity::localMessageId))
+        assertEquals("quoted body\n", store.messages(ACCOUNT).single().replyFallbackBody)
+        assertEquals(OutboxStatus.CONFIRMED, store.outbox(ACCOUNT, intent.operationId)?.status)
+        assertTrue(store.conflicts(ACCOUNT).isEmpty())
+    }
+
+    @Test
+    fun conflictingArchiveIdentityDoesNotStarveLaterMessages() = runBlocking {
+        val store = MessageStore(database)
+        val reused = stanzaAlias("reused")
+        store.ingest(incoming(localId = "existing", body = "existing", aliases = listOf(reused)))
+
+        val result = store.applyArchivePage(
+            archivePage(
+                key = archiveKey(ACCOUNT),
+                direction = ArchiveDirection.BOOTSTRAP,
+                complete = true,
+                hasEarlier = false,
+                messages = listOf(
+                    archived("r1", "conflicting", "different", reused),
+                    archived("r2", "later", "later body", stanzaAlias("later")),
+                ),
+            ),
+        )
+
+        assertEquals(ArchivePageStatus.APPLIED, result.status)
+        assertEquals(2, result.ingested)
+        assertEquals("r2", result.cursor.newestId)
+        assertEquals(1L, result.cursor.newestOrdinal)
+        assertEquals(
+            setOf("existing", "conflicting", "later"),
+            store.messages(ACCOUNT).map(MessageEntity::localMessageId).toSet(),
+        )
+        assertEquals(0L, store.archivePositions(ACCOUNT, "conflicting").single().archiveOrdinal)
+        assertEquals(1L, store.archivePositions(ACCOUNT, "later").single().archiveOrdinal)
+        assertEquals(IdentityAliasStatus.QUARANTINED, store.aliases(ACCOUNT).single { it.value == "reused" }.status)
+        assertEquals(1, store.conflicts(ACCOUNT).size)
+    }
+
+    @Test
     fun archiveBoundaryOrdinalsPreserveUnsupportedResultGaps() = runBlocking {
         var store = MessageStore(database)
         val afterKey = archiveKey(ACCOUNT)
@@ -3640,6 +3730,9 @@ class MessageStoreTest {
         accountId: String = ACCOUNT,
         threadId: String? = null,
         parentThreadId: String? = null,
+        replyToId: String? = null,
+        replyToJid: String? = null,
+        replyFallbackBody: String? = null,
     ) = ArchivedIncomingMessage(
         resultId = resultId,
         message = incoming(
@@ -3653,6 +3746,9 @@ class MessageStoreTest {
             aliases = listOfNotNull(alias),
             threadId = threadId,
             parentThreadId = parentThreadId,
+            replyToId = replyToId,
+            replyToJid = replyToJid,
+            replyFallbackBody = replyFallbackBody,
         ),
     )
 
@@ -3670,6 +3766,9 @@ class MessageStoreTest {
         aliases: List<TrustedIdentityAlias> = emptyList(),
         threadId: String? = null,
         parentThreadId: String? = null,
+        replyToId: String? = null,
+        replyToJid: String? = null,
+        replyFallbackBody: String? = null,
         replaceId: String? = null,
     ) = IncomingMessage(
         accountId = accountId,
@@ -3685,6 +3784,9 @@ class MessageStoreTest {
         archiveAuthority = archiveAuthority,
         archiveScope = archiveScope,
         aliases = aliases,
+        replyToId = replyToId,
+        replyToJid = replyToJid,
+        replyFallbackBody = replyFallbackBody,
         replaceId = replaceId,
     )
 

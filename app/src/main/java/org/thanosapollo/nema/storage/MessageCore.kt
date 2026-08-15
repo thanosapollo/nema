@@ -2089,9 +2089,6 @@ class MessageStore private constructor(
                 preserveStoredThreadLineage = true,
                 allowDirectSessionTransition = false,
             )
-            if (result.identityConflict) {
-                throw ArchivePageRejectedException("Archive page contains conflicting identity evidence")
-            }
             attachArchivePosition(
                 result.messageId,
                 page.key.accountId,
@@ -2671,7 +2668,6 @@ private fun MessageEntity.isCompatibleWith(incoming: IncomingMessage): Boolean =
         attachmentSize == incoming.attachmentSize &&
         replyToId == incoming.replyToId &&
         replyToJid == incoming.replyToJid &&
-        replyFallbackBody == incoming.replyFallbackBody &&
         replaceId == incoming.replaceId
 
 private fun MessageEntity.canCorrect(target: MessageEntity): Boolean =

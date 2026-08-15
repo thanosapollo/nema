@@ -922,11 +922,8 @@ private fun List<TimelineMessage>.resolveThread(
                 (candidate.thread?.id == thread.parentId ||
                     (candidate.thread == null && thread.parentId != null))
         }
-    return if (externalRoot != null) {
-        ResolvedThread(thread, externalRoot, members)
-    } else {
-        ResolvedThread(thread, members.first(), members.drop(1))
-    }
+        ?: return null
+    return ResolvedThread(thread, externalRoot, members)
 }
 
 private fun List<TimelineMessage>.recentThreads(

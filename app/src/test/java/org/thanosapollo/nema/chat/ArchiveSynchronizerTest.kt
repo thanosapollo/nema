@@ -214,11 +214,11 @@ class ArchiveSynchronizerTest {
     }
 
     @Test
-    fun replayedArchiveIdentityConflictRemainsRetryableInsteadOfStorageFatal() = runBlocking {
+    fun replayedArchiveIdentityConflictIsQuarantinedWithoutBlockingCatchUp() = runBlocking {
         store.ingest(
             message("live-id", "first").toIncomingMessage("live-id"),
         )
-        val rejected = ArchiveSynchronizer(
+        val synchronizer = ArchiveSynchronizer(
             store = store,
             discover = { CAPABILITIES },
             query = { request ->
@@ -231,21 +231,23 @@ class ArchiveSynchronizerTest {
             },
         )
 
-        try {
-            rejected.synchronize(IDENTITY, BARE_JID) { true }
-        } catch (failure: ArchiveStorageFailure) {
-            fail("archive identity conflict was misclassified as storage failure: ${failure.cause}")
-        }
+        synchronizer.synchronize(IDENTITY, BARE_JID) { true }
 
-        assertTrue(rejected.state.value is ArchiveSyncState.RetryableError)
+        assertTrue(synchronizer.state.value is ArchiveSyncState.Ready)
+        assertEquals(setOf("first", "different"), store.messages(ACCOUNT).map { it.body }.toSet())
+        assertEquals(1, store.conflicts(ACCOUNT).size)
+        assertEquals(
+            "mam-live-id",
+            store.archiveCursor(ArchiveCursorKey(ACCOUNT, BARE_JID, ACCOUNT_ARCHIVE_SCOPE))?.newestId,
+        )
     }
 
     @Test
-    fun backfillIdentityConflictRemainsRetryableInsteadOfStorageFatal() = runBlocking {
+    fun backfillIdentityConflictIsQuarantinedWithoutBlockingHistory() = runBlocking {
         store.ingest(
             message("r1", "first").toIncomingMessage("live-id"),
         )
-        val rejected = ArchiveSynchronizer(
+        val synchronizer = ArchiveSynchronizer(
             store = store,
             discover = { CAPABILITIES },
             query = { request ->
@@ -266,17 +268,12 @@ class ArchiveSynchronizerTest {
                 }
             },
         )
-        rejected.synchronize(IDENTITY, BARE_JID) { true }
+        synchronizer.synchronize(IDENTITY, BARE_JID) { true }
 
-        val backfilled = try {
-            rejected.backfillOnePage(IDENTITY, BARE_JID) { true }
-        } catch (failure: ArchiveStorageFailure) {
-            fail("backfill identity conflict was misclassified as storage failure: ${failure.cause}")
-            true
-        }
-
-        assertFalse(backfilled)
-        assertTrue(rejected.state.value is ArchiveSyncState.RetryableError)
+        assertTrue(synchronizer.state.value is ArchiveSyncState.Ready)
+        assertFalse(synchronizer.backfillOnePage(IDENTITY, BARE_JID) { true })
+        assertEquals(setOf("first", "latest", "different"), store.messages(ACCOUNT).map { it.body }.toSet())
+        assertEquals(1, store.conflicts(ACCOUNT).size)
     }
 
     @Test

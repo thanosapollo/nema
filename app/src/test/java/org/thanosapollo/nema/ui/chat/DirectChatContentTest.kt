@@ -1441,6 +1441,72 @@ class DirectChatContentTest {
     }
 
     @Test
+    fun nearLatestTimelineFollowsIncomingAppend() {
+        lateinit var show: (List<TimelineMessage>) -> Unit
+        composeRule.setContent {
+            MaterialTheme {
+                var messages by remember {
+                    mutableStateOf((1..20).map { number -> message("message-$number", outgoing = false) })
+                }
+                show = { messages = it }
+                MessageTimeline(messages = messages)
+            }
+        }
+        composeRule.onNodeWithTag("message-timeline").performScrollToIndex(1)
+        composeRule.runOnIdle {
+            show((1..21).map { number -> message("message-$number", outgoing = false) })
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("message-21").assertIsDisplayed()
+        composeRule.onNodeWithText("+1").assertDoesNotExist()
+    }
+
+    @Test
+    fun slightlyDetachedTimelineKeepsIncomingCount() {
+        lateinit var show: (List<TimelineMessage>) -> Unit
+        composeRule.setContent {
+            MaterialTheme {
+                var messages by remember {
+                    mutableStateOf((1..20).map { number -> message("message-$number", outgoing = false) })
+                }
+                show = { messages = it }
+                MessageTimeline(messages = messages)
+            }
+        }
+        composeRule.onNodeWithTag("message-timeline").performScrollToIndex(2)
+        composeRule.runOnIdle {
+            show((1..21).map { number -> message("message-$number", outgoing = false) })
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("message-21").assertDoesNotExist()
+        composeRule.onNodeWithText("+1").assertIsDisplayed()
+    }
+
+    @Test
+    fun catchUpBatchDoesNotYankHistoryReader() {
+        lateinit var show: (List<TimelineMessage>) -> Unit
+        composeRule.setContent {
+            MaterialTheme {
+                var messages by remember {
+                    mutableStateOf((1..20).map { number -> message("message-$number", outgoing = false) })
+                }
+                show = { messages = it }
+                MessageTimeline(messages = messages)
+            }
+        }
+        composeRule.onNodeWithTag("message-timeline").performScrollToIndex(5)
+        composeRule.runOnIdle {
+            show((1..30).map { number -> message("message-$number", outgoing = false) })
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("message-30").assertDoesNotExist()
+        composeRule.onNodeWithText("+10").assertIsDisplayed()
+    }
+
+    @Test
     fun scrolledUpTimelineCountsOnlyFreshIncomingAndJumpsToLatest() {
         lateinit var show: (List<TimelineMessage>) -> Unit
         composeRule.setContent {

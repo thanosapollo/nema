@@ -414,7 +414,7 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
-    fun childWithoutReplyMetadataKeepsOwnRootAndCollapsesOnlyReplies() = runBlocking {
+    fun childWithoutReplyMetadataStaysVisibleInMainTimeline() = runBlocking {
         val store = MessageStore(database)
         store.ingest(incoming(ACCOUNT, "parent", "main session", threadId = "session"))
         store.ingest(
@@ -429,7 +429,8 @@ class ChatRepositoryPresenterTest {
         val repository = ChatRepository(database)
         val child = ThreadRef(ThreadId.require("child"), ThreadId.require("session"))
         val rootOnlyOverview = repository.observeTimeline(ACCOUNT, PEER).first()
-        assertEquals(0, rootOnlyOverview.last().threadSummaries.single().replyCount)
+        assertEquals(listOf("parent", "child-root"), rootOnlyOverview.map(TimelineMessage::id))
+        assertTrue(rootOnlyOverview.all { it.threadSummaries.isEmpty() })
         store.ingest(
             incoming(
                 ACCOUNT,
@@ -443,9 +444,8 @@ class ChatRepositoryPresenterTest {
         val overview = repository.observeTimeline(ACCOUNT, PEER).first()
         val dedicated = repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER, child)).first()
 
-        assertEquals(listOf("parent", "child-root"), overview.map(TimelineMessage::id))
-        assertEquals(1, overview.last().threadSummaries.single().replyCount)
-        assertEquals(child, overview.last().threadSummaries.single().thread)
+        assertEquals(listOf("parent", "child-root", "child-reply"), overview.map(TimelineMessage::id))
+        assertTrue(overview.all { it.threadSummaries.isEmpty() })
         assertEquals(listOf("child-root", "child-reply"), dedicated.map(TimelineMessage::id))
     }
 
