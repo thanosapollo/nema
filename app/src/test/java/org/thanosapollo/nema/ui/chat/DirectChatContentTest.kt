@@ -12,6 +12,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.SaverScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
@@ -65,6 +66,7 @@ import org.thanosapollo.nema.chat.DirectChatState
 import org.thanosapollo.nema.chat.DirectConversationKey
 import org.thanosapollo.nema.chat.DeliveryPresentation
 import org.thanosapollo.nema.chat.DraftCorrection
+import org.thanosapollo.nema.chat.DraftReply
 import org.thanosapollo.nema.chat.DraftSnapshot
 import org.thanosapollo.nema.chat.MessageReplyPresentation
 import org.thanosapollo.nema.chat.ThreadSummary
@@ -772,6 +774,159 @@ class DirectChatContentTest {
         assertEquals("corrected text", sent?.body)
         composeRule.onNodeWithTag("message-composer").assertTextEquals("unrelated draft")
         composeRule.onNodeWithText("Editing message").assertDoesNotExist()
+    }
+
+    @Test
+    fun composerSaverPreservesExactCorrectionAndCompleteBackup() {
+        val key = DirectConversationKey(ACCOUNT_A, PEER_A)
+        val correction = DraftCorrection("local-target", "wire-target", "original body")
+        val reply = DraftReply("reply-id", PEER_A, "reply body", "Peer A")
+        val backup = ComposerBackup(
+            body = "ordinary draft",
+            attachmentUrl = "https://example.org/attachment",
+            attachmentName = "attachment.txt",
+            attachmentMime = "text/plain",
+            attachmentSize = 42,
+            reply = reply,
+        )
+        val original = ComposerState(
+            key = key,
+            body = "corrected body",
+            revision = 7,
+            failureRevision = null,
+            correction = correction,
+            correctionBackup = backup,
+        )
+        val saver = composerStateSaver(key)
+        val scope = object : SaverScope {
+            override fun canBeSaved(value: Any): Boolean = true
+        }
+        val saved = with(saver) { with(scope) { save(mutableStateOf(original)) } }
+        val restored = saver.restore(checkNotNull(saved))?.value
+
+        assertEquals(original, restored)
+        assertEquals(correction, restored?.toDraftSnapshot(groupChat = false)?.correction)
+        assertEquals(backup, restored?.correctionBackup)
+    }
+
+    @Test
+    fun editModeSurvivesStateRestorationAndCancelRestoresDraft() {
+        val restoration = StateRestorationTester(composeRule)
+        val sent = mutableListOf<DraftSnapshot>()
+        val savedDrafts = mutableListOf<DraftSnapshot>()
+        val backupReply = DraftReply("backup-reply-id", PEER_A, "backup reply body", "Peer A")
+        val editable = message("original text", outgoing = true).copy(
+            delivery = DeliveryPresentation.SENT,
+            correctionReferenceId = "original-wire-id",
+        )
+        restoration.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A).copy(
+                        messages = listOf(editable),
+                        draft = "unrelated draft",
+                        draftReply = backupReply,
+                    ),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = {
+                        savedDrafts += it
+                        CompletableDeferred(true)
+                    },
+                    onSend = {
+                        sent += it
+                        CompletableDeferred(false)
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("original text").performTouchInput { longClick() }
+        composeRule.onNodeWithText("Edit").performClick()
+        composeRule.onNodeWithTag("message-composer").performTextReplacement("corrected text")
+        restoration.emulateSavedInstanceStateRestore()
+
+        composeRule.onNodeWithText("Editing message").assertIsDisplayed()
+        composeRule.onNodeWithTag("message-composer").assertTextEquals("corrected text")
+        composeRule.onNodeWithContentDescription("Send").performClick()
+        composeRule.waitUntil { sent.isNotEmpty() }
+        assertEquals("corrected text", sent.single().body)
+        assertEquals(DraftCorrection("original text", "original-wire-id", "original text"), sent.single().correction)
+        assertNull(sent.single().attachmentUrl)
+        assertNull(sent.single().reply)
+        composeRule.onNodeWithText("Cancel").performClick()
+        composeRule.onNodeWithText("Editing message").assertDoesNotExist()
+        composeRule.onNodeWithTag("composer-reply-preview").assertIsDisplayed()
+        composeRule.onNodeWithTag("message-composer").assertTextEquals("unrelated draft")
+        assertTrue(savedDrafts.isEmpty())
+        composeRule.onNodeWithContentDescription("Send").performClick()
+        composeRule.waitUntil { sent.size == 2 }
+        val restored = sent.last()
+        assertEquals("unrelated draft", restored.body)
+        assertEquals(backupReply, restored.reply)
+        assertNull(restored.attachmentUrl)
+        assertNull(restored.attachmentName)
+        assertNull(restored.attachmentMime)
+        assertNull(restored.attachmentSize)
+        assertNull(restored.correction)
+    }
+
+    @Test
+    fun replyActionLeavesEditModeAndUsesRestoredDraft() {
+        val savedDrafts = mutableListOf<DraftSnapshot>()
+        val sent = mutableListOf<DraftSnapshot>()
+        val editable = message("original text", outgoing = true).copy(
+            delivery = DeliveryPresentation.SENT,
+            correctionReferenceId = "original-wire-id",
+        )
+        val replyTarget = message("reply target", outgoing = false).copy(
+            replyReferenceId = "reply-wire-id",
+        )
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A).copy(
+                        messages = listOf(editable, replyTarget),
+                        draft = "unrelated draft",
+                    ),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = {
+                        savedDrafts += it
+                        CompletableDeferred(true)
+                    },
+                    onSend = {
+                        sent += it
+                        CompletableDeferred(false)
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("original text").performTouchInput { longClick() }
+        composeRule.onNodeWithText("Edit").performClick()
+        composeRule.onNodeWithTag("message-composer").performTextReplacement("discarded correction")
+        composeRule.onNodeWithText("reply target").performTouchInput { longClick() }
+        composeRule.onNodeWithText("Reply").performClick()
+
+        composeRule.onNodeWithText("Editing message").assertDoesNotExist()
+        composeRule.onNodeWithTag("composer-reply-preview").assertIsDisplayed()
+        composeRule.onNodeWithTag("message-composer").assertTextEquals("unrelated draft")
+        composeRule.waitUntil { savedDrafts.size == 1 }
+        val expectedReply = DraftReply("reply-wire-id", PEER_A, "reply target", "peer-a")
+        assertEquals("unrelated draft", savedDrafts.single().body)
+        assertEquals(expectedReply, savedDrafts.single().reply)
+        assertNull(savedDrafts.single().correction)
+        assertNull(savedDrafts.single().attachmentUrl)
+        composeRule.onNodeWithContentDescription("Send").performClick()
+        composeRule.waitUntil { sent.size == 1 }
+        assertEquals("unrelated draft", sent.single().body)
+        assertEquals(expectedReply, sent.single().reply)
+        assertNull(sent.single().correction)
+        assertNull(sent.single().attachmentUrl)
+        assertEquals(1, savedDrafts.size)
     }
 
     @Test

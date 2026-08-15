@@ -1200,7 +1200,7 @@ private data class PendingSendIdentity(
     val composerRevision: Long,
 )
 
-private data class ComposerState(
+internal data class ComposerState(
     val key: DirectConversationKey,
     val body: String,
     val revision: Long,
@@ -1227,7 +1227,7 @@ private data class ComposerState(
     )
 }
 
-private data class ComposerBackup(
+internal data class ComposerBackup(
     val body: String,
     val attachmentUrl: String?,
     val attachmentName: String?,
@@ -1298,7 +1298,7 @@ private fun ComposerState.matches(snapshot: DraftSnapshot): Boolean =
         reply == snapshot.reply &&
         correction == snapshot.correction
 
-private fun composerStateSaver(
+internal fun composerStateSaver(
     expectedKey: DirectConversationKey,
 ): Saver<MutableState<ComposerState>, Any> = Saver(
     save = { holder ->
