@@ -1,0 +1,42 @@
+#+TITLE: Contributing to Nema
+
+* Changes
+
++ Base changes on =master=.
++ Keep commits focused.
++ Add or update tests for changed behavior.
++ Keep exported Room schemas in sync with database changes.
++ Do not include credentials, account data, device databases, build output,
+  or editor state.
++ Run the project checks with JDK 17:
+
+#+begin_src sh
+  ./gradlew testDebugUnitTest assembleDebug lintDebug
+#+end_src
+
+* Patches
+
+Create a patch series:
+
+#+begin_src sh
+  git format-patch --cover-letter origin/master
+#+end_src
+
+Send it to =patches@thanosapollo.org=:
+
+#+begin_src sh
+  git send-email --to=patches@thanosapollo.org 000*.patch
+#+end_src
+
+Use =[PATCH nema] Short description= as the subject. For a revised series,
+use =[PATCH v2 nema]= and summarize the changes since the previous version.
+
+* Bugs
+
+Send bug reports to =bugs@thanosapollo.org= with
+=[BUG nema] Short description= as the subject. Include the Nema version,
+Android version, reproduction steps, and relevant logs with account data
+removed.
+
+Security reports belong in the private channel described in
+[[file:SECURITY.md][SECURITY.md]].

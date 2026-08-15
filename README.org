@@ -1,0 +1,48 @@
+#+TITLE: Nema - Experimental plaintext XMPP client for Android
+
+* About
+
+Nema is an experimental [[https://xmpp.org/][XMPP]] client for Android, built with Kotlin,
+Jetpack Compose, Smack, and Room.
+
+The current work focuses on reliable plaintext messaging: direct and group
+chats, archive recovery, Carbons, replies, drafts, bookmarks, blocking,
+vCards, and HTTP file upload. OMEMO and OpenPGP are not implemented. Do not
+treat this build as an encrypted messenger.
+
+Nema is alpha software. Database migrations and messaging behavior have
+automated coverage, but releases may still contain bugs or incomplete UI.
+
++ [[https://git.thanosapollo.org/nema/about/][Source]]
++ [[https://todos.thanosapollo.org/r/nema][Issues]]
+
+* Requirements
+
++ Android 8.0 (API 26) or newer
++ JDK 17
++ Android SDK 36
+
+* Build
+
+#+begin_src sh
+  ./gradlew testDebugUnitTest assembleDebug lintDebug
+#+end_src
+
+The debug APK is written to =app/build/outputs/apk/debug/app-debug.apk=.
+
+* Clone
+
+#+begin_src sh
+  git clone https://git.thanosapollo.org/nema.git
+#+end_src
+
+* Contributing
+
+See [[file:CONTRIBUTING.org][CONTRIBUTING.org]] for patch and bug-report instructions.
+
+* License
+
+Copyright 2026 Thanos Apollo.
+
+Nema is free software under the GNU General Public License, version 3 only
+(=GPL-3.0-only=). See [[file:LICENSE][LICENSE]].
