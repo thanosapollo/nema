@@ -1944,6 +1944,56 @@ class DirectChatContentTest {
         composeRule.onNodeWithContentDescription("Back to conversation").assertIsDisplayed()
     }
 
+    @Test
+    fun inThreadAppBarShowsThreadSubtitleAndBackToConversation() {
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A).copy(
+                        selectedThread = ThreadRef(ThreadId.require("topic")),
+                    ),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Thread").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Back to conversation").assertIsDisplayed()
+        composeRule.onNodeWithText(PEER_A).assertIsDisplayed()
+    }
+
+    @Test
+    fun threadedBubbleChipOpensThatThread() {
+        var opened: ThreadRef? = null
+        val thread = ThreadRef(ThreadId.require("topic"))
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(
+                        TimelineMessage(
+                            id = "incoming-thread",
+                            senderJid = PEER_A,
+                            body = "incoming",
+                            outgoing = false,
+                            delivery = null,
+                            retryUncertainKey = null,
+                            thread = thread,
+                        ),
+                    ),
+                    onContinueThread = { opened = it },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("thread-chip").performClick()
+        composeRule.waitForIdle()
+        assertEquals(thread, opened)
+    }
+
     private fun state(accountId: String, peer: String, draft: String = "") = DirectChatState(
         accountId = accountId,
         selectedPeer = peer,

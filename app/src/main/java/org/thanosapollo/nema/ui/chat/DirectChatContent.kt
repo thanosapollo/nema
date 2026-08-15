@@ -379,6 +379,14 @@ fun DirectChatContent(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
+                                    if (state.selectedThread != null) {
+                                        Text(
+                                            "Thread",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
                                     status?.let {
                                         Text(
                                             it,
@@ -386,7 +394,7 @@ fun DirectChatContent(
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
                                         )
-                                    } ?: if (state.selectedPeerGroupChat) {
+                                    } ?: if (state.selectedThread == null && state.selectedPeerGroupChat) {
                                         Text(
                                             roomSubtitle(state.selectedRoomSubject, state.selectedRoomOccupantCount),
                                             style = MaterialTheme.typography.labelSmall,
@@ -1442,6 +1450,15 @@ fun MessageTimeline(
                                         formatMessageTime(sentAt),
                                         style = MaterialTheme.typography.labelSmall,
                                         modifier = Modifier.align(Alignment.End),
+                                    )
+                                }
+                                message.thread?.let { thread ->
+                                    Text(
+                                        "Thread",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        modifier = Modifier
+                                            .testTag("thread-chip")
+                                            .clickable { onContinueThread(thread) },
                                     )
                                 }
                             }
