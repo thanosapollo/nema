@@ -110,6 +110,7 @@ import kotlin.coroutines.resume
 import org.thanosapollo.nema.chat.DeliveryPresentation
 import org.thanosapollo.nema.chat.DirectChatState
 import org.thanosapollo.nema.chat.DirectConversationKey
+import org.thanosapollo.nema.chat.DraftCorrection
 import org.thanosapollo.nema.chat.DraftReply
 import org.thanosapollo.nema.chat.DraftSnapshot
 import org.thanosapollo.nema.chat.ThreadSummary
@@ -176,6 +177,9 @@ fun DirectChatContent(
         }
         var completedSendSnapshots by remember(state.accountId) {
             mutableStateOf(emptyMap<PendingSendIdentity, DraftSnapshot>())
+        }
+        var pendingDraftIdentities by remember(state.accountId) {
+            mutableStateOf(emptySet<PendingSendIdentity>())
         }
         var composerStates by remember(state.accountId) {
             mutableStateOf(emptyMap<DirectConversationKey, ComposerState>())
@@ -332,16 +336,21 @@ fun DirectChatContent(
                 }
                 fun updateComposer(next: ComposerState) {
                     setComposer(next)
+                    if (next.correction != null) return
                     val snapshot = next.toDraftSnapshot(state.selectedPeerGroupChat)
+                    val identity = PendingSendIdentity(snapshot.key, snapshot.composerRevision)
                     val action = onDraftChange(snapshot)
+                    pendingDraftIdentities += identity
                     scope.launch {
                         val applied = try {
                             action.await()
                         } catch (cancelled: CancellationException) {
+                            pendingDraftIdentities -= identity
                             throw cancelled
                         } catch (_: Exception) {
                             false
                         }
+                        pendingDraftIdentities -= identity
                         val current = composerStates[snapshot.key]
                         if (current?.matches(snapshot) == true) {
                             composerStates += snapshot.key to current.copy(
@@ -482,9 +491,13 @@ fun DirectChatContent(
                         windowInsets = WindowInsets(0, 0, 0, 0),
                     )
                     key(conversationKey) {
+                        val editActionsEnabled = composer.failureRevision == null &&
+                            pendingSendIdentities.none { it.key == conversationKey } &&
+                            pendingDraftIdentities.none { it.key == conversationKey }
                         MessageTimeline(
                             messages = state.messages,
                             conversationGroupChat = state.selectedPeerGroupChat,
+                            editActionsEnabled = editActionsEnabled,
                             readReceiptsEnabled = readReceiptsEnabled,
                             activityResumed = activityResumed,
                             onMessageDisplayed = onMessageDisplayed,
@@ -496,36 +509,47 @@ fun DirectChatContent(
                             onContinueThread = { thread -> scope.launch { onContinueThread(thread) } },
                             onReply = { message ->
                                 val reference = requireNotNull(message.replyReferenceId)
+                                val base = composer.cancelCorrection()
                                 updateComposer(
-                                    composer.copy(
+                                    base.copy(
                                         reply = DraftReply(
                                             id = reference,
                                             to = message.senderJid,
                                             body = message.body,
                                             senderLabel = message.senderLabel(),
                                         ),
-                                        revision = composer.revision + 1,
+                                        revision = base.revision + 1,
                                         failureRevision = null,
                                     ),
                                 )
                                 focusComposerWhenReady = true
                             },
                             onQuote = { message ->
+                                val base = composer.cancelCorrection()
                                 val quote = message.manualQuote()
-                                val answer = composer.body.takeIf(String::isNotBlank)
+                                val answer = base.body.takeIf(String::isNotBlank)
                                 updateComposer(
-                                    composer.copy(
+                                    base.copy(
                                         body = buildString {
                                             append(quote).append("\n\n")
                                             if (answer != null) append(answer)
                                         },
-                                        revision = composer.revision + 1,
+                                        revision = base.revision + 1,
                                         failureRevision = null,
                                     ),
                                 )
                                 focusComposerWhenReady = true
                             },
+                            onEdit = edit@{ message ->
+                                if (!editActionsEnabled) return@edit
+                                val target = requireNotNull(
+                                    message.correctionTargetOrNull(state.selectedPeerGroupChat),
+                                )
+                                setComposer(composer.beginCorrection(target, message.body))
+                                focusComposerWhenReady = true
+                            },
                             onReplyAsThread = { message ->
+                                setComposer(composer.cancelCorrection())
                                 scope.launch {
                                     val opened = onStartThreadFrom(message)
                                     if (opened) focusComposerWhenReady = true
@@ -547,6 +571,7 @@ fun DirectChatContent(
                     ) {
                         IconButton(
                             onClick = { filePicker.launch("*/*") },
+                            enabled = composer.correction == null,
                             modifier = Modifier.semantics { contentDescription = "Attach file" },
                         ) {
                             Icon(Icons.Filled.Add, contentDescription = null)
@@ -590,6 +615,29 @@ fun DirectChatContent(
                             tonalElevation = 1.dp,
                         ) {
                             Column {
+                                composer.correction?.let {
+                                    Surface(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .testTag("composer-edit-preview"),
+                                        color = MaterialTheme.colorScheme.surfaceVariant,
+                                        shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(start = 16.dp, end = 4.dp, top = 4.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                        ) {
+                                            Text(
+                                                "Editing message",
+                                                modifier = Modifier.weight(1f),
+                                                style = MaterialTheme.typography.labelMedium,
+                                            )
+                                            TextButton(onClick = { setComposer(composer.cancelCorrection()) }) {
+                                                Text("Cancel")
+                                            }
+                                        }
+                                    }
+                                }
                                 composer.reply?.let { reply ->
                                     Surface(
                                         modifier = Modifier
@@ -682,6 +730,7 @@ fun DirectChatContent(
                         Box {
                             val sendEnabled =
                                 (composer.body.isNotBlank() || composer.attachmentUrl != null) &&
+                                    (composer.correction?.let { composer.body != it.originalBody } ?: true) &&
                                     PendingSendIdentity(conversationKey, composer.revision) !in pendingSendIdentities
                             Box(
                                 modifier = Modifier
@@ -692,7 +741,11 @@ fun DirectChatContent(
                                         onLongClickLabel = "Send as thread",
                                         onClick = { sendWith(onSend) },
                                         onLongClick = if (conversationKey.thread == null) {
-                                            { sendActionsOpen = true }
+                                            if (composer.correction == null) {
+                                                { sendActionsOpen = true }
+                                            } else {
+                                                null
+                                            }
                                         } else {
                                             null
                                         },
@@ -1140,7 +1193,7 @@ internal suspend fun <T> InputStream.useCancellable(block: (InputStream) -> T): 
 
 private const val MAX_BACKGROUND_EDGE = 2048
 
-private const val COMPOSER_STATE_VERSION = 3
+private const val COMPOSER_STATE_VERSION = 4
 
 private data class PendingSendIdentity(
     val key: DirectConversationKey,
@@ -1157,6 +1210,8 @@ private data class ComposerState(
     val attachmentMime: String? = null,
     val attachmentSize: Long? = null,
     val reply: DraftReply? = null,
+    val correction: DraftCorrection? = null,
+    val correctionBackup: ComposerBackup? = null,
 ) {
     fun toDraftSnapshot(groupChat: Boolean): DraftSnapshot = DraftSnapshot(
         key = key,
@@ -1168,12 +1223,61 @@ private data class ComposerState(
         attachmentMime = attachmentMime,
         attachmentSize = attachmentSize,
         reply = reply,
+        correction = correction,
+    )
+}
+
+private data class ComposerBackup(
+    val body: String,
+    val attachmentUrl: String?,
+    val attachmentName: String?,
+    val attachmentMime: String?,
+    val attachmentSize: Long?,
+    val reply: DraftReply?,
+)
+
+private fun ComposerState.beginCorrection(target: DraftCorrection, correctedBody: String): ComposerState {
+    val backup = correctionBackup ?: ComposerBackup(
+        body = body,
+        attachmentUrl = attachmentUrl,
+        attachmentName = attachmentName,
+        attachmentMime = attachmentMime,
+        attachmentSize = attachmentSize,
+        reply = reply,
+    )
+    return copy(
+        body = correctedBody,
+        attachmentUrl = null,
+        attachmentName = null,
+        attachmentMime = null,
+        attachmentSize = null,
+        reply = null,
+        correction = target,
+        correctionBackup = backup,
+        revision = revision + 1,
+        failureRevision = null,
+    )
+}
+
+private fun ComposerState.cancelCorrection(): ComposerState {
+    val backup = correctionBackup ?: return copy(correction = null, correctionBackup = null)
+    return copy(
+        body = backup.body,
+        attachmentUrl = backup.attachmentUrl,
+        attachmentName = backup.attachmentName,
+        attachmentMime = backup.attachmentMime,
+        attachmentSize = backup.attachmentSize,
+        reply = backup.reply,
+        correction = null,
+        correctionBackup = null,
+        revision = revision + 1,
+        failureRevision = null,
     )
 }
 
 private fun ComposerState.clearAfterSend(snapshot: DraftSnapshot): ComposerState =
     if (matches(snapshot)) {
-        copy(
+        if (snapshot.correction != null) cancelCorrection() else copy(
             body = "",
             attachmentUrl = null,
             attachmentName = null,
@@ -1191,7 +1295,8 @@ private fun ComposerState.matches(snapshot: DraftSnapshot): Boolean =
     key == snapshot.key &&
         revision == snapshot.composerRevision &&
         body == snapshot.body &&
-        reply == snapshot.reply
+        reply == snapshot.reply &&
+        correction == snapshot.correction
 
 private fun composerStateSaver(
     expectedKey: DirectConversationKey,
@@ -1215,11 +1320,23 @@ private fun composerStateSaver(
             state.reply?.to,
             state.reply?.body,
             state.reply?.senderLabel,
+            state.correction?.localMessageId,
+            state.correction?.referenceId,
+            state.correction?.originalBody,
+            state.correctionBackup?.body,
+            state.correctionBackup?.attachmentUrl,
+            state.correctionBackup?.attachmentName,
+            state.correctionBackup?.attachmentMime,
+            state.correctionBackup?.attachmentSize,
+            state.correctionBackup?.reply?.id,
+            state.correctionBackup?.reply?.to,
+            state.correctionBackup?.reply?.body,
+            state.correctionBackup?.reply?.senderLabel,
         )
     },
     restore = restore@{ saved ->
         val values = saved as? List<*> ?: return@restore null
-        if (values.size != 16 || values[0] != COMPOSER_STATE_VERSION) return@restore null
+        if (values.size != 28 || values[0] != COMPOSER_STATE_VERSION) return@restore null
         val accountId = values[1] as? String ?: return@restore null
         val peer = values[2] as? String ?: return@restore null
         if ((3..4).any { values[it] != null && values[it] !is String }) return@restore null
@@ -1248,6 +1365,26 @@ private fun composerStateSaver(
         val replySender = values[15] as String?
         if (replyId == null && listOf(replyTo, replyBody, replySender).any { it != null }) return@restore null
         if (replyId != null && (replyBody == null || replySender == null)) return@restore null
+        if ((16..18).any { values[it] != null && values[it] !is String }) return@restore null
+        val correctionLocalId = values[16] as String?
+        val correctionReferenceId = values[17] as String?
+        val correctionOriginalBody = values[18] as String?
+        if (listOf(correctionLocalId, correctionReferenceId, correctionOriginalBody).map { it == null }.distinct().size != 1) {
+            return@restore null
+        }
+        if ((19..22).any { values[it] != null && values[it] !is String }) return@restore null
+        if (values[23] != null && values[23] !is Long) return@restore null
+        if ((24..27).any { values[it] != null && values[it] !is String }) return@restore null
+        val backupBody = values[19] as String?
+        val backupReplyId = values[24] as String?
+        val backupReplyTo = values[25] as String?
+        val backupReplyBody = values[26] as String?
+        val backupReplySender = values[27] as String?
+        if (backupReplyId == null && listOf(backupReplyTo, backupReplyBody, backupReplySender).any { it != null }) {
+            return@restore null
+        }
+        if (backupReplyId != null && (backupReplyBody == null || backupReplySender == null)) return@restore null
+        if ((correctionLocalId == null) != (backupBody == null)) return@restore null
         val key = DirectConversationKey(
             accountId = accountId,
             canonicalBarePeer = peer,
@@ -1266,6 +1403,26 @@ private fun composerStateSaver(
                 attachmentSize = values[11] as Long?,
                 reply = replyId?.let {
                     DraftReply(it, replyTo, requireNotNull(replyBody), requireNotNull(replySender))
+                },
+                correction = correctionLocalId?.let {
+                    DraftCorrection(it, requireNotNull(correctionReferenceId), requireNotNull(correctionOriginalBody))
+                },
+                correctionBackup = backupBody?.let {
+                    ComposerBackup(
+                        body = it,
+                        attachmentUrl = values[20] as String?,
+                        attachmentName = values[21] as String?,
+                        attachmentMime = values[22] as String?,
+                        attachmentSize = values[23] as Long?,
+                        reply = backupReplyId?.let { id ->
+                            DraftReply(
+                                id,
+                                backupReplyTo,
+                                requireNotNull(backupReplyBody),
+                                requireNotNull(backupReplySender),
+                            )
+                        },
+                    )
                 },
             ),
         )
@@ -1329,11 +1486,27 @@ internal fun displayedMarkerCandidates(
     }
 }
 
+internal fun TimelineMessage.correctionTargetOrNull(conversationGroupChat: Boolean): DraftCorrection? {
+    val referenceId = correctionReferenceId?.takeIf(String::isNotEmpty) ?: return null
+    if (conversationGroupChat || groupChat || !outgoing || body.isBlank()) return null
+    if (attachmentUrl != null || attachmentName != null || attachmentMime != null || attachmentSize != null) return null
+    if (replyToId != null || replyToJid != null || replyFallbackBody != null) return null
+    if (delivery !in setOf(
+            DeliveryPresentation.SENT,
+            DeliveryPresentation.CONFIRMED,
+            DeliveryPresentation.DELIVERED,
+            DeliveryPresentation.READ,
+        )
+    ) return null
+    return DraftCorrection(id, referenceId, body)
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MessageTimeline(
     messages: List<TimelineMessage>,
     conversationGroupChat: Boolean = false,
+    editActionsEnabled: Boolean = true,
     readReceiptsEnabled: Boolean = false,
     activityResumed: Boolean = false,
     onMessageDisplayed: suspend (TimelineMessage) -> Boolean = { false },
@@ -1343,6 +1516,7 @@ fun MessageTimeline(
     onContinueThread: (ThreadRef) -> Unit = {},
     onReply: (TimelineMessage) -> Unit = {},
     onQuote: (TimelineMessage) -> Unit = {},
+    onEdit: (TimelineMessage) -> Unit = {},
     onReplyAsThread: (TimelineMessage) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -1452,6 +1626,8 @@ fun MessageTimeline(
                 val navigableThread = message.thread?.takeIf {
                     !conversationGroupChat && !message.groupChat
                 }
+                val correctionTarget = message.correctionTargetOrNull(conversationGroupChat)
+                    .takeIf { editActionsEnabled }
                 Box(modifier = Modifier.fillMaxWidth()) {
                     Column(
                         modifier = Modifier
@@ -1573,6 +1749,15 @@ fun MessageTimeline(
                                         },
                                     )
                                 }
+                            }
+                            if (correctionTarget != null) {
+                                DropdownMenuItem(
+                                    text = { Text("Edit") },
+                                    onClick = {
+                                        messageActionsOpen = false
+                                        onEdit(message)
+                                    },
+                                )
                             }
                             DropdownMenuItem(
                                 text = { Text("Quote") },

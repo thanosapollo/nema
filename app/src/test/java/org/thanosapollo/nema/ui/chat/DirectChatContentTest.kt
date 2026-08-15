@@ -53,6 +53,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -62,6 +64,7 @@ import org.robolectric.annotation.Config
 import org.thanosapollo.nema.chat.DirectChatState
 import org.thanosapollo.nema.chat.DirectConversationKey
 import org.thanosapollo.nema.chat.DeliveryPresentation
+import org.thanosapollo.nema.chat.DraftCorrection
 import org.thanosapollo.nema.chat.DraftSnapshot
 import org.thanosapollo.nema.chat.MessageReplyPresentation
 import org.thanosapollo.nema.chat.ThreadSummary
@@ -707,6 +710,125 @@ class DirectChatContentTest {
         }
 
         composeRule.onNodeWithText("Edited").assertIsDisplayed()
+    }
+
+    @Test
+    fun correctionActionRequiresOwnSentDirectTextWithExactWireTarget() {
+        val eligible = message("editable", outgoing = true).copy(
+            delivery = DeliveryPresentation.SENT,
+            correctionReferenceId = "editable-wire-id",
+        )
+
+        assertNotNull(eligible.correctionTargetOrNull(conversationGroupChat = false))
+        assertNull(eligible.copy(outgoing = false).correctionTargetOrNull(false))
+        assertNull(eligible.copy(delivery = DeliveryPresentation.QUEUED).correctionTargetOrNull(false))
+        assertNull(eligible.copy(correctionReferenceId = null).correctionTargetOrNull(false))
+        assertNull(eligible.copy(groupChat = true).correctionTargetOrNull(false))
+        assertNull(eligible.copy(attachmentUrl = "https://example.org/file").correctionTargetOrNull(false))
+        assertNull(eligible.copy(attachmentName = "file").correctionTargetOrNull(false))
+        assertNull(eligible.copy(attachmentMime = "text/plain").correctionTargetOrNull(false))
+        assertNull(eligible.copy(attachmentSize = 1).correctionTargetOrNull(false))
+        assertNull(eligible.copy(replyToId = "reply-target").correctionTargetOrNull(false))
+        assertNull(eligible.copy(replyToJid = PEER_A).correctionTargetOrNull(false))
+        assertNull(eligible.copy(replyFallbackBody = "quoted").correctionTargetOrNull(false))
+        assertNull(eligible.copy(body = " ").correctionTargetOrNull(false))
+        assertNull(eligible.correctionTargetOrNull(conversationGroupChat = true))
+    }
+
+    @Test
+    fun editActionSendsExactCorrectionAndRestoresUnrelatedDraft() {
+        var sent: DraftSnapshot? = null
+        val editable = message("original text", outgoing = true).copy(
+            delivery = DeliveryPresentation.SENT,
+            correctionReferenceId = "original-wire-id",
+        )
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A).copy(
+                        messages = listOf(editable),
+                        draft = "unrelated draft",
+                    ),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = {
+                        sent = it
+                        CompletableDeferred(true)
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("original text").performTouchInput { longClick() }
+        composeRule.onNodeWithText("Edit").performClick()
+        composeRule.onNodeWithText("Editing message").assertIsDisplayed()
+        composeRule.onNodeWithTag("message-composer").performTextReplacement("corrected text")
+        composeRule.onNodeWithContentDescription("Send").performClick()
+        composeRule.waitUntil { sent != null }
+
+        assertEquals(DraftCorrection("original text", "original-wire-id", "original text"), sent?.correction)
+        assertEquals("corrected text", sent?.body)
+        composeRule.onNodeWithTag("message-composer").assertTextEquals("unrelated draft")
+        composeRule.onNodeWithText("Editing message").assertDoesNotExist()
+    }
+
+    @Test
+    fun editActionIsUnavailableWhileOrdinarySendIsPending() {
+        val sendResult = CompletableDeferred<Boolean>()
+        val editable = message("original text", outgoing = true).copy(
+            delivery = DeliveryPresentation.SENT,
+            correctionReferenceId = "original-wire-id",
+        )
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A).copy(messages = listOf(editable), draft = "ordinary draft"),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { sendResult },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Send").performClick()
+        composeRule.onNodeWithText("original text").performTouchInput { longClick() }
+        composeRule.onNodeWithText("Edit").assertDoesNotExist()
+        sendResult.complete(true)
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("ordinary draft").assertDoesNotExist()
+    }
+
+    @Test
+    fun editActionIsUnavailableForPendingOrFailedDraftSave() {
+        val draftResult = CompletableDeferred<Boolean>()
+        val editable = message("original text", outgoing = true).copy(
+            delivery = DeliveryPresentation.SENT,
+            correctionReferenceId = "original-wire-id",
+        )
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A).copy(messages = listOf(editable), draft = "ordinary draft"),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { draftResult },
+                    onSend = { CompletableDeferred(true) },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("message-composer").performTextReplacement("changed draft")
+        composeRule.onNodeWithText("original text").performTouchInput { longClick() }
+        composeRule.onNodeWithText("Edit").assertDoesNotExist()
+        draftResult.complete(false)
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Draft not saved").assertIsDisplayed()
+        composeRule.onNodeWithText("Edit").assertDoesNotExist()
     }
 
     @Test
