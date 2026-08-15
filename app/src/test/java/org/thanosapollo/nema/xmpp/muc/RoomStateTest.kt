@@ -6,12 +6,11 @@ import org.junit.Test
 
 class RoomStateTest {
     @Test
-    fun persistedTitleFillsOnceFromDiscoThenSubject() {
-        assertEquals("Council", roomDisplayNameToPersist(null, "Council", "topic"))
-        assertEquals("Council", roomDisplayNameToPersist("  ", "Council", "topic"))
-        assertEquals("topic", roomDisplayNameToPersist(null, null, "topic"))
-        assertNull(roomDisplayNameToPersist("Keep Me", "Council", "topic"))
-        assertNull(roomDisplayNameToPersist("Keep Me", null, "new topic"))
+    fun persistedTitleFillsOnceFromDiscoWithoutPromotingMutableSubject() {
+        assertEquals("Council", roomDisplayNameToPersist(null, "Council"))
+        assertEquals("Council", roomDisplayNameToPersist("  ", "Council"))
+        assertNull(roomDisplayNameToPersist(null, null))
+        assertNull(roomDisplayNameToPersist("Keep Me", "Council"))
     }
 
     @Test

@@ -18,6 +18,11 @@ data class RoomBookmark(
     val autojoin: Boolean = false,
 )
 
+data class RoomBookmarkSnapshot(
+    val bookmarks: List<RoomBookmark>,
+    val complete: Boolean,
+)
+
 fun roomsFromBookmark2Items(items: List<Bookmark2Item>): List<String> =
     parseBookmark2Conferences(items).map(RoomBookmark::roomJid)
 

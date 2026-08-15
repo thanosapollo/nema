@@ -35,6 +35,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.click
@@ -1996,6 +1997,33 @@ class DirectChatContentTest {
     }
 
     @Test
+    fun roomThreadMetadataDoesNotExposeUnsupportedThreadNavigation() {
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(
+                        TimelineMessage(
+                            id = "room-thread",
+                            senderJid = "room@conference.example.org/alice",
+                            body = "room message",
+                            outgoing = false,
+                            delivery = null,
+                            retryUncertainKey = null,
+                            thread = ThreadRef(ThreadId.require("thread")),
+                            groupChat = true,
+                        ),
+                    ),
+                    conversationGroupChat = true,
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("thread-chip").assertDoesNotExist()
+        composeRule.onNodeWithText("room message").performTouchInput { doubleClick() }
+        composeRule.onNodeWithText("Open thread").assertDoesNotExist()
+    }
+
+    @Test
     fun doubleTapOnThreadedBubbleOpensMessageActions() {
         composeRule.setContent {
             MaterialTheme {
@@ -2017,6 +2045,51 @@ class DirectChatContentTest {
 
         composeRule.onNodeWithText("incoming").performTouchInput { doubleClick() }
         composeRule.onNodeWithText("Open thread").assertIsDisplayed()
+    }
+
+    @Test
+    fun messageActionsHaveAccessibleActivationWithoutChangingPhysicalSingleTap() {
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(message("accessible", outgoing = false)),
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("message-bubble-accessible").performTouchInput { click() }
+        composeRule.onNodeWithText("Quote").assertDoesNotExist()
+        composeRule.onNodeWithTag("message-bubble-accessible")
+            .performSemanticsAction(SemanticsActions.OnClick)
+        composeRule.onNodeWithText("Quote").assertIsDisplayed()
+    }
+
+    @Test
+    fun threadChipStacksBelowBubbleWithAccessibleTouchTarget() {
+        val thread = ThreadRef(ThreadId.require("thread"))
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(
+                        TimelineMessage(
+                            id = "stacked-thread",
+                            senderJid = PEER_A,
+                            body = "incoming",
+                            outgoing = false,
+                            delivery = null,
+                            retryUncertainKey = null,
+                            thread = thread,
+                        ),
+                    ),
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("thread-chip").assertHeightIsEqualTo(48.dp)
+        val bubble = composeRule.onNodeWithTag("message-bubble-stacked-thread")
+            .fetchSemanticsNode().boundsInRoot
+        val chip = composeRule.onNodeWithTag("thread-chip").fetchSemanticsNode().boundsInRoot
+        assertTrue("thread chip overlaps its message bubble", chip.top >= bubble.bottom)
     }
 
     private fun state(accountId: String, peer: String, draft: String = "") = DirectChatState(

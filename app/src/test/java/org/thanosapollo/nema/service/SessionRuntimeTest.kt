@@ -38,6 +38,7 @@ import org.thanosapollo.nema.storage.OutboxStatus
 import org.thanosapollo.nema.storage.PeerIdentityStore
 import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmark
+import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmarkSnapshot
 import org.thanosapollo.nema.xmpp.transport.AccountId
 import org.thanosapollo.nema.xmpp.transport.OutgoingFailureEnvelope
 import org.thanosapollo.nema.xmpp.transport.OutgoingMessageEnvelope
@@ -331,6 +332,107 @@ class SessionRuntimeTest {
     }
 
     @Test
+    fun `join does not publish when bookmark snapshot is incomplete`() = runTest {
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val connections = RecordingConnectionFactory()
+        val runtime = SessionRuntime(
+            accounts = accounts,
+            credentials = credentials,
+            messages = MessageStore(database),
+            peerIdentities = PeerIdentityStore(database.messageDao()),
+            runtimeScope = backgroundScope,
+            connectionFactory = connections,
+        )
+        val active = account("active")
+        accounts.save(active)
+        accounts.activate(active.id)
+        credentials.store(active.id, "secret".toCharArray())
+        assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
+        val connection = connections.created.single()
+        connection.bookmarkReadComplete = false
+
+        assertTrue(runtime.joinMuc("coven@conference.example.org", nick = "Puck"))
+        runCurrent()
+
+        assertTrue(connection.publishedBookmarks.isEmpty())
+    }
+
+    @Test
+    fun `bookmark read modify write is serialized in join order`() = runTest {
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val connections = RecordingConnectionFactory()
+        val runtime = SessionRuntime(
+            accounts = accounts,
+            credentials = credentials,
+            messages = MessageStore(database),
+            peerIdentities = PeerIdentityStore(database.messageDao()),
+            runtimeScope = backgroundScope,
+            connectionFactory = connections,
+        )
+        val active = account("active")
+        accounts.save(active)
+        accounts.activate(active.id)
+        credentials.store(active.id, "secret".toCharArray())
+        assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
+        val connection = connections.created.single()
+        val releaseFirstRead = CompletableDeferred<Unit>()
+        connection.nextBookmarkReadGate = releaseFirstRead
+        val room = "coven@conference.example.org"
+
+        assertTrue(runtime.joinMuc(room, nick = "Old"))
+        runCurrent()
+        assertTrue(runtime.joinMuc(room, nick = "New"))
+        runCurrent()
+        assertTrue(connection.publishedBookmarks.isEmpty())
+
+        releaseFirstRead.complete(Unit)
+        runCurrent()
+        assertEquals(listOf("Old", "New"), connection.publishedBookmarks.map(RoomBookmark::nick))
+    }
+
+    @Test
+    fun `stale bookmark read cannot publish after account switch`() = runTest {
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val connections = RecordingConnectionFactory()
+        val runtime = SessionRuntime(
+            accounts = accounts,
+            credentials = credentials,
+            messages = MessageStore(database),
+            peerIdentities = PeerIdentityStore(database.messageDao()),
+            runtimeScope = backgroundScope,
+            connectionFactory = connections,
+        )
+        val first = account("first")
+        val second = account("second")
+        accounts.save(first)
+        accounts.save(second)
+        accounts.activate(first.id)
+        credentials.store(first.id, "first-secret".toCharArray())
+        credentials.store(second.id, "second-secret".toCharArray())
+        assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
+        val oldConnection = connections.created.single()
+        val releaseOldRead = CompletableDeferred<Unit>()
+        oldConnection.nextBookmarkReadGate = releaseOldRead
+
+        assertTrue(runtime.joinMuc("old@conference.example.org", nick = "Old"))
+        runCurrent()
+        assertEquals(ConnectionCommandOutcome.RUNNING, runtime.activate(second.id))
+        val newConnection = connections.created.last()
+        assertTrue(runtime.joinMuc("new@conference.example.org", nick = "New"))
+        runCurrent()
+        assertTrue(oldConnection.publishedBookmarks.isEmpty())
+        assertTrue(newConnection.publishedBookmarks.isEmpty())
+
+        releaseOldRead.complete(Unit)
+        runCurrent()
+        assertTrue(oldConnection.publishedBookmarks.isEmpty())
+        assertEquals(listOf("New"), newConnection.publishedBookmarks.map(RoomBookmark::nick))
+    }
+
+    @Test
     fun `room update fills empty display name from disco then keeps it`() = runTest {
         val accounts = AccountRepository(database.accountDao())
         val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
@@ -427,6 +529,8 @@ class SessionRuntimeTest {
         var disconnectCalls = 0
         lateinit var attemptIdentity: SessionAttemptIdentity
         var bookmarks: List<RoomBookmark> = emptyList()
+        var bookmarkReadComplete = true
+        var nextBookmarkReadGate: CompletableDeferred<Unit>? = null
         val publishedBookmarks = mutableListOf<RoomBookmark>()
 
         override fun revoke() {
@@ -462,7 +566,12 @@ class SessionRuntimeTest {
         override suspend fun bookmarkedRoomDetails(
             accountId: AccountId,
             generation: org.thanosapollo.nema.xmpp.transport.ConnectionGeneration,
-        ): List<RoomBookmark> = bookmarks
+        ): RoomBookmarkSnapshot {
+            val gate = nextBookmarkReadGate
+            nextBookmarkReadGate = null
+            gate?.await()
+            return RoomBookmarkSnapshot(bookmarks, complete = bookmarkReadComplete)
+        }
 
         override suspend fun publishRoomBookmark(
             accountId: AccountId,
@@ -470,6 +579,7 @@ class SessionRuntimeTest {
             bookmark: RoomBookmark,
         ): Boolean {
             publishedBookmarks += bookmark
+            bookmarks = bookmarks.filterNot { it.roomJid == bookmark.roomJid } + bookmark
             return true
         }
 

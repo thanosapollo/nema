@@ -19,11 +19,9 @@ data class RoomView(
 fun roomDisplayNameToPersist(
     currentDisplayName: String?,
     discoName: String?,
-    subject: String?,
 ): String? {
     if (currentDisplayName?.trim().orEmpty().isNotEmpty()) return null
     return discoName?.trim()?.takeIf(String::isNotEmpty)
-        ?: subject?.trim()?.takeIf(String::isNotEmpty)
 }
 
 fun roomSubtitle(subject: String?, occupantCount: Int): String {

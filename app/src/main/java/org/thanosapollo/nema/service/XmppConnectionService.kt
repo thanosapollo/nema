@@ -115,6 +115,7 @@ class SessionRuntime(
 ) {
     private val scope = runtimeScope
     private val accountCommands = Mutex()
+    private val bookmarkMutations = Mutex()
     private val automaticConnectionClaimed = AtomicBoolean(false)
     private val pendingActivation = PendingActivationAuthority()
     private lateinit var controller: ActiveSessionController
@@ -313,28 +314,45 @@ class SessionRuntime(
                 }
             }
             scope.launch {
-                runCatching {
-                    val existing = runCatching {
-                        controller.bookmarkedRoomDetails(
-                            lease.identity.accountId,
-                            lease.identity.generation,
-                        ).firstOrNull { it.roomJid == roomJid }
-                    }.getOrNull()
-                    controller.publishRoomBookmark(
-                        lease.identity.accountId,
-                        lease.identity.generation,
-                        joinRoomBookmark(roomJid, nick, password, existing),
-                    )
-                }
+                persistJoinedRoomBookmark(lease, roomJid, nick, password)
             }
         }
         return joined
     }
 
+    private suspend fun persistJoinedRoomBookmark(
+        lease: DispatchLease,
+        roomJid: String,
+        nick: String?,
+        password: String?,
+    ) = bookmarkMutations.withLock {
+        if (controller.lifecycle.value.dispatchLease() != lease) return@withLock
+        val snapshot = try {
+            controller.bookmarkedRoomDetails(lease.identity.accountId, lease.identity.generation)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return@withLock
+        }
+        if (!snapshot.complete || controller.lifecycle.value.dispatchLease() != lease) return@withLock
+        val existing = snapshot.bookmarks.firstOrNull { it.roomJid == roomJid }
+        try {
+            controller.publishRoomBookmark(
+                lease.identity.accountId,
+                lease.identity.generation,
+                joinRoomBookmark(roomJid, nick, password, existing),
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Joining succeeded; bookmark persistence remains a soft failure.
+        }
+    }
+
     private suspend fun persistRoomDisplayName(accountId: String, view: RoomView) {
         peerIdentities.saveRoom(accountId, view.roomJid, true)
         val current = peerIdentities.peer(accountId, view.roomJid)?.displayName
-        val fill = roomDisplayNameToPersist(current, view.discoName, view.subject) ?: return
+        val fill = roomDisplayNameToPersist(current, view.discoName) ?: return
         peerIdentities.saveDisplayName(accountId, view.roomJid, fill)
     }
 
@@ -342,14 +360,14 @@ class SessionRuntime(
         identity: SessionIdentity,
         observation: SessionLifecycleObservation,
     ) {
-        val bookmarks = try {
+        val snapshot = try {
             controller.bookmarkedRoomDetails(identity.accountId, identity.generation)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
             return
         }
-        for (bookmark in bookmarks) {
+        for (bookmark in snapshot.bookmarks) {
             if (controller.lifecycle.value != observation) return
             try {
                 peerIdentities.saveRoom(identity.accountId.value, bookmark.roomJid, true)

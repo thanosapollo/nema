@@ -92,6 +92,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.error
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -1385,8 +1386,11 @@ fun MessageTimeline(
                 var messageActionsOpen by remember(message.id) { mutableStateOf(false) }
                 val (bubbleContainerColor, bubbleContentColor) = messageBubbleColors(message.outgoing)
                 val quote = remember(message.body) { message.body.leadingManualQuote() }
+                val navigableThread = message.thread?.takeIf {
+                    !conversationGroupChat && !message.groupChat
+                }
                 Box(modifier = Modifier.fillMaxWidth()) {
-                    Box(
+                    Column(
                         modifier = Modifier
                             .align(if (message.outgoing) Alignment.CenterEnd else Alignment.CenterStart)
                             .padding(
@@ -1396,6 +1400,13 @@ fun MessageTimeline(
                     ) {
                         Surface(
                             modifier = Modifier
+                                .testTag("message-bubble-${message.id}")
+                                .semantics {
+                                    onClick(label = "Message actions") {
+                                        messageActionsOpen = true
+                                        true
+                                    }
+                                }
                                 .combinedClickable(
                                     role = Role.Button,
                                     onLongClickLabel = "Message actions",
@@ -1456,16 +1467,24 @@ fun MessageTimeline(
                                 }
                             }
                         }
-                        message.thread?.let { thread ->
-                            Text(
-                                "Thread",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        navigableThread?.let { thread ->
+                            Box(
                                 modifier = Modifier
-                                    .padding(top = 4.dp)
+                                    .heightIn(min = 48.dp)
                                     .testTag("thread-chip")
-                                    .clickable { onContinueThread(thread) },
-                            )
+                                    .clickable(
+                                        role = Role.Button,
+                                        onClickLabel = "Open thread",
+                                        onClick = { onContinueThread(thread) },
+                                    ),
+                                contentAlignment = Alignment.CenterStart,
+                            ) {
+                                Text(
+                                    "Thread",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                         DropdownMenu(
                             expanded = messageActionsOpen,
@@ -1497,7 +1516,7 @@ fun MessageTimeline(
                                 },
                             )
 
-                            message.thread?.let { thread ->
+                            navigableThread?.let { thread ->
                                 DropdownMenuItem(
                                     text = { Text("Open thread") },
                                     onClick = {

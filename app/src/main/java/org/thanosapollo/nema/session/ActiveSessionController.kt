@@ -147,11 +147,12 @@ interface SessionConnection {
     suspend fun bookmarkedRooms(
         accountId: AccountId,
         generation: ConnectionGeneration,
-    ): List<String> = bookmarkedRoomDetails(accountId, generation).map { it.roomJid }
+    ): List<String> = bookmarkedRoomDetails(accountId, generation).bookmarks.map { it.roomJid }
     suspend fun bookmarkedRoomDetails(
         accountId: AccountId,
         generation: ConnectionGeneration,
-    ): List<org.thanosapollo.nema.xmpp.bookmarks.RoomBookmark> = emptyList()
+    ): org.thanosapollo.nema.xmpp.bookmarks.RoomBookmarkSnapshot =
+        org.thanosapollo.nema.xmpp.bookmarks.RoomBookmarkSnapshot(emptyList(), complete = false)
     suspend fun publishRoomBookmark(
         accountId: AccountId,
         generation: ConnectionGeneration,
@@ -448,12 +449,12 @@ internal class ActiveSessionController(
     suspend fun bookmarkedRooms(
         accountId: AccountId,
         generation: ConnectionGeneration,
-    ): List<String> = bookmarkedRoomDetails(accountId, generation).map { it.roomJid }
+    ): List<String> = bookmarkedRoomDetails(accountId, generation).bookmarks.map { it.roomJid }
 
     suspend fun bookmarkedRoomDetails(
         accountId: AccountId,
         generation: ConnectionGeneration,
-    ): List<org.thanosapollo.nema.xmpp.bookmarks.RoomBookmark> {
+    ): org.thanosapollo.nema.xmpp.bookmarks.RoomBookmarkSnapshot {
         val target = exactConnection(accountId, generation)
         return target.bookmarkedRoomDetails(accountId, generation)
     }

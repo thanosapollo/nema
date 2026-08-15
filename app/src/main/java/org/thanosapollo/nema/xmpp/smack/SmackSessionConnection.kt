@@ -20,6 +20,7 @@ import org.jivesoftware.smack.filter.IQReplyFilter
 import org.jivesoftware.smack.filter.StanzaTypeFilter
 import org.jivesoftware.smack.packet.IQ
 import org.jivesoftware.smack.packet.Message
+import org.jivesoftware.smack.packet.StanzaError
 import org.jivesoftware.smack.packet.StanzaBuilder
 import org.jivesoftware.smack.parsing.ParsingExceptionCallback
 import org.jivesoftware.smack.sasl.SASLErrorException
@@ -69,6 +70,7 @@ import org.thanosapollo.nema.xmpp.blocking.PeerBlockingMutationResult
 import org.thanosapollo.nema.xmpp.bookmarks.BOOKMARKS2_NODE
 import org.thanosapollo.nema.xmpp.bookmarks.Bookmark2Item
 import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmark
+import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmarkSnapshot
 import org.thanosapollo.nema.xmpp.bookmarks.STORAGE_BOOKMARKS_NAMESPACE
 import org.thanosapollo.nema.xmpp.bookmarks.bookmark2Xml
 import org.thanosapollo.nema.xmpp.bookmarks.mergeRoomBookmarks
@@ -492,14 +494,22 @@ internal class SmackSessionConnection(
     override suspend fun bookmarkedRooms(
         accountId: AccountId,
         generation: ConnectionGeneration,
-    ): List<String> = bookmarkedRoomDetails(accountId, generation).map(RoomBookmark::roomJid)
+    ): List<String> = bookmarkedRoomDetails(accountId, generation).bookmarks.map(RoomBookmark::roomJid)
 
     override suspend fun bookmarkedRoomDetails(
         accountId: AccountId,
         generation: ConnectionGeneration,
-    ): List<RoomBookmark> = runInterruptible(Dispatchers.IO) {
+    ): RoomBookmarkSnapshot = runInterruptible(Dispatchers.IO) {
         requireExactAttempt(accountId, generation)
-        mergeRoomBookmarks(pepBookmarks(), privateStorageBookmarks())
+        val pep = pepBookmarks()
+        val privateStorage = privateStorageBookmarks()
+        RoomBookmarkSnapshot(
+            bookmarks = mergeRoomBookmarks(
+                pep.getOrDefault(emptyList()),
+                privateStorage.getOrDefault(emptyList()),
+            ),
+            complete = pep.isSuccess && privateStorage.isSuccess,
+        )
     }
 
     override suspend fun publishRoomBookmark(
@@ -521,20 +531,30 @@ internal class SmackSessionConnection(
         }.getOrDefault(false)
     }
 
-    private fun pepBookmarks(): List<RoomBookmark> = runCatching {
+    private fun pepBookmarks(): Result<List<RoomBookmark>> = try {
         val node = PubSubManager.getInstanceFor(connection, JidCreate.entityBareFrom(expectedBareJid))
             .getLeafNode(BOOKMARKS2_NODE)
-        parseBookmark2Conferences(
-            node.getItems<Item>().map { item ->
-                Bookmark2Item(
-                    id = item.id,
-                    payloadXml = (item as? PayloadItem<*>)?.payload?.toXML()?.toString(),
-                )
-            },
+        Result.success(
+            parseBookmark2Conferences(
+                node.getItems<Item>().map { item ->
+                    Bookmark2Item(
+                        id = item.id,
+                        payloadXml = (item as? PayloadItem<*>)?.payload?.toXML()?.toString(),
+                    )
+                },
+            ),
         )
-    }.getOrDefault(emptyList())
+    } catch (error: XMPPErrorException) {
+        if (error.stanzaError.condition == StanzaError.Condition.item_not_found) {
+            Result.success(emptyList())
+        } else {
+            Result.failure(error)
+        }
+    } catch (error: Exception) {
+        Result.failure(error)
+    }
 
-    private fun privateStorageBookmarks(): List<RoomBookmark> {
+    private fun privateStorageBookmarks(): Result<List<RoomBookmark>> {
         val fromManager = runCatching {
             BookmarkManager.getBookmarkManager(connection)
                 .bookmarkedConferences
@@ -549,13 +569,21 @@ internal class SmackSessionConnection(
                         autojoin = conference.isAutoJoin,
                     )
                 }
-        }.getOrDefault(emptyList())
+        }
         val fromXml = runCatching {
             val data = PrivateDataManager.getInstanceFor(connection)
                 .getPrivateData("storage", STORAGE_BOOKMARKS_NAMESPACE)
             parseStorageBookmarks(data.toXML().toString())
-        }.getOrDefault(emptyList())
-        return mergeRoomBookmarks(fromManager, fromXml)
+        }
+        if (fromManager.isFailure && fromXml.isFailure) {
+            return Result.failure(fromManager.exceptionOrNull() ?: fromXml.exceptionOrNull()!!)
+        }
+        return Result.success(
+            mergeRoomBookmarks(
+                fromManager.getOrDefault(emptyList()),
+                fromXml.getOrDefault(emptyList()),
+            ),
+        )
     }
 
     private fun rememberRoomDiscoName(room: EntityBareJid, roomJid: String) {
