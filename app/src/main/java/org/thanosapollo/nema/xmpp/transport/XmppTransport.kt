@@ -1,0 +1,208 @@
+package org.thanosapollo.nema.xmpp.transport
+
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.StateFlow
+import org.thanosapollo.nema.thread.MessageKind
+import org.thanosapollo.nema.thread.ThreadRef
+
+const val ACCOUNT_ARCHIVE_SCOPE = "ACCOUNT"
+
+@JvmInline
+value class AccountId private constructor(val value: String) {
+    companion object {
+        fun require(value: String): AccountId {
+            require(value.isNotEmpty()) { "Account ID must not be empty" }
+            return AccountId(value)
+        }
+    }
+}
+
+@JvmInline
+value class ConnectionGeneration private constructor(val value: Long) {
+    companion object {
+        fun require(value: Long): ConnectionGeneration {
+            require(value > 0) { "Connection generation must be positive" }
+            return ConnectionGeneration(value)
+        }
+    }
+}
+
+enum class TransportConnectionState {
+    DISCONNECTED,
+    CONNECTING,
+    CONNECTED,
+    DISCONNECTING,
+}
+
+enum class MessageTimeSource {
+    LOCAL,
+    DELAYED,
+    CARBON,
+    MAM,
+}
+
+data class ConnectionEnvelope(
+    val accountId: AccountId,
+    val generation: ConnectionGeneration,
+    val state: TransportConnectionState,
+)
+
+data class IncomingMessageEnvelope(
+    val accountId: AccountId,
+    val generation: ConnectionGeneration,
+    val peer: String,
+    val sender: String,
+    val outbound: Boolean,
+    val originId: String?,
+    val body: String,
+    val thread: ThreadRef?,
+    val stanzaIds: List<StanzaIdEnvelope> = emptyList(),
+    val messageId: String? = null,
+    val kind: MessageKind = MessageKind.CHAT,
+    val attachmentUrl: String? = null,
+    val attachmentName: String? = null,
+    val attachmentMime: String? = null,
+    val attachmentSize: Long? = null,
+    val reply: MessageReplyEnvelope? = null,
+    val sentAtEpochMs: Long? = null,
+    val sentTimeSource: MessageTimeSource? = null,
+) {
+    init {
+        require(peer.isNotEmpty()) { "Peer must not be empty" }
+        require(sender.isNotEmpty()) { "Sender must not be empty" }
+        require(originId == null || originId.isNotEmpty()) { "Origin ID must not be empty" }
+        require(body.isNotEmpty()) { "Message body must not be empty" }
+        require(stanzaIds.distinct().size == stanzaIds.size) { "Stanza IDs must be unique" }
+        require((sentAtEpochMs == null) == (sentTimeSource == null)) {
+            "Message time and provenance must be stored together"
+        }
+    }
+}
+
+data class OutgoingFailureEnvelope(
+    val operationId: String,
+    val peer: String,
+    val reason: String,
+) {
+    init {
+        require(operationId.isNotEmpty()) { "Operation ID must not be empty" }
+        require(peer.isNotEmpty()) { "Peer must not be empty" }
+        require(reason.isNotEmpty()) { "Failure reason must not be empty" }
+    }
+}
+
+data class MessageReplyEnvelope(
+    val id: String,
+    val to: String? = null,
+    val fallbackBody: String? = null,
+    val fallbackSender: String? = null,
+) {
+    init {
+        require(id.isNotEmpty()) { "Reply ID must not be empty" }
+        require(to == null || to.isNotEmpty()) { "Reply author must not be empty" }
+    }
+}
+
+data class StanzaIdEnvelope(
+    val id: String,
+    val by: String,
+) {
+    init {
+        require(id.isNotEmpty()) { "Stanza ID must not be empty" }
+        require(by.isNotEmpty()) { "Stanza ID authority must not be empty" }
+    }
+}
+
+data class SessionCapabilities(
+    val mamV2: Boolean,
+    val carbons: Boolean,
+    val carbonsEnabled: Boolean,
+    val stableIds: Boolean,
+)
+
+enum class ArchivePageDirection {
+    BOOTSTRAP,
+    BEFORE,
+    AFTER,
+}
+
+data class ArchivePageRequest(
+    val accountId: AccountId,
+    val generation: ConnectionGeneration,
+    val archiveAuthority: String,
+    val scope: String,
+    val direction: ArchivePageDirection,
+    val boundaryId: String?,
+    val pageSize: Int,
+) {
+    init {
+        require(archiveAuthority.isNotEmpty()) { "Archive authority must not be empty" }
+        require(scope.isNotEmpty()) { "Archive scope must not be empty" }
+        require(pageSize in 1..100) { "Archive page size must be between 1 and 100" }
+        require((direction == ArchivePageDirection.BOOTSTRAP) == (boundaryId == null)) {
+            "Only bootstrap omits an archive boundary"
+        }
+        require(boundaryId == null || boundaryId.isNotEmpty()) { "Archive boundary must not be empty" }
+    }
+}
+
+data class ArchiveMessageEnvelope(
+    val resultId: String,
+    val message: IncomingMessageEnvelope?,
+) {
+    init {
+        require(resultId.isNotEmpty()) { "MAM result ID must not be empty" }
+    }
+}
+
+data class ArchivePageEnvelope(
+    val request: ArchivePageRequest,
+    val stable: Boolean,
+    val complete: Boolean,
+    val hasEarlier: Boolean,
+    val firstId: String?,
+    val lastId: String?,
+    val messages: List<ArchiveMessageEnvelope>,
+) {
+    init {
+        require(messages.map(ArchiveMessageEnvelope::resultId).distinct().size == messages.size) {
+            "MAM page result IDs must be unique"
+        }
+    }
+}
+
+data class OutgoingMessageEnvelope(
+    val accountId: AccountId,
+    val generation: ConnectionGeneration,
+    val attempt: Int,
+    val operationId: String,
+    val originId: String,
+    val recipient: String,
+    val body: String,
+    val thread: ThreadRef?,
+    val kind: MessageKind = MessageKind.CHAT,
+    val attachmentUrl: String? = null,
+    val attachmentName: String? = null,
+    val attachmentMime: String? = null,
+    val attachmentSize: Long? = null,
+    val reply: MessageReplyEnvelope? = null,
+) {
+    init {
+        require(attempt > 0) { "Send attempt must be positive" }
+        require(operationId.isNotEmpty()) { "Operation ID must not be empty" }
+        require(originId.isNotEmpty()) { "Origin ID must not be empty" }
+        require(recipient.isNotEmpty()) { "Recipient must not be empty" }
+        require(body.isNotEmpty()) { "Message body must not be empty" }
+    }
+}
+
+class SendNotAttemptedException : Exception()
+
+interface XmppTransport {
+    val connectionStates: StateFlow<ConnectionEnvelope>
+    val incomingMessages: Flow<IncomingMessageEnvelope>
+
+    suspend fun send(message: OutgoingMessageEnvelope)
+
+    suspend fun close()
+}

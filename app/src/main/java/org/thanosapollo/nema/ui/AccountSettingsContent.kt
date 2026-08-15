@@ -1,0 +1,84 @@
+package org.thanosapollo.nema.ui
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import org.thanosapollo.nema.account.AccountConfiguration
+import org.thanosapollo.nema.ui.theme.AppearanceScope
+import org.thanosapollo.nema.ui.theme.AppearanceSpec
+import org.thanosapollo.nema.ui.theme.PaletteChoice
+import org.thanosapollo.nema.ui.theme.ThemeMode
+import org.thanosapollo.nema.xmpp.transport.AccountId
+
+@Suppress("UNUSED_PARAMETER")
+@Composable
+fun AccountSettingsContent(
+    activeAccountId: AccountId,
+    connectionStatus: String? = null,
+    appearanceScope: AppearanceScope = AppearanceScope.App,
+    appearance: AppearanceSpec = AppearanceSpec.DEFAULT,
+    appearanceInherited: Boolean = false,
+    conversationPeer: String? = null,
+    appearanceMessage: String? = null,
+    onSelectAppearanceScope: (AppearanceScope) -> Unit = {},
+    onSetThemeMode: (ThemeMode) -> Unit = {},
+    onSetPalette: (PaletteChoice) -> Unit = {},
+    onSetTextScale: (Float) -> Unit = {},
+    onSetUiScale: (Float) -> Unit = {},
+    onChooseBackground: () -> Unit = {},
+    onClearBackground: () -> Unit = {},
+    onUseInheritedAppearance: () -> Unit = {},
+    accounts: List<AccountConfiguration> = emptyList(),
+    switchingAccount: Boolean = false,
+    onSelectAccount: (AccountId) -> Unit = {},
+    onAddAccount: () -> Unit = {},
+    onStop: () -> Unit = {},
+    onSignOut: () -> Unit = {},
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(24.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Settings", style = MaterialTheme.typography.titleLarge)
+        connectionStatus?.let { status ->
+            quietConnectionStatus(status)?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall)
+            }
+        }
+        Text("Appearance (WIP)", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Theme and palette options are hidden until they are stable.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        AccountsContent(
+            accounts = accounts,
+            activeAccountId = activeAccountId,
+            switching = switchingAccount,
+            onSelectAccount = onSelectAccount,
+            onAddAccount = onAddAccount,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Text("Session", style = MaterialTheme.typography.titleMedium)
+        TextButton(onClick = onStop, modifier = Modifier.fillMaxWidth()) {
+            Text("Stop")
+        }
+        TextButton(onClick = onSignOut, modifier = Modifier.fillMaxWidth()) {
+            Text("Sign out")
+        }
+    }
+}
