@@ -54,9 +54,11 @@ import org.thanosapollo.nema.ui.theme.AppearanceScope
 import org.thanosapollo.nema.ui.theme.AppearanceSpec
 import org.thanosapollo.nema.ui.theme.NemaTheme
 import org.thanosapollo.nema.xmpp.httpupload.cachedAttachment
+import org.thanosapollo.nema.xmpp.httpupload.decodeInlineImage
 import org.thanosapollo.nema.xmpp.httpupload.fetchHttpsBytes
 import org.thanosapollo.nema.xmpp.httpupload.openCachedAttachment
 import org.thanosapollo.nema.xmpp.httpupload.persistFetchedAttachment
+import androidx.compose.ui.graphics.asImageBitmap
 import org.thanosapollo.nema.xmpp.transport.AccountId
 
 class MainActivity : ComponentActivity() {
@@ -380,6 +382,15 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean, activityRe
                             },
                             isAttachmentCached = { url ->
                                 cachedAttachment(File(context.cacheDir, "attachments"), url) != null
+                            },
+                            onLoadInlineImage = { url ->
+                                runCatching {
+                                    val dir = File(context.cacheDir, "attachments")
+                                    val file = withContext(Dispatchers.IO) {
+                                        persistFetchedAttachment(dir, url, fetch = ::fetchHttpsBytes)
+                                    } ?: return@runCatching null
+                                    withContext(Dispatchers.IO) { decodeInlineImage(file) }?.asImageBitmap()
+                                }.getOrNull()
                             },
                             readReceiptsEnabled = readReceiptsEnabled,
                             activityResumed = activityResumed,

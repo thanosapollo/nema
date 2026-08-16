@@ -1,5 +1,6 @@
 package org.thanosapollo.nema.xmpp.httpupload
 
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -107,5 +108,13 @@ class HttpFileUploadTest {
         assertEquals(HttpsFetchStep.Reject, httpsFetchStep(current, 200, null, 101, 100))
         assertEquals(HttpsFetchStep.ReadBody, httpsFetchStep(current, 200, null, -1, 100))
         assertEquals(HttpsFetchStep.ReadBody, httpsFetchStep(current, 200, null, 50, 100))
+    }
+
+    @Test
+    fun inlineImageOnlyInDirectChats() {
+        assertEquals(true, shouldRenderInlineImage(groupChat = false, mime = "image/png", name = "a.png"))
+        assertEquals(false, shouldRenderInlineImage(groupChat = true, mime = "image/png", name = "a.png"))
+        assertEquals(false, shouldRenderInlineImage(groupChat = false, mime = "application/pdf", name = "a.pdf"))
+        assertEquals(null, decodeInlineImage(File("/tmp/nema-missing-inline.png")))
     }
 }

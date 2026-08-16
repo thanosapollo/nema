@@ -2,6 +2,8 @@ package org.thanosapollo.nema.xmpp.httpupload
 
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import androidx.core.content.FileProvider
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -122,3 +124,26 @@ fun openCachedAttachment(context: Context, file: File, mime: String?): Boolean {
     }
     return runCatching { context.startActivity(intent) }.isSuccess
 }
+
+fun shouldRenderInlineImage(groupChat: Boolean, mime: String?, name: String?): Boolean =
+    !groupChat && isInlineImage(mime, name)
+
+const val MAX_INLINE_IMAGE_EDGE = 1280
+
+fun decodeInlineImage(file: File, maxEdge: Int = MAX_INLINE_IMAGE_EDGE): Bitmap? =
+    runCatching {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return@runCatching null
+        var sample = 1
+        while (bounds.outWidth / sample > maxEdge || bounds.outHeight / sample > maxEdge) {
+            sample *= 2
+        }
+        BitmapFactory.decodeFile(
+            file.absolutePath,
+            BitmapFactory.Options().apply {
+                inJustDecodeBounds = false
+                inSampleSize = sample
+            },
+        )
+    }.getOrNull()

@@ -146,6 +146,7 @@ import org.thanosapollo.nema.xmpp.blocking.PeerBlockingState
 import org.thanosapollo.nema.xmpp.blocking.PeerBlockingMutationResult
 import org.thanosapollo.nema.xmpp.httpupload.attachmentActionLabel
 import org.thanosapollo.nema.xmpp.httpupload.isInlineImage
+import org.thanosapollo.nema.xmpp.httpupload.shouldRenderInlineImage
 import org.thanosapollo.nema.xmpp.muc.roomSubtitle
 
 @Composable
@@ -190,6 +191,7 @@ fun DirectChatContent(
     onUploadFile: suspend (String, String?, ByteArray) -> org.thanosapollo.nema.xmpp.httpupload.UploadedFile? = { _, _, _ -> null },
     onUseAttachment: suspend (String, String?, String?) -> Boolean = { _, _, _ -> false },
     isAttachmentCached: (String) -> Boolean = { false },
+    onLoadInlineImage: suspend (String) -> ImageBitmap? = { null },
     readReceiptsEnabled: Boolean = false,
     activityResumed: Boolean = false,
     onMessageDisplayed: suspend (TimelineMessage) -> Boolean = { false },
@@ -594,6 +596,7 @@ fun DirectChatContent(
                             onContinueThread = { thread -> scope.launch { onContinueThread(thread) } },
                             onUseAttachment = onUseAttachment,
                             isAttachmentCached = isAttachmentCached,
+                            onLoadInlineImage = onLoadInlineImage,
                             onReply = { message ->
                                 val reference = requireNotNull(message.replyReferenceId)
                                 val base = composer.cancelCorrection()
@@ -1718,6 +1721,7 @@ fun MessageTimeline(
     onReplyAsThread: (TimelineMessage) -> Unit = {},
     onUseAttachment: suspend (String, String?, String?) -> Boolean = { _, _, _ -> false },
     isAttachmentCached: (String) -> Boolean = { false },
+    onLoadInlineImage: suspend (String) -> ImageBitmap? = { null },
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -1890,29 +1894,17 @@ fun MessageTimeline(
                                     )
                                 }
                                 message.attachmentUrl?.let { url ->
-                                    val image = isInlineImage(message.attachmentMime, message.attachmentName)
-                                    var downloaded by remember(url) {
-                                        mutableStateOf(isAttachmentCached(url))
-                                    }
-                                    OutlinedButton(
-                                        onClick = {
-                                            scope.launch {
-                                                val ok = runCatching {
-                                                    onUseAttachment(url, message.attachmentName, message.attachmentMime)
-                                                }.getOrDefault(false)
-                                                if (ok) downloaded = true
-                                            }
+                                    MessageAttachment(
+                                        url = url,
+                                        name = message.attachmentName,
+                                        mime = message.attachmentMime,
+                                        groupChat = conversationGroupChat || message.groupChat,
+                                        cached = isAttachmentCached(url),
+                                        onUse = {
+                                            onUseAttachment(url, message.attachmentName, message.attachmentMime)
                                         },
-                                        modifier = Modifier.testTag("message-attachment"),
-                                    ) {
-                                        Text(
-                                            attachmentActionLabel(
-                                                image = image,
-                                                downloaded = downloaded,
-                                                name = message.attachmentName,
-                                            ),
-                                        )
-                                    }
+                                        onLoadInline = { onLoadInlineImage(url) },
+                                    )
                                 }
                                 message.reply?.let { reply ->
                                     MessageReplyPreview(reply.senderLabel, reply.body)
@@ -2223,5 +2215,50 @@ private fun DeliveryPresentation.receiptCheck(): ReceiptCheck? {
             Color(receiptTickColor(read = true, bubbleArgb = background)),
         )
         else -> null
+    }
+}
+
+@Composable
+private fun MessageAttachment(
+    url: String,
+    name: String?,
+    mime: String?,
+    groupChat: Boolean,
+    cached: Boolean,
+    onUse: suspend () -> Boolean,
+    onLoadInline: suspend () -> ImageBitmap?,
+) {
+    val scope = rememberCoroutineScope()
+    val image = isInlineImage(mime, name)
+    var downloaded by remember(url) { mutableStateOf(cached) }
+    var preview by remember(url) { mutableStateOf<ImageBitmap?>(null) }
+    val inline = shouldRenderInlineImage(groupChat, mime, name)
+    LaunchedEffect(url, inline) {
+        if (!inline) return@LaunchedEffect
+        preview = runCatching { onLoadInline() }.getOrNull()
+    }
+    val open: () -> Unit = {
+        scope.launch {
+            val ok = runCatching { onUse() }.getOrDefault(false)
+            if (ok) downloaded = true
+        }
+        Unit
+    }
+    val bitmap = preview
+    if (bitmap != null) {
+        Image(
+            bitmap = bitmap,
+            contentDescription = name ?: "Image",
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 240.dp)
+                .clickable(role = Role.Button, onClick = open)
+                .testTag("message-inline-image"),
+            contentScale = ContentScale.Fit,
+        )
+    } else {
+        OutlinedButton(onClick = open, modifier = Modifier.testTag("message-attachment")) {
+            Text(attachmentActionLabel(image, downloaded, name))
+        }
     }
 }

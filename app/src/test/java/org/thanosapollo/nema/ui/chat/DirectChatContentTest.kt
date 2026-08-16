@@ -15,6 +15,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.SaverScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.SemanticsActions
@@ -724,6 +725,54 @@ class DirectChatContentTest {
         composeRule.onNodeWithText("Download notes.txt", useUnmergedTree = true).performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithText("Download notes.txt", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun directChatImageRendersInline() {
+        val preview = android.graphics.Bitmap.createBitmap(2, 2, android.graphics.Bitmap.Config.ARGB_8888)
+            .asImageBitmap()
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(
+                        message("photo", outgoing = false).copy(
+                            attachmentUrl = "https://example.org/pic.png",
+                            attachmentName = "pic.png",
+                            attachmentMime = "image/png",
+                        ),
+                    ),
+                    onLoadInlineImage = { preview },
+                )
+            }
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("message-inline-image", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithTag("message-attachment", useUnmergedTree = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun roomImageKeepsDownloadButton() {
+        val preview = android.graphics.Bitmap.createBitmap(2, 2, android.graphics.Bitmap.Config.ARGB_8888)
+            .asImageBitmap()
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(
+                        message("photo", outgoing = false).copy(
+                            attachmentUrl = "https://example.org/pic.png",
+                            attachmentName = "pic.png",
+                            attachmentMime = "image/png",
+                            groupChat = true,
+                        ),
+                    ),
+                    conversationGroupChat = true,
+                    onLoadInlineImage = { preview },
+                )
+            }
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("message-inline-image", useUnmergedTree = true).assertDoesNotExist()
+        composeRule.onNodeWithText("Download pic.png", useUnmergedTree = true).assertIsDisplayed()
     }
 
     @Test
