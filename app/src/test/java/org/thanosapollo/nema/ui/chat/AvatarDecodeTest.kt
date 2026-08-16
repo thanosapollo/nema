@@ -55,4 +55,17 @@ class AvatarDecodeTest {
         assertNotNull(decoded)
         decoded!!.recycle()
     }
+
+    @Test
+    fun equalPhotoBytesReuseDecodedBitmap() {
+        val small = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
+        small.eraseColor(Color.MAGENTA)
+        val stream = ByteArrayOutputStream()
+        small.compress(Bitmap.CompressFormat.PNG, 100, stream)
+        small.recycle()
+        val bytes = stream.toByteArray()
+        val first = requireNotNull(cachedAvatarBitmap(bytes.copyOf()))
+        val second = requireNotNull(cachedAvatarBitmap(bytes.copyOf()))
+        assertTrue(first === second)
+    }
 }

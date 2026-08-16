@@ -14,10 +14,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import java.util.LinkedHashMap
 
 @Composable
 internal fun PeerAvatar(
@@ -26,8 +28,8 @@ internal fun PeerAvatar(
     modifier: Modifier = Modifier,
     size: Dp = 40.dp,
 ) {
-    val bitmap = remember(photoBytes) {
-        photoBytes?.let(::decodeAvatarBytes)?.asImageBitmap()
+    val bitmap = remember(photoBytes?.size, photoBytes?.contentHashCode()) {
+        cachedAvatarBitmap(photoBytes)
     }
     Box(
         modifier = modifier
@@ -74,6 +76,22 @@ internal fun decodeAvatarBytes(
     }.getOrNull()
 }
 
+internal fun cachedAvatarBitmap(
+    bytes: ByteArray?,
+    maxEdge: Int = LIST_AVATAR_EDGE,
+): ImageBitmap? {
+    if (bytes == null || bytes.isEmpty()) return null
+    val key = AvatarCacheKey(bytes.size, bytes.contentHashCode(), maxEdge)
+    synchronized(avatarBitmaps) {
+        avatarBitmaps[key]?.let { return it }
+    }
+    val decoded = decodeAvatarBytes(bytes, maxEdge)?.asImageBitmap() ?: return null
+    synchronized(avatarBitmaps) {
+        avatarBitmaps[key] = decoded
+    }
+    return decoded
+}
+
 internal fun avatarGlyph(label: String): String {
     val trimmed = label.trim()
     if (trimmed.isEmpty()) return "?"
@@ -81,4 +99,12 @@ internal fun avatarGlyph(label: String): String {
     return ch.uppercaseChar().toString()
 }
 
+private data class AvatarCacheKey(val size: Int, val hash: Int, val edge: Int)
+
+private val avatarBitmaps = object : LinkedHashMap<AvatarCacheKey, ImageBitmap>(16, 0.75f, true) {
+    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<AvatarCacheKey, ImageBitmap>?): Boolean =
+        size > 48
+}
+
+private const val LIST_AVATAR_EDGE = 128
 private const val MAX_AVATAR_EDGE = 256

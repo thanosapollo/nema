@@ -69,6 +69,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.referentialEqualityPolicy
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -1725,25 +1726,35 @@ fun MessageTimeline(
     var viewportRestored by remember { mutableStateOf(initialViewport == null) }
     var visibleMessageIds by remember { mutableStateOf(emptySet<String>()) }
     var reportedMarkerTargets by remember { mutableStateOf(emptySet<String>()) }
+    val currentMessages = remember {
+        mutableStateOf(messages, referentialEqualityPolicy())
+    }
+    currentMessages.value = messages
     val latestId = messages.lastOrNull()?.id
-    val viewportMessageIds = messages.map(TimelineMessage::id)
-    val markerEvidence = messages.map { Triple(it.id, it.markable, it.markerTargetId) }
-    LaunchedEffect(initialViewport, viewportMessageIds, viewportRestored) {
-        if (!viewportRestored && messages.isNotEmpty()) {
+    var markerSignature = 0
+    for (message in messages) {
+        if (message.markable) {
+            markerSignature = 31 * markerSignature + message.id.hashCode()
+            markerSignature = 31 * markerSignature + (message.markerTargetId?.hashCode() ?: 0)
+        }
+    }
+    LaunchedEffect(initialViewport, viewportRestored, messages.isNotEmpty()) {
+        if (!viewportRestored && currentMessages.value.isNotEmpty()) {
             val anchor = requireNotNull(initialViewport)
-            val index = restoredTimelineIndex(messages, anchor)
+            val index = restoredTimelineIndex(currentMessages.value, anchor)
             listState.scrollToItem(index, anchor.offset)
             viewportRestored = true
         }
     }
-    LaunchedEffect(listState, viewportMessageIds, viewportRestored) {
-        if (!viewportRestored || messages.isEmpty()) return@LaunchedEffect
+    LaunchedEffect(listState, viewportRestored) {
+        if (!viewportRestored) return@LaunchedEffect
         snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
             .distinctUntilChanged()
             .collect { (index, offset) ->
-                val reversed = viewportMessageIds.asReversed()
+                val reversed = currentMessages.value.asReversed()
+                if (reversed.isEmpty()) return@collect
                 val bounded = index.coerceIn(0, reversed.lastIndex)
-                currentOnViewportChanged(TimelineViewportAnchor(reversed[bounded], offset, bounded))
+                currentOnViewportChanged(TimelineViewportAnchor(reversed[bounded].id, offset, bounded))
             }
     }
     LaunchedEffect(listState, viewportRestored) {
@@ -1757,16 +1768,17 @@ fun MessageTimeline(
         }.distinctUntilChanged().collect { visibleMessageIds = it }
     }
     LaunchedEffect(
-        markerEvidence,
         visibleMessageIds,
         viewportRestored,
         readReceiptsEnabled,
         activityResumed,
         conversationGroupChat,
+        latestId,
+        markerSignature,
     ) {
         if (!viewportRestored) return@LaunchedEffect
         displayedMarkerCandidates(
-            messages = messages,
+            messages = currentMessages.value,
             visibleMessageIds = visibleMessageIds,
             enabled = readReceiptsEnabled,
             resumed = activityResumed,
@@ -1812,7 +1824,11 @@ fun MessageTimeline(
                 .testTag("message-timeline"),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            items(messages.asReversed(), key = TimelineMessage::id) { message ->
+            items(
+                items = messages.asReversed(),
+                key = TimelineMessage::id,
+                contentType = { message -> if (message.outgoing) 1 else 0 },
+            ) { message ->
                 var messageActionsOpen by remember(message.id) { mutableStateOf(false) }
                 val (bubbleContainerColor, bubbleContentColor) = messageBubbleColors(message.outgoing)
                 val quote = remember(message.body) { message.body.leadingManualQuote() }
