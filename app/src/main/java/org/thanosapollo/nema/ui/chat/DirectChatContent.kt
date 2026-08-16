@@ -102,7 +102,12 @@ import androidx.compose.ui.semantics.error
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
@@ -1875,13 +1880,13 @@ fun MessageTimeline(
                                     MessageReplyPreview(reply.senderLabel, reply.body)
                                 }
                                 if (segments.none { it is BodySegment.Quote }) {
-                                    Text(message.body, style = MaterialTheme.typography.bodyMedium)
+                                    LinkedMessageText(message.body, style = MaterialTheme.typography.bodyMedium)
                                 } else {
                                     segments.forEach { segment ->
                                         when (segment) {
                                             is BodySegment.Plain ->
                                                 segment.text.takeIf(String::isNotEmpty)?.let {
-                                                    Text(it, style = MaterialTheme.typography.bodyMedium)
+                                                    LinkedMessageText(it, style = MaterialTheme.typography.bodyMedium)
                                                 }
                                             is BodySegment.Quote ->
                                                 ManualQuoteBlock(segment.text, segment.depth)
@@ -2073,12 +2078,37 @@ private fun ManualQuoteBlock(body: String, depth: Int = 1) {
                 .heightIn(min = 28.dp)
                 .background(MaterialTheme.colorScheme.onSurfaceVariant),
         )
-        Text(
+        LinkedMessageText(
             body,
             modifier = Modifier.padding(start = 8.dp),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             style = MaterialTheme.typography.bodyMedium,
         )
+    }
+}
+
+@Composable
+private fun LinkedMessageText(
+    body: String,
+    style: TextStyle,
+    modifier: Modifier = Modifier,
+    color: Color = Color.Unspecified,
+) {
+    val annotated = remember(body) { linkedMessageBody(body) }
+    Text(text = annotated, modifier = modifier, color = color, style = style)
+}
+
+internal fun linkedMessageBody(body: String) = buildAnnotatedString {
+    parseHttpLinks(body).forEach { run ->
+        when (run) {
+            is TextRun.Plain -> append(run.text)
+            is TextRun.Url -> {
+                val start = length
+                append(run.text)
+                addLink(LinkAnnotation.Url(run.text), start, length)
+                addStyle(SpanStyle(textDecoration = TextDecoration.Underline), start, length)
+            }
+        }
     }
 }
 
