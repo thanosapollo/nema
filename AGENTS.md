@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Public guidance for contributors and coding agents working on Nema.
+Public guidance for coding agents working on Nema.
 
 ## Project
 
@@ -45,13 +45,3 @@ data. Do not push unless publication is explicitly requested.
 ```
 
 The debug APK is `app/build/outputs/apk/debug/app-debug.apk`.
-
-## Contributions
-
-Send patches to patches@thanosapollo.org with a subject like
-`[PATCH nema] Short description`.
-
-Send bugs to bugs@thanosapollo.org with a subject like
-`[BUG nema] Short description`.
-
-See `CONTRIBUTING.org` for the full patch and bug-report process.
