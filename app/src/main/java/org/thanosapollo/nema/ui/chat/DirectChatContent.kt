@@ -86,6 +86,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.layout.ContentScale
@@ -101,6 +102,7 @@ import androidx.compose.ui.semantics.error
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
@@ -1868,8 +1870,14 @@ fun MessageTimeline(
                         ) {
                             Column(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
                                 if (message.groupChat && !message.outgoing) {
+                                    val nick = message.senderJid.substringAfterLast('/').ifEmpty { message.senderJid }
+                                    val nickColor = remember(nick, bubbleContainerColor) {
+                                        Color(mucNickColor(nick, bubbleContainerColor.toArgb()))
+                                    }
                                     Text(
-                                        message.senderJid.substringAfterLast('/').ifEmpty { message.senderJid },
+                                        nick,
+                                        color = nickColor,
+                                        fontWeight = FontWeight.SemiBold,
                                         style = MaterialTheme.typography.labelSmall,
                                     )
                                 }
