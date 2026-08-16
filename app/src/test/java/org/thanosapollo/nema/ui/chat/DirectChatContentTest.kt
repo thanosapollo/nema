@@ -1399,7 +1399,7 @@ class DirectChatContentTest {
         }
 
         composeRule.onNodeWithContentDescription("Send").performTouchInput { longClick() }
-        composeRule.onNodeWithText("Send as thread").performClick()
+        composeRule.onNodeWithText("Send as thread").assertDoesNotExist()
         composeRule.onNodeWithContentDescription("Send").assertIsNotEnabled()
         composeRule.onNodeWithContentDescription("Send").performTouchInput { click() }
         composeRule.waitForIdle()
@@ -1560,7 +1560,7 @@ class DirectChatContentTest {
             .assertHeightIsEqualTo(48.dp)
             .assertIsEnabled()
         composeRule.onNodeWithContentDescription("Send").performTouchInput { longClick() }
-        composeRule.onNodeWithText("Send as thread").performClick()
+        composeRule.onNodeWithText("Send as thread").assertDoesNotExist()
         composeRule.waitForIdle()
 
         assertEquals("root", threaded?.body)

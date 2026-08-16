@@ -790,7 +790,6 @@ fun DirectChatContent(
                                 }
                             }
                         }
-                        var sendActionsOpen by remember { mutableStateOf(false) }
                         Box {
                             val sendEnabled =
                                 (composer.body.isNotBlank() || composer.attachmentUrl != null) &&
@@ -804,11 +803,10 @@ fun DirectChatContent(
                                         role = Role.Button,
                                         onLongClickLabel = "Send as thread",
                                         onClick = { sendWith(onSend) },
-                                        onLongClick = if (conversationKey.thread == null) {
-                                            if (composer.correction == null) {
-                                                { sendActionsOpen = true }
-                                            } else {
-                                                null
+                                        onLongClick = if (conversationKey.thread == null && composer.correction == null) {
+                                            {
+                                                sendWith(onSendAsNewThread)
+                                                focusComposerWhenReady = true
                                             }
                                         } else {
                                             null
@@ -841,18 +839,6 @@ fun DirectChatContent(
                                         )
                                     }
                                 }
-                            }
-                            DropdownMenu(
-                                expanded = sendActionsOpen,
-                                onDismissRequest = { sendActionsOpen = false },
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text("Send as thread") },
-                                    onClick = {
-                                        sendActionsOpen = false
-                                        sendWith(onSendAsNewThread)
-                                    },
-                                )
                             }
                         }
                     }
