@@ -95,7 +95,6 @@ import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -189,6 +188,8 @@ fun DirectChatContent(
     ownPhotoBytes: ByteArray? = null,
     onOpenOwnProfile: () -> Unit = {},
     onUploadFile: suspend (String, String?, ByteArray) -> org.thanosapollo.nema.xmpp.httpupload.UploadedFile? = { _, _, _ -> null },
+    onUseAttachment: suspend (String, String?, String?) -> Boolean = { _, _, _ -> false },
+    isAttachmentCached: (String) -> Boolean = { false },
     readReceiptsEnabled: Boolean = false,
     activityResumed: Boolean = false,
     onMessageDisplayed: suspend (TimelineMessage) -> Boolean = { false },
@@ -591,6 +592,8 @@ fun DirectChatContent(
                                 timelineViewports[conversationKey] = anchor
                             },
                             onContinueThread = { thread -> scope.launch { onContinueThread(thread) } },
+                            onUseAttachment = onUseAttachment,
+                            isAttachmentCached = isAttachmentCached,
                             onReply = { message ->
                                 val reference = requireNotNull(message.replyReferenceId)
                                 val base = composer.cancelCorrection()
@@ -1713,6 +1716,8 @@ fun MessageTimeline(
     onQuote: (TimelineMessage) -> Unit = {},
     onEdit: (TimelineMessage) -> Unit = {},
     onReplyAsThread: (TimelineMessage) -> Unit = {},
+    onUseAttachment: suspend (String, String?, String?) -> Boolean = { _, _, _ -> false },
+    isAttachmentCached: (String) -> Boolean = { false },
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
@@ -1885,16 +1890,25 @@ fun MessageTimeline(
                                     )
                                 }
                                 message.attachmentUrl?.let { url ->
-                                    val uriHandler = LocalUriHandler.current
                                     val image = isInlineImage(message.attachmentMime, message.attachmentName)
+                                    var downloaded by remember(url) {
+                                        mutableStateOf(isAttachmentCached(url))
+                                    }
                                     OutlinedButton(
-                                        onClick = { runCatching { uriHandler.openUri(url) } },
+                                        onClick = {
+                                            scope.launch {
+                                                val ok = runCatching {
+                                                    onUseAttachment(url, message.attachmentName, message.attachmentMime)
+                                                }.getOrDefault(false)
+                                                if (ok) downloaded = true
+                                            }
+                                        },
                                         modifier = Modifier.testTag("message-attachment"),
                                     ) {
                                         Text(
                                             attachmentActionLabel(
                                                 image = image,
-                                                downloaded = false,
+                                                downloaded = downloaded,
                                                 name = message.attachmentName,
                                             ),
                                         )

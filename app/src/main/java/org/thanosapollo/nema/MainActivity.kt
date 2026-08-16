@@ -29,10 +29,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.thanosapollo.nema.account.AccountConfiguration
 import org.thanosapollo.nema.account.LoginFormInput
 import org.thanosapollo.nema.chat.DirectChatPresenter
@@ -50,6 +53,10 @@ import org.thanosapollo.nema.ui.showLoginSessionChrome
 import org.thanosapollo.nema.ui.theme.AppearanceScope
 import org.thanosapollo.nema.ui.theme.AppearanceSpec
 import org.thanosapollo.nema.ui.theme.NemaTheme
+import org.thanosapollo.nema.xmpp.httpupload.cachedAttachment
+import org.thanosapollo.nema.xmpp.httpupload.fetchHttpsBytes
+import org.thanosapollo.nema.xmpp.httpupload.openCachedAttachment
+import org.thanosapollo.nema.xmpp.httpupload.persistFetchedAttachment
 import org.thanosapollo.nema.xmpp.transport.AccountId
 
 class MainActivity : ComponentActivity() {
@@ -361,6 +368,18 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean, activityRe
                                 application.sessionRuntime.uploadHttpFile(
                                     org.thanosapollo.nema.xmpp.httpupload.LocalUploadRequest(name, mime, bytes),
                                 )
+                            },
+                            onUseAttachment = { url, _, mime ->
+                                runCatching {
+                                    val dir = File(context.cacheDir, "attachments")
+                                    val file = withContext(Dispatchers.IO) {
+                                        persistFetchedAttachment(dir, url, fetch = ::fetchHttpsBytes)
+                                    }
+                                    file != null && openCachedAttachment(context, file, mime)
+                                }.getOrDefault(false)
+                            },
+                            isAttachmentCached = { url ->
+                                cachedAttachment(File(context.cacheDir, "attachments"), url) != null
                             },
                             readReceiptsEnabled = readReceiptsEnabled,
                             activityResumed = activityResumed,

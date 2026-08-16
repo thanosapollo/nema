@@ -665,6 +665,68 @@ class DirectChatContentTest {
     }
 
     @Test
+    fun attachmentDownloadBecomesOpenAfterSuccessfulUse() {
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(
+                        message("file body", outgoing = false).copy(
+                            attachmentUrl = "https://example.org/abc",
+                            attachmentName = "notes.txt",
+                            attachmentSize = 42,
+                        ),
+                    ),
+                    onUseAttachment = { _, _, _ -> true },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Download notes.txt", useUnmergedTree = true).performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Open notes.txt", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun cachedAttachmentShowsOpenWithoutDownload() {
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(
+                        message("file body", outgoing = false).copy(
+                            attachmentUrl = "https://example.org/abc",
+                            attachmentName = "notes.txt",
+                        ),
+                    ),
+                    isAttachmentCached = { it == "https://example.org/abc" },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Open notes.txt", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun attachmentDownloadFailureKeepsDownloadLabel() {
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(
+                        message("file body", outgoing = false).copy(
+                            attachmentUrl = "https://example.org/abc",
+                            attachmentName = "notes.txt",
+                        ),
+                    ),
+                    onUseAttachment = { _, _, _ -> error("timeout") },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Download notes.txt", useUnmergedTree = true).performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Download notes.txt", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test
     fun quoteActionPlacesQuoteBeforeDraftAndLeavesAnswerOutsideQuote() {
         composeRule.setContent {
             MaterialTheme {

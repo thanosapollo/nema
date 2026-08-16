@@ -35,4 +35,77 @@ class HttpFileUploadTest {
         assertEquals("Download file", attachmentActionLabel(image = false, downloaded = false, name = null))
         assertEquals("Download image", attachmentActionLabel(image = true, downloaded = false, name = " "))
     }
+
+    @Test
+    fun onlyHttpsAttachmentUrlsAreFetched() {
+        assertEquals(
+            "https://example.org/abc",
+            httpsAttachmentUrl("https://example.org/abc"),
+        )
+        assertEquals(null, httpsAttachmentUrl("http://example.org/abc"))
+        assertEquals(null, httpsAttachmentUrl("https://user:pass@example.org/abc"))
+        assertEquals(null, httpsAttachmentUrl("javascript:alert(1)"))
+    }
+
+    @Test
+    fun cacheRoundTripStoresFetchedHttpsBytes() {
+        val dir = createTempDir(prefix = "nema-attach")
+        try {
+            val url = "https://example.org/abc"
+            assertEquals(null, cachedAttachment(dir, url))
+            val stored = persistFetchedAttachment(dir, url) { "hello".toByteArray() }
+            assertEquals("hello", stored?.readText())
+            assertEquals(stored, cachedAttachment(dir, url))
+            val reused = persistFetchedAttachment(dir, url) { error("must not refetch") }
+            assertEquals(stored, reused)
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun persistRejectsEmptyOrOversizedPayload() {
+        val dir = createTempDir(prefix = "nema-attach")
+        try {
+            assertEquals(null, persistFetchedAttachment(dir, "https://example.org/a") { ByteArray(0) })
+            assertEquals(
+                null,
+                persistFetchedAttachment(dir, "https://example.org/b", maxBytes = 4) { "hello".toByteArray() },
+            )
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun persistSwallowsFetchExceptions() {
+        val dir = createTempDir(prefix = "nema-attach")
+        try {
+            assertEquals(
+                null,
+                persistFetchedAttachment(dir, "https://example.org/boom") { error("dns") },
+            )
+        } finally {
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun httpsFetchStepFollowsHttpsRedirectsAndRejectsUnsafeOrFailedResponses() {
+        val current = "https://example.org/start"
+        assertEquals(
+            HttpsFetchStep.Follow("https://example.org/next"),
+            httpsFetchStep(current, 302, "https://example.org/next", -1, 100),
+        )
+        assertEquals(
+            HttpsFetchStep.Follow("https://example.org/rel"),
+            httpsFetchStep(current, 301, "/rel", -1, 100),
+        )
+        assertEquals(HttpsFetchStep.Reject, httpsFetchStep(current, 302, "http://evil.example/x", -1, 100))
+        assertEquals(HttpsFetchStep.Reject, httpsFetchStep(current, 302, null, -1, 100))
+        assertEquals(HttpsFetchStep.Reject, httpsFetchStep(current, 404, null, 10, 100))
+        assertEquals(HttpsFetchStep.Reject, httpsFetchStep(current, 200, null, 101, 100))
+        assertEquals(HttpsFetchStep.ReadBody, httpsFetchStep(current, 200, null, -1, 100))
+        assertEquals(HttpsFetchStep.ReadBody, httpsFetchStep(current, 200, null, 50, 100))
+    }
 }
