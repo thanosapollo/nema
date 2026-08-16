@@ -162,6 +162,9 @@ abstract class MessageDao {
     @Query("SELECT * FROM peers WHERE accountId = :accountId AND room = 1 ORDER BY jid")
     abstract fun observeRooms(accountId: String): Flow<List<PeerEntity>>
 
+    @Query("SELECT * FROM peers WHERE accountId = :accountId AND room = 1 ORDER BY jid")
+    abstract suspend fun rooms(accountId: String): List<PeerEntity>
+
     @Query("SELECT * FROM peers WHERE accountId = :accountId ORDER BY jid")
     abstract fun observePeers(accountId: String): Flow<List<PeerEntity>>
 
@@ -592,6 +595,54 @@ abstract class MessageDao {
         """,
     )
     abstract fun observeConversationSummaries(accountId: String): Flow<List<ConversationListRow>>
+
+    @Query(
+        """
+        SELECT messages.localMessageId AS localMessageId,
+          messages.peerJid AS peerJid,
+          COALESCE(
+            (
+              SELECT correction.body
+              FROM messages AS correction
+              WHERE correction.accountId = messages.accountId
+                AND correction.correctionTargetMessageId = messages.localMessageId
+              ORDER BY correction.sentAtEpochMs IS NULL,
+                correction.sentAtEpochMs DESC,
+                correction.localSequence DESC,
+                correction.localMessageId DESC
+              LIMIT 1
+            ),
+            messages.body
+          ) AS preview,
+          messages.localSequence AS localSequence,
+          messages.messageKind AS messageKind,
+          messages.sentAtEpochMs AS sentAtEpochMs,
+          messages.sentTimeSource AS sentTimeSource,
+          NULL AS conversationArchiveOrdinal,
+          peers.displayName AS displayName,
+          peers.localNickname AS localNickname,
+          peers.photoBytes AS photoBytes,
+          peers.photoMime AS photoMime,
+          COALESCE(peers.room, 0) AS room
+        FROM messages
+        INNER JOIN (
+          SELECT peerJid, MAX(localSequence) AS localSequence
+          FROM messages
+          WHERE accountId = :accountId
+            AND messageKind IN ('CHAT', 'GROUPCHAT')
+            AND replaceId IS NULL
+          GROUP BY peerJid
+        ) AS latest
+          ON latest.peerJid = messages.peerJid
+         AND latest.localSequence = messages.localSequence
+        LEFT JOIN peers
+          ON peers.accountId = messages.accountId
+         AND peers.jid = messages.peerJid
+        WHERE messages.accountId = :accountId
+          AND messages.replaceId IS NULL
+        """,
+    )
+    abstract suspend fun cachedConversationSummaries(accountId: String): List<ConversationListRow>
 
     @Query(
         """

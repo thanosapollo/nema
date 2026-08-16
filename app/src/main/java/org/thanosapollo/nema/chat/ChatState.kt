@@ -285,41 +285,54 @@ class ChatRepository(database: NemaDatabase) {
             dao.observeConversationSummaries(accountId),
             dao.observeRooms(accountId),
         ) { rows, rooms ->
-            val latestRows = rows.sortedWith(
-                compareByDescending<ConversationListRow> {
-                    it.sentAtEpochMs ?: Long.MIN_VALUE
-                }.thenByDescending { it.localSequence }.thenBy { it.peerJid },
+            conversationSummaries(rows, rooms)
+        }
+
+    suspend fun cachedConversations(accountId: String): List<ConversationSummary> =
+        conversationSummaries(
+            dao.cachedConversationSummaries(accountId),
+            dao.rooms(accountId),
+        )
+
+    private fun conversationSummaries(
+        rows: List<ConversationListRow>,
+        rooms: List<PeerEntity>,
+    ): List<ConversationSummary> {
+        val latestRows = rows.sortedWith(
+            compareByDescending<ConversationListRow> {
+                it.sentAtEpochMs ?: Long.MIN_VALUE
+            }.thenByDescending { it.localSequence }.thenBy { it.peerJid },
+        )
+        val present = latestRows.map { it.peerJid }.toSet()
+        val summaries = latestRows.map { row ->
+            ConversationSummary(
+                peerJid = row.peerJid,
+                preview = row.preview,
+                localSequence = row.localSequence,
+                displayName = row.displayName,
+                localNickname = row.localNickname,
+                photoBytes = row.photoBytes,
+                photoMime = row.photoMime,
+                groupChat = row.groupChat,
+                sentAtEpochMs = row.sentAtEpochMs,
             )
-            val present = latestRows.map { it.peerJid }.toSet()
-            val summaries = latestRows.map { row ->
+        }
+        val emptyRooms = rooms
+            .filter { it.jid !in present }
+            .map { room ->
                 ConversationSummary(
-                    peerJid = row.peerJid,
-                    preview = row.preview,
-                    localSequence = row.localSequence,
-                    displayName = row.displayName,
-                    localNickname = row.localNickname,
-                    photoBytes = row.photoBytes,
-                    photoMime = row.photoMime,
-                    groupChat = row.groupChat,
-                    sentAtEpochMs = row.sentAtEpochMs,
+                    peerJid = room.jid,
+                    preview = "",
+                    localSequence = 0,
+                    displayName = room.displayName,
+                    localNickname = room.localNickname,
+                    photoBytes = room.photoBytes,
+                    photoMime = room.photoMime,
+                    groupChat = true,
                 )
             }
-            val emptyRooms = rooms
-                .filter { it.jid !in present }
-                .map { room ->
-                    ConversationSummary(
-                        peerJid = room.jid,
-                        preview = "",
-                        localSequence = 0,
-                        displayName = room.displayName,
-                        localNickname = room.localNickname,
-                        photoBytes = room.photoBytes,
-                        photoMime = room.photoMime,
-                        groupChat = true,
-                    )
-                }
-            summaries + emptyRooms
-        }
+        return summaries + emptyRooms
+    }
 
     fun observeTimeline(accountId: String, peerJid: String): Flow<List<TimelineMessage>> =
         observeTimeline(DirectConversationKey(accountId, peerJid))
@@ -523,7 +536,10 @@ class DirectChatPresenter(
     }
 
     val state = combine(
-        repository.observeConversations(account.id.value),
+        flow {
+            emit(repository.cachedConversations(account.id.value))
+            emitAll(repository.observeConversations(account.id.value))
+        },
         selectedConversation,
     ) { conversations, selected ->
         val groupChat = selected.peer?.room == true || selected.messages.any { it.groupChat }

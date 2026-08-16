@@ -91,6 +91,34 @@ class HomeContentTest {
     }
 
     @Test
+    fun cachedConversationsShowBeforeReadyFlag() {
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = DirectChatState(
+                        accountId = "account-a",
+                        conversations = listOf(
+                            ConversationSummary("alice@example.org", "hi", 1, "Alice"),
+                        ),
+                        conversationsReady = false,
+                    ),
+                    connectionStatus = "Connecting",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                    ownLabel = "me@example.org",
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Alice").assertIsDisplayed()
+        composeRule.onNodeWithText("hi").assertIsDisplayed()
+        composeRule.onNodeWithText("Loading conversations").assertDoesNotExist()
+        composeRule.onNodeWithText("No conversations").assertDoesNotExist()
+    }
+
+    @Test
     fun searchFiltersConversationsAndNewChatOpensDialog() {
         composeRule.setContent {
             MaterialTheme {

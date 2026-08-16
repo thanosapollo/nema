@@ -93,6 +93,20 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
+    fun cachedConversationsReadSqliteWithoutArchiveRanking() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(incoming(ACCOUNT, "hello", "cached body"))
+        database.messageDao().insertPeer(
+            PeerEntity(ACCOUNT, "room@conference.example.org", room = true),
+        )
+
+        val cached = ChatRepository(database).cachedConversations(ACCOUNT)
+        assertEquals(listOf(PEER, "room@conference.example.org"), cached.map(ConversationSummary::peerJid))
+        assertEquals(listOf("cached body", ""), cached.map(ConversationSummary::preview))
+        assertEquals(listOf(false, true), cached.map(ConversationSummary::groupChat))
+    }
+
+    @Test
     fun correctionProjectsOneStableEditedMessageAndUpdatedPreview() = runBlocking {
         val store = MessageStore(database)
         store.ingest(
@@ -1492,6 +1506,22 @@ class ChatRepositoryPresenterTest {
 
         assertEquals(false, presenter.state.value.conversationsReady)
         assertTrue(presenter.state.first { it.conversationsReady }.conversations.isEmpty())
+        presenter.close()
+    }
+
+    @Test
+    fun presenterShowsSqliteConversationsOnFirstReadyState() = runBlocking {
+        MessageStore(database).ingest(incoming(ACCOUNT, "cached", "hello from sqlite"))
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = ChatRepository(database),
+            scope = scope,
+            enqueue = { _, _ -> true },
+        )
+
+        val state = presenter.state.first { it.conversationsReady }
+        assertEquals(listOf(PEER), state.conversations.map(ConversationSummary::peerJid))
+        assertEquals(listOf("hello from sqlite"), state.conversations.map(ConversationSummary::preview))
         presenter.close()
     }
 
