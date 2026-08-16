@@ -38,3 +38,20 @@ fun attachmentCaption(name: String?, url: String?, size: Long?): String {
     val label = attachmentPreview(name, url)
     return if (size == null || size < 0) label else "$label · $size B"
 }
+
+fun isInlineImage(mime: String?, name: String?): Boolean {
+    val type = mime?.substringBefore(';')?.trim()?.lowercase()
+    if (type == "image/svg+xml") return false
+    if (type?.startsWith("image/") == true) return true
+    val ext = name?.substringAfterLast('.', missingDelimiterValue = "")?.lowercase()
+    return ext in IMAGE_EXTENSIONS
+}
+
+fun attachmentActionLabel(image: Boolean, downloaded: Boolean, name: String?): String {
+    val labeled = name?.trim().orEmpty()
+    val verb = if (downloaded) "Open" else "Download"
+    if (labeled.isNotEmpty()) return "$verb $labeled"
+    return if (image) "$verb image" else "$verb file"
+}
+
+private val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp")

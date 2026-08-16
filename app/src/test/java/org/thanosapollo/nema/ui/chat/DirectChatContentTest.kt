@@ -660,7 +660,7 @@ class DirectChatContentTest {
         }
 
         composeRule.onNodeWithTag("message-attachment", useUnmergedTree = true).assertIsDisplayed()
-        composeRule.onNodeWithText("notes.txt · 42 B", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithText("Download notes.txt", useUnmergedTree = true).assertIsDisplayed()
         composeRule.onNodeWithTag("message-attachment", useUnmergedTree = true).assertHasClickAction()
     }
 

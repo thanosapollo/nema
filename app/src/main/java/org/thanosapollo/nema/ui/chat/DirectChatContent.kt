@@ -55,6 +55,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
@@ -144,7 +145,8 @@ import org.thanosapollo.nema.ui.theme.readableOn
 import org.thanosapollo.nema.ui.theme.toComposeColor
 import org.thanosapollo.nema.xmpp.blocking.PeerBlockingState
 import org.thanosapollo.nema.xmpp.blocking.PeerBlockingMutationResult
-import org.thanosapollo.nema.xmpp.httpupload.attachmentCaption
+import org.thanosapollo.nema.xmpp.httpupload.attachmentActionLabel
+import org.thanosapollo.nema.xmpp.httpupload.isInlineImage
 import org.thanosapollo.nema.xmpp.muc.roomSubtitle
 
 @Composable
@@ -1884,15 +1886,19 @@ fun MessageTimeline(
                                 }
                                 message.attachmentUrl?.let { url ->
                                     val uriHandler = LocalUriHandler.current
-                                    Text(
-                                        attachmentCaption(message.attachmentName, url, message.attachmentSize),
-                                        style = MaterialTheme.typography.labelMedium,
-                                        modifier = Modifier
-                                            .clickable(role = Role.Button) {
-                                                runCatching { uriHandler.openUri(url) }
-                                            }
-                                            .testTag("message-attachment"),
-                                    )
+                                    val image = isInlineImage(message.attachmentMime, message.attachmentName)
+                                    OutlinedButton(
+                                        onClick = { runCatching { uriHandler.openUri(url) } },
+                                        modifier = Modifier.testTag("message-attachment"),
+                                    ) {
+                                        Text(
+                                            attachmentActionLabel(
+                                                image = image,
+                                                downloaded = false,
+                                                name = message.attachmentName,
+                                            ),
+                                        )
+                                    }
                                 }
                                 message.reply?.let { reply ->
                                     MessageReplyPreview(reply.senderLabel, reply.body)
