@@ -71,11 +71,19 @@ enum class ArchivePageStatus {
     RETRYABLE_ERROR,
 }
 
+data class InsertedInbound(
+    val peerJid: String,
+    val preview: String,
+    val inbound: Boolean,
+    val groupChat: Boolean,
+)
+
 data class ArchivePageResult(
     val status: ArchivePageStatus,
     val cursor: ArchiveCursorEntity,
     val ingested: Int,
     val inserted: Int = 0,
+    val insertedInbound: List<InsertedInbound> = emptyList(),
 )
 
 internal class ArchivePageRejectedException(message: String) : Exception(message)

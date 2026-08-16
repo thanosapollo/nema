@@ -3,6 +3,8 @@
     <string name="app_name">Nema</string>
     <string name="connection_channel_name">Connection</string>
     <string name="connection_channel_description">Keeps remote messages connected</string>
+    <string name="message_channel_name">Messages</string>
+    <string name="message_channel_description">Incoming messages</string>
     <string name="connection_notification_title">Nema connection</string>
     <string name="connection_starting">Starting</string>
     <string name="stop_connection">Stop</string>

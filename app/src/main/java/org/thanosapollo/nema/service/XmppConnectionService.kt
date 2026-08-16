@@ -48,6 +48,11 @@ import org.thanosapollo.nema.chat.OutboxDispatcher
 import org.thanosapollo.nema.chat.OutboxStorageFailure
 import org.thanosapollo.nema.chat.DraftSnapshot
 import org.thanosapollo.nema.chat.DirectConversationKey
+import org.thanosapollo.nema.chat.shouldNotifyInsertedInbound
+import org.thanosapollo.nema.storage.ArchiveDirection
+import org.thanosapollo.nema.storage.IngestionResult
+import org.thanosapollo.nema.storage.InsertedInbound
+import org.thanosapollo.nema.xmpp.transport.IncomingMessageEnvelope
 import org.thanosapollo.nema.credentials.CredentialAccess
 import org.thanosapollo.nema.credentials.CredentialVault
 import org.thanosapollo.nema.session.ActiveSessionController
@@ -127,7 +132,9 @@ class SessionRuntime(
         query = { controller.queryArchive(it) },
         commit = { identity, page, isAuthoritative ->
             controller.commitIfConnected(identity, isAuthoritative) {
-                messages.applyArchivePage(page)
+                messages.applyArchivePage(page).also { applied ->
+                    emitInsertedArchive(applied.insertedInbound, page.direction)
+                }
             }
         },
     )
@@ -137,7 +144,9 @@ class SessionRuntime(
         query = { controller.queryArchive(it) },
         commit = { identity, page, isAuthoritative ->
             controller.commitIfConnected(identity, isAuthoritative) {
-                messages.applyArchivePage(page)
+                messages.applyArchivePage(page).also { applied ->
+                    emitInsertedArchive(applied.insertedInbound, page.direction)
+                }
             }
         },
     )
@@ -148,6 +157,8 @@ class SessionRuntime(
         },
     )
     private val pendingPeerIdentities = AtomicReference<Map<String, Set<String>>>(emptyMap())
+    val visiblePeer = AtomicReference<String?>(null)
+    @Volatile var onInsertedInbound: ((String, String) -> Unit)? = null
     val rooms = RoomStateStore()
     val state: StateFlow<ConnectionState>
         get() = controller.state
@@ -163,7 +174,8 @@ class SessionRuntime(
             durableEvent = { event ->
                 when (event) {
                     is org.thanosapollo.nema.session.SessionEvent.Incoming -> {
-                        liveMessages.ingest(event.message)
+                        val result = liveMessages.ingest(event.message)
+                        emitInsertedLive(event.message, result)
                         acknowledgeReceiptRequest(event.message)
                     }
                     is org.thanosapollo.nema.session.SessionEvent.Signal ->
@@ -295,6 +307,43 @@ class SessionRuntime(
     suspend fun uploadHttpFile(request: LocalUploadRequest): UploadedFile? {
         val lease = controller.lifecycle.value.dispatchLease() ?: return null
         return controller.uploadHttpFile(lease.identity.accountId, lease.identity.generation, request)
+    }
+
+    private fun archiveReady(): Boolean = archive.state.value is ArchiveSyncState.Ready
+
+    private fun emitInsertedLive(envelope: IncomingMessageEnvelope, result: IngestionResult) {
+        if (
+            shouldNotifyInsertedInbound(
+                result = result,
+                inbound = !envelope.outbound,
+                groupChat = envelope.kind == MessageKind.GROUPCHAT,
+                archiveReady = archiveReady(),
+                visiblePeer = visiblePeer.get(),
+                peerJid = envelope.peer,
+            )
+        ) {
+            onInsertedInbound?.invoke(envelope.peer, envelope.body)
+        }
+    }
+
+    private fun emitInsertedArchive(inserted: List<InsertedInbound>, direction: ArchiveDirection) {
+        val ready = archiveReady()
+        val visible = visiblePeer.get()
+        inserted.forEach { inbound ->
+            if (
+                shouldNotifyInsertedInbound(
+                    result = IngestionResult(inbound.peerJid, 0, identityConflict = false, inserted = true),
+                    inbound = inbound.inbound,
+                    groupChat = inbound.groupChat,
+                    archiveReady = ready,
+                    visiblePeer = visible,
+                    peerJid = inbound.peerJid,
+                    direction = direction,
+                )
+            ) {
+                onInsertedInbound?.invoke(inbound.peerJid, inbound.preview)
+            }
+        }
     }
 
     suspend fun joinMuc(roomJid: String, nick: String? = null, password: String? = null): Boolean {
@@ -885,6 +934,7 @@ class XmppConnectionService : Service() {
     override fun onCreate() {
         super.onCreate()
         runtime = (application as NemaApplication).sessionRuntime
+        runtime.onInsertedInbound = { peer, preview -> notifyInbound(peer, preview) }
         notifications = getSystemService(NotificationManager::class.java)
         commands = SerializedServiceCommandRunner(serviceScope)
         try {
@@ -896,6 +946,16 @@ class XmppConnectionService : Service() {
                 ).apply {
                     description = getString(R.string.connection_channel_description)
                     setShowBadge(false)
+                },
+            )
+            notifications.createNotificationChannel(
+                NotificationChannel(
+                    MESSAGE_CHANNEL_ID,
+                    getString(R.string.message_channel_name),
+                    NotificationManager.IMPORTANCE_DEFAULT,
+                ).apply {
+                    description = getString(R.string.message_channel_description)
+                    setShowBadge(true)
                 },
             )
             notificationChannelReady = true
@@ -1095,14 +1155,40 @@ class XmppConnectionService : Service() {
             .build()
     }
 
+    private fun notifyInbound(peer: String, preview: String) {
+        if (!canShowNotifications()) return
+        val openIntent = PendingIntent.getActivity(
+            this,
+            peer.hashCode(),
+            Intent(this, MainActivity::class.java).putExtra(EXTRA_PEER_JID, peer),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        try {
+            notifications.notify(
+                MESSAGE_NOTIFICATION_BASE + peer.hashCode(),
+                Notification.Builder(this, MESSAGE_CHANNEL_ID)
+                    .setSmallIcon(R.drawable.ic_nema_mark)
+                    .setContentTitle(peer)
+                    .setContentText(preview)
+                    .setContentIntent(openIntent)
+                    .setAutoCancel(true)
+                    .build(),
+            )
+        } catch (_: RuntimeException) {
+        }
+    }
+
     companion object {
         const val ACTION_ACTIVATE = "org.thanosapollo.nema.action.ACTIVATE_ACCOUNT"
         const val ACTION_CONNECT = "org.thanosapollo.nema.action.CONNECT"
         const val ACTION_STOP = "org.thanosapollo.nema.action.STOP"
         const val ACTION_SIGN_OUT = "org.thanosapollo.nema.action.SIGN_OUT"
         const val EXTRA_ACCOUNT_ID = "account_id"
+        const val EXTRA_PEER_JID = "peer_jid"
         private const val CHANNEL_ID = "xmpp_connection"
+        private const val MESSAGE_CHANNEL_ID = "xmpp_messages"
         private const val NOTIFICATION_ID = 1001
+        private const val MESSAGE_NOTIFICATION_BASE = 2000
         private const val VISIBILITY_CHECK_MILLIS = 1_000L
 
         fun activateIntent(context: Context, accountId: AccountId) =

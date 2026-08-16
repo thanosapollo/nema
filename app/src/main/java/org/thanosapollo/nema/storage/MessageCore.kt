@@ -2154,6 +2154,7 @@ class MessageStore private constructor(
 
         var ingested = 0
         var inserted = 0
+        val insertedInbound = mutableListOf<InsertedInbound>()
         page.messages.forEachIndexed { index, archived ->
             archived.signal?.let { signal ->
                 recordReceiptSignalInTransaction(
@@ -2188,7 +2189,15 @@ class MessageStore private constructor(
                 ),
             )
             ingested++
-            if (result.inserted && !result.identityConflict) inserted++
+            if (result.inserted && !result.identityConflict) {
+                inserted++
+                insertedInbound += InsertedInbound(
+                    peerJid = message.peerJid,
+                    preview = message.body,
+                    inbound = message.direction == MessageDirection.INBOUND,
+                    groupChat = message.messageKind == MessageKind.GROUPCHAT,
+                )
+            }
         }
 
         val pageOldestOrdinal = page.firstId?.let { startOrdinal }
@@ -2224,7 +2233,7 @@ class MessageStore private constructor(
         writeBoundary(MessageWriteBoundary.BEFORE_ARCHIVE_CURSOR)
         dao.upsertArchiveCursor(next)
         writeBoundary(MessageWriteBoundary.AFTER_ARCHIVE_CURSOR)
-        ArchivePageResult(ArchivePageStatus.APPLIED, next, ingested, inserted)
+        ArchivePageResult(ArchivePageStatus.APPLIED, next, ingested, inserted, insertedInbound)
     }
 
     suspend fun claim(accountId: String, operationId: String, generation: Long): OutboxClaim? {

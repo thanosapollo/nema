@@ -249,6 +249,14 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean, activityRe
             onDispose(presenter::close)
         }
         val chatState by presenter.state.collectAsState()
+        DisposableEffect(account.id) {
+            onDispose { application.sessionRuntime.visiblePeer.set(null) }
+        }
+        LaunchedEffect(activityResumed, chatState.selectedPeer) {
+            application.sessionRuntime.visiblePeer.set(
+                chatState.selectedPeer.takeIf { activityResumed },
+            )
+        }
         val readReceiptsEnabled by remember(account.id) {
             application.messagingPreferences.readReceipts(account.id.value)
         }.collectAsState(initial = false)
