@@ -47,13 +47,13 @@ class AppearanceModelTest {
     }
 
     @Test
-    fun defaultIncomingBubbleIsBlackWithWhiteText() {
+    fun defaultIncomingBubbleUsesTrueBlackLightAndSiteDarkFill() {
         val light = semanticPalette(AppearanceSpec.DEFAULT, dark = false)
         val dark = semanticPalette(AppearanceSpec.DEFAULT, dark = true)
         assertEquals(0xFF000000.toInt(), light.incomingBubble)
         assertEquals(0xFFFFFFFF.toInt(), light.onIncomingBubble)
-        assertEquals(0xFF000000.toInt(), dark.incomingBubble)
-        assertEquals(0xFFFFFFFF.toInt(), dark.onIncomingBubble)
+        assertEquals(0xFF0A0A0A.toInt(), dark.incomingBubble)
+        assertEquals(0xFFD4C5A0.toInt(), dark.onIncomingBubble)
     }
 
     @Test

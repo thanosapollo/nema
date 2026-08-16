@@ -28,12 +28,12 @@ class NemaThemeTest {
     val composeRule = createComposeRule()
 
     @Test
-    fun darkNeutralPaletteUsesTrueBlackAndStrongBlue() {
+    fun darkNeutralPaletteUsesTrueBlackAndSiteGold() {
         val colors = semanticPalette(AppearanceSpec.DEFAULT, dark = true)
 
         assertEquals(0xFF000000.toInt(), colors.background)
-        assertEquals(0xFF000000.toInt(), colors.surface)
-        assertEquals(0xFF2C6BED.toInt(), colors.accent)
+        assertEquals(0xFF0A0A0A.toInt(), colors.surface)
+        assertEquals(0xFFD48A20.toInt(), colors.accent)
     }
 
     @Test
@@ -47,14 +47,14 @@ class NemaThemeTest {
         }
 
         composeRule.runOnIdle {
-            val black = 0xFF000000.toInt()
-            assertEquals(black, observed.surfaceBright.toArgb())
-            assertEquals(black, observed.surfaceDim.toArgb())
-            assertEquals(black, observed.surfaceContainerLowest.toArgb())
-            assertEquals(black, observed.surfaceContainerLow.toArgb())
-            assertEquals(black, observed.surfaceContainer.toArgb())
-            assertEquals(black, observed.surfaceContainerHigh.toArgb())
-            assertEquals(black, observed.surfaceContainerHighest.toArgb())
+            val surface = 0xFF0A0A0A.toInt()
+            assertEquals(surface, observed.surfaceBright.toArgb())
+            assertEquals(surface, observed.surfaceDim.toArgb())
+            assertEquals(surface, observed.surfaceContainerLowest.toArgb())
+            assertEquals(surface, observed.surfaceContainerLow.toArgb())
+            assertEquals(surface, observed.surfaceContainer.toArgb())
+            assertEquals(surface, observed.surfaceContainerHigh.toArgb())
+            assertEquals(surface, observed.surfaceContainerHighest.toArgb())
         }
     }
 

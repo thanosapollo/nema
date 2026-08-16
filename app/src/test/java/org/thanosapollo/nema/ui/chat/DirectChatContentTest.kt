@@ -554,7 +554,7 @@ class DirectChatContentTest {
     }
 
     @Test
-    fun incomingMessagesUseBlackBubbleWithWhiteTextWithoutChangingOutgoingPalette() {
+    fun incomingMessagesUseSiteDarkBubblesWithoutChangingOutgoingPalette() {
         lateinit var observed: List<Int>
         composeRule.setContent {
             NemaTheme(AppearanceSpec(themeMode = ThemeMode.DARK)) {
@@ -580,16 +580,16 @@ class DirectChatContentTest {
         composeRule.runOnIdle {
             assertEquals(
                 listOf(
-                    0xFF000000.toInt(),
-                    0xFFFFFFFF.toInt(),
-                    0xFF2C6BED.toInt(),
-                    0xFFFFFFFF.toInt(),
+                    0xFF0A0A0A.toInt(),
+                    0xFFD4C5A0.toInt(),
+                    0xFF201A14.toInt(),
+                    0xFFD4C5A0.toInt(),
                 ),
                 observed,
             )
         }
-        assertEquals(0xFFFFFFFF.toInt(), renderedTextColor("material-incoming"))
-        assertEquals(0xFFFFFFFF.toInt(), renderedTextColor("material-outgoing"))
+        assertEquals(0xFFD4C5A0.toInt(), renderedTextColor("material-incoming"))
+        assertEquals(0xFFD4C5A0.toInt(), renderedTextColor("material-outgoing"))
     }
 
     @Test
