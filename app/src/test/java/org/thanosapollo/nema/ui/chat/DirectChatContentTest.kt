@@ -25,6 +25,7 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertHeightIsEqualTo
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsNotFocused
@@ -640,6 +641,27 @@ class DirectChatContentTest {
         composeRule.onNodeWithTag("message-quote-block", useUnmergedTree = true).assertIsDisplayed()
         composeRule.onNodeWithText("manually quoted", useUnmergedTree = true).assertIsDisplayed()
         composeRule.onNodeWithText("plain answer", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun attachmentRowShowsNameAndIsClickable() {
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(
+                        message("file body", outgoing = false).copy(
+                            attachmentUrl = "https://example.org/abc",
+                            attachmentName = "notes.txt",
+                            attachmentSize = 42,
+                        ),
+                    ),
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("message-attachment", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithText("notes.txt · 42 B", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithTag("message-attachment", useUnmergedTree = true).assertHasClickAction()
     }
 
     @Test

@@ -92,6 +92,7 @@ import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -139,7 +140,7 @@ import org.thanosapollo.nema.ui.quietConnectionStatus
 import org.thanosapollo.nema.ui.theme.LocalChatBackgroundUri
 import org.thanosapollo.nema.xmpp.blocking.PeerBlockingState
 import org.thanosapollo.nema.xmpp.blocking.PeerBlockingMutationResult
-import org.thanosapollo.nema.xmpp.httpupload.attachmentPreview
+import org.thanosapollo.nema.xmpp.httpupload.attachmentCaption
 import org.thanosapollo.nema.xmpp.muc.roomSubtitle
 
 @Composable
@@ -1870,10 +1871,16 @@ fun MessageTimeline(
                                         style = MaterialTheme.typography.labelSmall,
                                     )
                                 }
-                                message.attachmentUrl?.let {
+                                message.attachmentUrl?.let { url ->
+                                    val uriHandler = LocalUriHandler.current
                                     Text(
-                                        attachmentPreview(message.attachmentName, it),
+                                        attachmentCaption(message.attachmentName, url, message.attachmentSize),
                                         style = MaterialTheme.typography.labelMedium,
+                                        modifier = Modifier
+                                            .clickable(role = Role.Button) {
+                                                runCatching { uriHandler.openUri(url) }
+                                            }
+                                            .testTag("message-attachment"),
                                     )
                                 }
                                 message.reply?.let { reply ->

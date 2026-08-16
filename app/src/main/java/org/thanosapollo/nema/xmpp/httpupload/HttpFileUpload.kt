@@ -33,3 +33,8 @@ fun attachmentPreview(name: String?, url: String?): String {
     if (labeled.isNotEmpty()) return labeled
     return url?.substringAfterLast('/')?.substringBefore('?').orEmpty().ifEmpty { "File" }
 }
+
+fun attachmentCaption(name: String?, url: String?, size: Long?): String {
+    val label = attachmentPreview(name, url)
+    return if (size == null || size < 0) label else "$label · $size B"
+}
