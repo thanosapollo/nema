@@ -9,6 +9,7 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.LinkedHashMap
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
@@ -64,6 +65,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -79,6 +81,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
@@ -91,6 +94,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.error
 import androidx.compose.ui.semantics.onClick
@@ -195,30 +199,46 @@ fun DirectChatContent(
         )
         val currentBlockingSession by rememberUpdatedState(blockingSession)
         val backgroundUri = LocalChatBackgroundUri.current
+        var dismissedPeer by remember(state.accountId) { mutableStateOf<String?>(null) }
+        val selectedPeer = state.selectedPeer
+        val overlayPeer = selectedPeer.takeIf { it != dismissedPeer }
+        LaunchedEffect(selectedPeer) {
+            if (selectedPeer == null) dismissedPeer = null
+        }
         Box(modifier.fillMaxSize()) {
             ChatBackground(backgroundUri)
-            if (state.selectedPeer == null) {
-                HomeContent(
-                    conversations = state.conversations,
-                    conversationsReady = state.conversationsReady,
-                    connectionStatus = connectionStatus,
-                    ownLabel = ownLabel,
-                    ownPhotoBytes = ownPhotoBytes,
-                    onSelectPeer = onSelectPeer,
-                    onJoinRoom = onJoinRoom,
-                    onOpenOwnProfile = onOpenOwnProfile,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(
-                            MaterialTheme.colorScheme.background.copy(
-                                alpha = if (backgroundUri == null) 1f else 0.88f,
-                            ),
+            HomeContent(
+                conversations = state.conversations,
+                conversationsReady = state.conversationsReady,
+                connectionStatus = connectionStatus,
+                ownLabel = ownLabel,
+                ownPhotoBytes = ownPhotoBytes,
+                onSelectPeer = { peer ->
+                    if (peer == dismissedPeer || peer == selectedPeer) {
+                        dismissedPeer = null
+                    }
+                    onSelectPeer(peer)
+                },
+                onJoinRoom = { room ->
+                    if (room == dismissedPeer || room == selectedPeer) {
+                        dismissedPeer = null
+                    }
+                    onJoinRoom(room)
+                },
+                onOpenOwnProfile = onOpenOwnProfile,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        MaterialTheme.colorScheme.background.copy(
+                            alpha = if (backgroundUri == null) 1f else 0.88f,
                         ),
-                )
-            } else {
+                    )
+                    .then(if (overlayPeer != null) Modifier.clearAndSetSemantics { } else Modifier),
+            )
+            if (overlayPeer != null) {
                 val conversationKey = DirectConversationKey(
                     state.accountId,
-                    state.selectedPeer,
+                    overlayPeer,
                     state.selectedThread,
                 )
                 val peerKey = conversationKey.copy(thread = null)
@@ -227,9 +247,26 @@ fun DirectChatContent(
                     peerKey.accountId,
                     peerKey.canonicalBarePeer,
                 ) { mutableStateOf(false) }
+                var backProgress by remember { mutableFloatStateOf(0f) }
+                LaunchedEffect(state.selectedPeer, state.selectedThread) {
+                    backProgress = 0f
+                }
                 BackHandler(enabled = showPeerProfile) { showPeerProfile = false }
-                BackHandler(enabled = !showPeerProfile) {
-                    if (state.selectedThread == null) onCloseConversation() else onCloseThread()
+                BackHandler(enabled = !showPeerProfile && state.selectedThread != null) {
+                    onCloseThread()
+                }
+                PredictiveBackHandler(enabled = !showPeerProfile && state.selectedThread == null) { events ->
+                    try {
+                        events.collect { event ->
+                            backProgress = event.progress
+                        }
+                        backProgress = 0f
+                        dismissedPeer = selectedPeer
+                        onCloseConversation()
+                    } catch (cancelled: CancellationException) {
+                        backProgress = 0f
+                        throw cancelled
+                    }
                 }
                 if (showPeerProfile) {
                     PeerProfileContent(
@@ -331,9 +368,9 @@ fun DirectChatContent(
                         }
                     }
                 }
-                LaunchedEffect(state.selectedPeer, state.selectedPeerGroupChat) {
+                LaunchedEffect(overlayPeer, state.selectedPeerGroupChat) {
                     if (state.selectedPeerGroupChat) {
-                        onJoinRoom(state.selectedPeer)
+                        onJoinRoom(overlayPeer)
                     }
                 }
                 var focusComposerWhenReady by remember { mutableStateOf(false) }
@@ -372,6 +409,9 @@ fun DirectChatContent(
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
+                        .graphicsLayer {
+                            translationX = size.width * backProgress
+                        }
                         .background(
                             MaterialTheme.colorScheme.background.copy(
                                 alpha = if (backgroundUri == null) 1f else 0.88f,
@@ -444,7 +484,10 @@ fun DirectChatContent(
                         navigationIcon = {
                             IconButton(
                                 onClick = if (state.selectedThread == null) {
-                                    onCloseConversation
+                                    {
+                                        dismissedPeer = selectedPeer
+                                        onCloseConversation()
+                                    }
                                 } else {
                                     onCloseThread
                                 },

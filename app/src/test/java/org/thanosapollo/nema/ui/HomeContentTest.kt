@@ -1,6 +1,7 @@
 package org.thanosapollo.nema.ui
 
 import android.app.Application
+import androidx.navigationevent.compose.LocalNavigationEventDispatcherOwner
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -13,6 +14,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -21,6 +23,7 @@ import org.robolectric.annotation.Config
 import org.thanosapollo.nema.chat.ConversationSummary
 import org.thanosapollo.nema.chat.DirectChatState
 import org.thanosapollo.nema.ui.chat.DirectChatContent
+import org.thanosapollo.nema.ui.chat.TestNavigationEventOwner
 import kotlinx.coroutines.CompletableDeferred
 
 @RunWith(RobolectricTestRunner::class)
@@ -173,5 +176,181 @@ class HomeContentTest {
         composeRule.onNodeWithText("Alice").assertIsDisplayed()
         composeRule.onNodeWithText("Connected").assertDoesNotExist()
         composeRule.onNodeWithContentDescription("Conversation actions").assertIsDisplayed()
+    }
+
+    @Test
+    fun homeStaysComposedUnderOpenChat() {
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = DirectChatState(
+                        accountId = "account-a",
+                        conversations = listOf(
+                            ConversationSummary("alice@example.org", "hi", 1, "Alice"),
+                        ),
+                        conversationsReady = true,
+                        selectedPeer = "alice@example.org",
+                        selectedPeerDisplayName = "Alice",
+                    ),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                    ownLabel = "me@example.org",
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Nema", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithContentDescription("Primary destinations", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithContentDescription("Back").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Settings").assertDoesNotExist()
+    }
+
+    @Test
+    fun dismissedChatLetsHomeRowsOpenAgain() {
+        val owner = TestNavigationEventOwner()
+        var opened = 0
+        composeRule.setContent {
+            androidx.compose.runtime.CompositionLocalProvider(
+                LocalNavigationEventDispatcherOwner provides owner,
+            ) {
+                MaterialTheme {
+                    DirectChatContent(
+                        state = DirectChatState(
+                            accountId = "account-a",
+                            conversations = listOf(
+                                ConversationSummary("alice@example.org", "hi there", 1, "Alice"),
+                            ),
+                            conversationsReady = true,
+                            selectedPeer = "alice@example.org",
+                            selectedPeerDisplayName = "Alice",
+                        ),
+                        connectionStatus = "Connected",
+                        onSelectPeer = {
+                            opened += 1
+                            true
+                        },
+                        onCloseConversation = {},
+                        onDraftChange = { CompletableDeferred(true) },
+                        onSend = { CompletableDeferred(true) },
+                        ownLabel = "me@example.org",
+                    )
+                }
+            }
+        }
+
+        composeRule.runOnIdle { owner.completeBack() }
+        composeRule.onNodeWithText("hi there").assertIsDisplayed()
+        composeRule.onNodeWithText("Settings").assertIsDisplayed()
+        composeRule.onNodeWithText("hi there").performClick()
+        composeRule.runOnIdle { assertEquals(1, opened) }
+    }
+
+    @Test
+    fun tappingAnotherPeerDoesNotRemountDismissedChat() {
+        val owner = TestNavigationEventOwner()
+        val opened = mutableListOf<String>()
+        composeRule.setContent {
+            androidx.compose.runtime.CompositionLocalProvider(
+                LocalNavigationEventDispatcherOwner provides owner,
+            ) {
+                MaterialTheme {
+                    DirectChatContent(
+                        state = DirectChatState(
+                            accountId = "account-a",
+                            conversations = listOf(
+                                ConversationSummary("alice@example.org", "from alice", 1, "Alice"),
+                                ConversationSummary("bob@example.org", "from bob", 2, "Bob"),
+                            ),
+                            conversationsReady = true,
+                            selectedPeer = "alice@example.org",
+                            selectedPeerDisplayName = "Alice",
+                        ),
+                        connectionStatus = "Connected",
+                        onSelectPeer = { peer ->
+                            opened += peer
+                            true
+                        },
+                        onCloseConversation = {},
+                        onDraftChange = { CompletableDeferred(true) },
+                        onSend = { CompletableDeferred(true) },
+                        ownLabel = "me@example.org",
+                    )
+                }
+            }
+        }
+
+        composeRule.runOnIdle { owner.completeBack() }
+        composeRule.onNodeWithContentDescription("Back").assertDoesNotExist()
+        composeRule.onNodeWithText("from bob").performClick()
+        composeRule.runOnIdle { assertEquals(listOf("bob@example.org"), opened) }
+        composeRule.onNodeWithContentDescription("Back").assertDoesNotExist()
+        composeRule.onNodeWithText("from alice").assertIsDisplayed()
+    }
+
+    @Test
+    fun failedNewChatDoesNotRemountDismissedChat() {
+        val owner = TestNavigationEventOwner()
+        composeRule.setContent {
+            androidx.compose.runtime.CompositionLocalProvider(
+                LocalNavigationEventDispatcherOwner provides owner,
+            ) {
+                MaterialTheme {
+                    DirectChatContent(
+                        state = DirectChatState(
+                            accountId = "account-a",
+                            conversations = listOf(
+                                ConversationSummary("alice@example.org", "from alice", 1, "Alice"),
+                            ),
+                            conversationsReady = true,
+                            selectedPeer = "alice@example.org",
+                            selectedPeerDisplayName = "Alice",
+                        ),
+                        connectionStatus = "Connected",
+                        onSelectPeer = { false },
+                        onCloseConversation = {},
+                        onDraftChange = { CompletableDeferred(true) },
+                        onSend = { CompletableDeferred(true) },
+                        ownLabel = "me@example.org",
+                    )
+                }
+            }
+        }
+
+        composeRule.runOnIdle { owner.completeBack() }
+        composeRule.onNodeWithContentDescription("New chat").performClick()
+        composeRule.onNodeWithText("Direct message JID").performTextInput("bad")
+        composeRule.onNodeWithText("Open conversation").performClick()
+        composeRule.onNodeWithText("Cancel").performClick()
+        composeRule.onNodeWithContentDescription("Back").assertDoesNotExist()
+        composeRule.onNodeWithText("from alice").assertIsDisplayed()
+    }
+
+    @Test
+    fun emptyHomeKeepsSettingsClickable() {
+        var openedSettings = false
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = DirectChatState(
+                        accountId = "account-a",
+                        conversationsReady = true,
+                    ),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                    ownLabel = "me@example.org",
+                    onOpenOwnProfile = { openedSettings = true },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("New chat").assertIsDisplayed()
+        composeRule.onNodeWithText("Settings").assertIsDisplayed().performClick()
+        composeRule.runOnIdle { assertTrue(openedSettings) }
     }
 }

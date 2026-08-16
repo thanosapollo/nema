@@ -119,34 +119,52 @@ fun HomeContent(
                 windowInsets = WindowInsets(0, 0, 0, 0),
             )
             if (visible.isEmpty()) {
-                Text(
-                    when {
-                        !conversationsReady -> "Loading conversations"
-                        conversations.isEmpty() -> "No conversations"
-                        else -> "No matches"
-                    },
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 24.dp),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Box(Modifier.weight(1f)) {
+                    Text(
+                        when {
+                            !conversationsReady -> "Loading conversations"
+                            conversations.isEmpty() -> "No conversations"
+                            else -> "No matches"
+                        },
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 24.dp),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    FloatingActionButton(
+                        onClick = { newChatOpen = true },
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(16.dp),
+                    ) {
+                        Icon(Icons.Filled.Edit, contentDescription = "New chat")
+                    }
+                }
             } else {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    items(visible, key = ConversationSummary::peerJid) { conversation ->
-                        ConversationRow(
-                            conversation = conversation,
-                            onClick = { scope.launch { onSelectPeer(conversation.peerJid) } },
-                        )
+                Box(Modifier.weight(1f)) {
+                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        items(visible, key = ConversationSummary::peerJid) { conversation ->
+                            ConversationRow(
+                                conversation = conversation,
+                                onClick = { scope.launch { onSelectPeer(conversation.peerJid) } },
+                            )
+                        }
+                    }
+                    FloatingActionButton(
+                        onClick = { newChatOpen = true },
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(16.dp),
+                    ) {
+                        Icon(Icons.Filled.Edit, contentDescription = "New chat")
                     }
                 }
             }
-        }
-        FloatingActionButton(
-            onClick = { newChatOpen = true },
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(16.dp),
-        ) {
-            Icon(Icons.Filled.Edit, contentDescription = "New chat")
+            SessionBottomBar(
+                selected = PrimaryDestination.HOME,
+                onSelect = { destination ->
+                    if (destination == PrimaryDestination.SETTINGS) onOpenOwnProfile()
+                },
+            )
         }
         if (newChatOpen) {
             NewChatDialog(

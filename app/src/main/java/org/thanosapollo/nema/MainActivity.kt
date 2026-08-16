@@ -292,7 +292,7 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean, activityRe
             Scaffold(
                 contentWindowInsets = WindowInsets(0, 0, 0, 0),
                 bottomBar = {
-                    if (destination != PrimaryDestination.HOME || chatState.selectedPeer == null) {
+                    if (destination != PrimaryDestination.HOME) {
                         SessionBottomBar(
                             selected = destination,
                             onSelect = ::selectDestination,
