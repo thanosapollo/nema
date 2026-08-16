@@ -780,7 +780,12 @@ class DirectChatPresenter(
                 snapshot.key.canonicalBarePeer,
             )
         }
-        enqueue(account, snapshot.copy(outboundThread = newTopic(currentSession)))
+        val thread = newTopic(currentSession)
+        val sent = enqueue(account, snapshot.copy(outboundThread = thread))
+        if (sent) {
+            selectRoute(ChatRoute(snapshot.key.canonicalBarePeer, thread))
+        }
+        sent
     }
 
     suspend fun renameThread(recent: RecentThread, title: String): Boolean {

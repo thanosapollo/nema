@@ -804,10 +804,7 @@ fun DirectChatContent(
                                         onLongClickLabel = "Send as thread",
                                         onClick = { sendWith(onSend) },
                                         onLongClick = if (conversationKey.thread == null && composer.correction == null) {
-                                            {
-                                                sendWith(onSendAsNewThread)
-                                                focusComposerWhenReady = true
-                                            }
+                                            { sendWith(onSendAsNewThread) }
                                         } else {
                                             null
                                         },

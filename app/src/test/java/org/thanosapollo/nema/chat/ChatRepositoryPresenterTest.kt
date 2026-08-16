@@ -1860,7 +1860,7 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
-    fun sendDraftAsNewThreadTagsRootWithoutChangingConversationRoute() = runBlocking {
+    fun sendDraftAsNewThreadOpensTheNewThread() = runBlocking {
         val repository = ChatRepository(database)
         val sent = mutableListOf<DraftSnapshot>()
         val presenter = DirectChatPresenter(
@@ -1879,7 +1879,11 @@ class ChatRepositoryPresenterTest {
         assertEquals("new-thread", sent.single().outboundThread?.id?.value)
         val session = requireNotNull(repository.observeCurrentSession(ACCOUNT, PEER).first())
         assertEquals(session.id, sent.single().outboundThread?.parentId)
-        assertEquals(null, presenter.state.first().selectedThread)
+        assertEquals(
+            "new-thread",
+            presenter.state.first { it.selectedThread?.id?.value == "new-thread" }.selectedThread?.id?.value,
+        )
+        presenter.close()
     }
 
     @Test
