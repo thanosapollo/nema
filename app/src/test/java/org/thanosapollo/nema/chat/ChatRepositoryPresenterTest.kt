@@ -421,6 +421,11 @@ class ChatRepositoryPresenterTest {
 
         assertTrue(first.selectPeer(PEER))
         assertTrue(second.selectPeer(PEER))
+        while (requests.none { it == AccountId.require(ACCOUNT) to setOf(PEER) } ||
+            requests.none { it == AccountId.require(OTHER_ACCOUNT) to setOf(PEER) }
+        ) {
+            yield()
+        }
 
         assertTrue(requests.any { it == AccountId.require(ACCOUNT) to setOf(PEER) })
         assertTrue(requests.any { it == AccountId.require(OTHER_ACCOUNT) to setOf(PEER) })
@@ -1252,7 +1257,9 @@ class ChatRepositoryPresenterTest {
             threadingPolicy = ThreadingPolicy { ThreadId.require("child-thread") },
         )
         assertTrue(presenter.selectPeer(PEER))
-        val selected = presenter.state.first { it.messages.size == 2 }
+        val selected = presenter.state.first { state ->
+            state.messages.any { it.id == "threaded-target" && it.replyReferenceId != null }
+        }
         val threaded = selected.messages.single { it.id == "threaded-target" }
         val untrusted = selected.messages.single { it.id == "untrusted-target" }
 
@@ -1263,8 +1270,10 @@ class ChatRepositoryPresenterTest {
         assertTrue(!presenter.startThreadFrom(threaded))
         assertEquals(OTHER_PEER, presenter.state.value.selectedPeer)
         assertTrue(presenter.selectPeer(PEER))
-        val currentThreaded = presenter.state.first { it.messages.size == 2 }
-            .messages.single { it.id == "threaded-target" }
+        val currentThreaded = presenter.state.first { state ->
+            state.selectedPeer == PEER &&
+                state.messages.any { it.id == "threaded-target" && it.replyReferenceId != null }
+        }.messages.single { it.id == "threaded-target" }
 
         assertTrue(presenter.startThreadFrom(currentThreaded))
 
@@ -1596,6 +1605,9 @@ class ChatRepositoryPresenterTest {
             ensurePeerIdentities = { _, _ -> identityCalls += 1 },
         )
         presenter.state.first { it.conversationsReady && it.conversations.isNotEmpty() }
+        assertEquals(0, identityCalls)
+        assertTrue(presenter.selectPeer(PEER))
+        presenter.state.first { it.selectedPeer == PEER }
         while (identityCalls == 0) {
             yield()
         }
@@ -1610,6 +1622,104 @@ class ChatRepositoryPresenterTest {
         }
 
         assertEquals(afterReady, identityCalls)
+        presenter.close()
+    }
+
+    @Test
+    fun openingAChatSetsSelectedPeerWithoutWaitingForIdentities() = runBlocking {
+        val releaseIdentities = CompletableDeferred<Unit>()
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = ChatRepository(database),
+            scope = scope,
+            enqueue = { _, _ -> true },
+            ensurePeerIdentities = { _, _ -> releaseIdentities.await() },
+        )
+        assertTrue(presenter.selectPeer(PEER))
+        assertEquals(PEER, presenter.state.first { it.selectedPeer == PEER }.selectedPeer)
+        assertTrue(!releaseIdentities.isCompleted)
+        releaseIdentities.complete(Unit)
+        presenter.close()
+    }
+
+    @Test
+    fun openingARoomDoesNotWaitForMucJoin() = runBlocking {
+        val joined = CompletableDeferred<Unit>()
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = ChatRepository(database),
+            scope = scope,
+            enqueue = { _, _ -> true },
+            joinMuc = {
+                joined.await()
+                true
+            },
+        )
+        assertTrue(presenter.joinRoom("room@conference.example.org"))
+        assertEquals(
+            "room@conference.example.org",
+            presenter.state.first { it.selectedPeer == "room@conference.example.org" }.selectedPeer,
+        )
+        assertTrue(!joined.isCompleted)
+        joined.complete(Unit)
+        presenter.close()
+    }
+
+    @Test
+    fun closingAChatReturnsHomeWithoutWaitingForRoutePersist() = runBlocking {
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = ChatRepository(database),
+            scope = scope,
+            enqueue = { _, _ -> true },
+        )
+        assertTrue(presenter.selectPeer(PEER))
+        presenter.state.first { it.selectedPeer == PEER }
+        presenter.closeConversation()
+        assertEquals(null, presenter.state.first { it.selectedPeer == null }.selectedPeer)
+        presenter.close()
+    }
+
+    @Test
+    fun selectingAfterCloseKeepsTheNewPeerAndPersistsIt() = runBlocking {
+        val repository = ChatRepository(database)
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = repository,
+            scope = scope,
+            enqueue = { _, _ -> true },
+        )
+        assertTrue(presenter.selectPeer(PEER))
+        presenter.state.first { it.selectedPeer == PEER }
+        presenter.closeConversation()
+        assertTrue(presenter.selectPeer(OTHER_PEER))
+        assertEquals(OTHER_PEER, presenter.state.first { it.selectedPeer == OTHER_PEER }.selectedPeer)
+        assertEquals(
+            OTHER_PEER,
+            repository.observeRoute(ACCOUNT).first { it?.peerJid == OTHER_PEER }?.peerJid,
+        )
+        assertTrue(presenter.updateDraft(snapshot(ACCOUNT, OTHER_PEER, "still-open")).await())
+        assertEquals("still-open", repository.observeDraft(ACCOUNT, OTHER_PEER).first())
+        presenter.close()
+    }
+
+    @Test
+    fun restoreDoesNotClobberANewerInMemorySelect() = runBlocking {
+        val repository = ChatRepository(database)
+        repository.saveRoute(ACCOUNT, ChatRoute(PEER))
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = repository,
+            scope = scope,
+            enqueue = { _, _ -> true },
+            restoreRouteOnStart = true,
+        )
+        assertTrue(presenter.selectPeer(OTHER_PEER))
+        assertEquals(OTHER_PEER, presenter.state.first { it.selectedPeer == OTHER_PEER }.selectedPeer)
+        assertEquals(
+            OTHER_PEER,
+            repository.observeRoute(ACCOUNT).first { it?.peerJid == OTHER_PEER }?.peerJid,
+        )
         presenter.close()
     }
 

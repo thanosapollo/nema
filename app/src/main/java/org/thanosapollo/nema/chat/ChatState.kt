@@ -1,16 +1,19 @@
 package org.thanosapollo.nema.chat
 
 import java.util.PriorityQueue
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emitAll
@@ -18,10 +21,11 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
 import org.jxmpp.jid.impl.JidCreate
 import org.thanosapollo.nema.account.AccountConfiguration
 import org.thanosapollo.nema.storage.ChatNavigationEntity
@@ -342,6 +346,22 @@ class ChatRepository(database: NemaDatabase) {
         dao.observeDirectReplyAliases(key.accountId, key.canonicalBarePeer),
         dao.observePeer(key.accountId, key.canonicalBarePeer),
     ) { rows, aliases, peer ->
+        presentTimeline(rows, aliases, key, peer)
+    }.flowOn(Dispatchers.Default)
+
+    suspend fun cachedTimeline(key: DirectConversationKey): List<TimelineMessage> = presentTimeline(
+        rows = dao.cachedDirectTimeline(key.accountId, key.canonicalBarePeer),
+        aliases = emptyList(),
+        key = key,
+        peer = dao.peer(key.accountId, key.canonicalBarePeer),
+    )
+
+    private fun presentTimeline(
+        rows: List<TimelineRow>,
+        aliases: List<TrustedIdentityAliasEntity>,
+        key: DirectConversationKey,
+        peer: PeerEntity?,
+    ): List<TimelineMessage> {
         val aliasesByMessage = aliases
             .filter { it.messageId != null }
             .groupBy(TrustedIdentityAliasEntity::messageId, TrustedIdentityAliasEntity::value)
@@ -349,7 +369,7 @@ class ChatRepository(database: NemaDatabase) {
         val timeline = chronologicalTimelineRows(rows)
             .map { row -> row.toPresentation(aliasesByMessage[row.localMessageId].orEmpty()) }
             .let { messages -> messages.map { it.withReplyPresentation(messages) } }
-        if (peer?.room == true || timeline.any(TimelineMessage::groupChat)) {
+        return if (peer?.room == true || timeline.any(TimelineMessage::groupChat)) {
             timeline.filterByThread(key.thread)
         } else {
             timeline.projectThreads(key.thread)
@@ -377,7 +397,7 @@ class ChatRepository(database: NemaDatabase) {
             .map { row -> row.toPresentation(aliasesByMessage[row.localMessageId].orEmpty()) }
             .let { messages -> messages.map { it.withReplyPresentation(messages) } }
             .recentThreads(titles)
-    }
+    }.flowOn(Dispatchers.Default)
 
     suspend fun renameThread(
         accountId: String,
@@ -515,30 +535,40 @@ class DirectChatPresenter(
     private var draftFlushScheduled = false
     private var ensuredPeerJids: Set<String> = emptySet()
     private val routeReady = CompletableDeferred<Unit>()
-    private val selectedRoute = flow {
-        if (!restoreRouteOnStart) repository.saveRoute(account.id.value, null)
-        routeReady.complete(Unit)
-        emitAll(repository.observeRoute(account.id.value))
-    }.stateIn(
-        presenterScope,
-        SharingStarted.Eagerly,
-        null,
-    )
+    private val routeGeneration = AtomicInteger(0)
+    private val selectedRoute = MutableStateFlow<ChatRoute?>(null)
     private val selectedConversation = selectedRoute.flatMapLatest { route ->
         if (route == null) {
             flowOf(SelectedConversation(null, emptyList(), StoredDraft(), null, null, null, emptyList()))
         } else {
             val key = DirectConversationKey(account.id.value, route.peerJid, route.thread)
-            combine(
-                repository.observeTimeline(key),
-                repository.observeStoredDraft(key),
-                repository.observePeer(account.id.value, route.peerJid),
-                observeRoom(route.peerJid),
-                repository.observeCurrentSession(account.id.value, route.peerJid),
-            ) { messages, draft, peer, room, currentSession ->
-                SelectedConversation(route, messages, draft, peer, room, currentSession, emptyList())
-            }.combine(repository.observeRecentThreads(account.id.value, route.peerJid)) { selected, recent ->
-                selected.copy(recentThreads = recent)
+            flow {
+                emit(
+                    withContext(Dispatchers.Default) {
+                        SelectedConversation(
+                            route,
+                            repository.cachedTimeline(key),
+                            repository.observeStoredDraft(key).first(),
+                            repository.observePeer(account.id.value, route.peerJid).first(),
+                            null,
+                            repository.observeCurrentSession(account.id.value, route.peerJid).first(),
+                            emptyList(),
+                        )
+                    },
+                )
+                emitAll(
+                    combine(
+                        repository.observeTimeline(key),
+                        repository.observeStoredDraft(key),
+                        repository.observePeer(account.id.value, route.peerJid),
+                        observeRoom(route.peerJid),
+                        repository.observeCurrentSession(account.id.value, route.peerJid),
+                    ) { messages, draft, peer, room, currentSession ->
+                        SelectedConversation(route, messages, draft, peer, room, currentSession, emptyList())
+                    }.combine(repository.observeRecentThreads(account.id.value, route.peerJid)) { selected, recent ->
+                        selected.copy(recentThreads = recent)
+                    },
+                )
             }
         }
     }
@@ -579,20 +609,26 @@ class DirectChatPresenter(
 
     init {
         presenterScope.launch {
+            if (restoreRouteOnStart) {
+                val restored = repository.observeRoute(account.id.value).first()
+                if (routeGeneration.get() == 0) selectedRoute.value = restored
+            } else if (routeGeneration.get() == 0) {
+                repository.saveRoute(account.id.value, null)
+            }
+            routeReady.complete(Unit)
+        }
+        presenterScope.launch {
             state.collect { snapshot ->
-                val peers = buildSet {
-                    snapshot.conversations.forEach { add(it.peerJid) }
-                    snapshot.selectedPeer?.let(::add)
-                }
-                if (peers.isNotEmpty() && peers != ensuredPeerJids) {
-                    ensuredPeerJids = peers
-                    try {
-                        ensurePeerIdentities(account.id, peers)
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (_: Exception) {
-                        // Soft failure: keep collecting for later state/connection.
+                val peer = snapshot.selectedPeer ?: return@collect
+                if (peer == ensuredPeerJids.singleOrNull()) return@collect
+                ensuredPeerJids = setOf(peer)
+                try {
+                    withContext(Dispatchers.IO) {
+                        ensurePeerIdentities(account.id, listOf(peer))
                     }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
                 }
             }
         }
@@ -601,23 +637,21 @@ class DirectChatPresenter(
     suspend fun selectPeer(value: String): Boolean {
         val canonical = canonicalDirectPeer(value) ?: return false
         selectRoute(ChatRoute(canonical))
-        ensurePeerIdentities(account.id, listOf(canonical))
         return true
     }
 
     suspend fun joinRoom(value: String): Boolean {
         val canonical = canonicalDirectPeer(value) ?: return false
-        repository.markRoom(account.id.value, canonical)
         selectRoute(ChatRoute(canonical))
-        joinMuc(canonical)
+        presenterScope.launch {
+            repository.markRoom(account.id.value, canonical)
+            joinMuc(canonical)
+        }
         return true
     }
 
     fun closeConversation() {
-        submitAction {
-            selectRoute(null)
-            true
-        }
+        selectRoute(null)
     }
 
     suspend fun startNewThread(): Boolean {
@@ -671,17 +705,13 @@ class DirectChatPresenter(
         )
         if (selectedRoute.value != route) return false
         if (!repository.openThreadReply(account.id.value, route, nextRoute, message, reply)) return false
-        return withTimeoutOrNull(5_000) {
-            selectedRoute.first { it != route }
-        } == nextRoute
+        selectRoute(nextRoute)
+        return true
     }
 
     fun closeThread() {
-        submitAction {
-            val route = selectedRoute.value ?: return@submitAction false
-            selectRoute(route.copy(thread = null))
-            true
-        }
+        val route = selectedRoute.value ?: return
+        selectRoute(route.copy(thread = null))
     }
 
     fun close() {
@@ -828,10 +858,16 @@ class DirectChatPresenter(
         }
     }
 
-    private suspend fun selectRoute(route: ChatRoute?) {
+    private fun selectRoute(route: ChatRoute?) {
+        selectedRoute.value = route
+        val generation = routeGeneration.incrementAndGet()
+        presenterScope.launch { persistRoute(generation) }
+    }
+
+    private suspend fun persistRoute(generation: Int) {
         routeReady.await()
-        repository.saveRoute(account.id.value, route)
-        selectedRoute.first { it == route }
+        if (generation != routeGeneration.get()) return
+        repository.saveRoute(account.id.value, selectedRoute.value)
     }
 
     private fun owns(key: DirectConversationKey): Boolean =
