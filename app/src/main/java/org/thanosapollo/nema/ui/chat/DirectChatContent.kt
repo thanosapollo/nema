@@ -1904,6 +1904,18 @@ fun MessageTimeline(
                                 }
                             }
                         }
+                        message.delivery?.receiptCheck()?.let { check ->
+                            Text(
+                                "\u2713",
+                                color = check.color,
+                                style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier
+                                    .align(Alignment.End)
+                                    .clearAndSetSemantics {
+                                        contentDescription = check.description
+                                    },
+                            )
+                        }
                         DropdownMenu(
                             expanded = messageActionsOpen,
                             onDismissRequest = { messageActionsOpen = false },
@@ -2109,10 +2121,28 @@ private fun DeliveryPresentation.visibleLabel(): String? = when (this) {
     DeliveryPresentation.QUEUED -> "Queued"
     DeliveryPresentation.SENDING -> "Sending"
     DeliveryPresentation.FAILED -> "Failed"
-    DeliveryPresentation.DELIVERED -> "Delivered"
-    DeliveryPresentation.READ -> "Read"
     DeliveryPresentation.SENT,
     DeliveryPresentation.CONFIRMED,
     -> "Sent"
+    DeliveryPresentation.DELIVERED,
+    DeliveryPresentation.READ,
     DeliveryPresentation.UNCERTAIN -> null
+}
+
+private data class ReceiptCheck(val description: String, val color: Color)
+
+@Composable
+private fun DeliveryPresentation.receiptCheck(): ReceiptCheck? {
+    val background = MaterialTheme.colorScheme.background.toArgb()
+    return when (this) {
+        DeliveryPresentation.DELIVERED -> ReceiptCheck(
+            "Delivered",
+            Color(receiptTickColor(read = false, bubbleArgb = background)),
+        )
+        DeliveryPresentation.READ -> ReceiptCheck(
+            "Read",
+            Color(receiptTickColor(read = true, bubbleArgb = background)),
+        )
+        else -> null
+    }
 }

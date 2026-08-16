@@ -59,6 +59,13 @@ fun mucNickColor(nickname: String, backgroundArgb: Int): Int {
     return nickColor(parts.displayHue, parts.saturation, parts.variation, backgroundArgb)
 }
 
+internal fun receiptTickColor(read: Boolean, bubbleArgb: Int): Int =
+    if (read) {
+        nickColor(hue = 142.0, saturation = 80.0, variation = 0.45, backgroundArgb = bubbleArgb)
+    } else {
+        nickColor(hue = 0.0, saturation = 0.0, variation = 0.30, backgroundArgb = bubbleArgb)
+    }
+
 internal fun nickColor(
     hue: Double,
     saturation: Double,

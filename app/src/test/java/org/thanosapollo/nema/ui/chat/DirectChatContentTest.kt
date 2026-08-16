@@ -759,8 +759,10 @@ class DirectChatContentTest {
         }
 
         composeRule.onAllNodesWithText("Sent").assertCountEquals(2)
-        composeRule.onNodeWithText("Delivered").assertIsDisplayed()
-        composeRule.onNodeWithText("Read").assertIsDisplayed()
+        composeRule.onNodeWithText("Delivered").assertDoesNotExist()
+        composeRule.onNodeWithText("Read").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("Delivered").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Read").assertIsDisplayed()
     }
 
     @Test
