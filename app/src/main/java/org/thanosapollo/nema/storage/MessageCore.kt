@@ -854,7 +854,9 @@ abstract class MessageDao {
         replyFallbackSender: String? = null,
     ) {
         require(accountExists(accountId)) { "Unknown draft account" }
-        insertPeer(PeerEntity(accountId, peerJid))
+        if (peer(accountId, peerJid) == null) {
+            insertPeer(PeerEntity(accountId, peerJid))
+        }
         if (body.isEmpty() && replyToId == null) {
             deleteDraft(accountId, peerJid, threadKey)
         } else {

@@ -12,6 +12,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -1522,6 +1523,93 @@ class ChatRepositoryPresenterTest {
         val state = presenter.state.first { it.conversationsReady }
         assertEquals(listOf(PEER), state.conversations.map(ConversationSummary::peerJid))
         assertEquals(listOf("hello from sqlite"), state.conversations.map(ConversationSummary::preview))
+        presenter.close()
+    }
+
+    @Test
+    fun coalescedDraftsPersistLatestBodyPerConversationWhileSendIsHeld() = runBlocking {
+        val repository = ChatRepository(database)
+        val store = MessageStore(database)
+        val sendEntered = CompletableDeferred<Unit>()
+        val releaseSend = CompletableDeferred<Unit>()
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = repository,
+            scope = scope,
+            enqueue = { account, snapshot ->
+                sendEntered.complete(Unit)
+                releaseSend.await()
+                store.composeDirectDraft(
+                    accountId = account.id.value,
+                    operationId = "operation-coalesce",
+                    localMessageId = "local-coalesce",
+                    originId = "origin-coalesce",
+                    peerJid = snapshot.key.canonicalBarePeer,
+                    senderJid = account.bareJid.value,
+                    body = snapshot.body,
+                ) != null
+            },
+        )
+        presenter.updateDraft(snapshot(ACCOUNT, PEER, "first")).await()
+        val send = presenter.sendDraft(snapshot(ACCOUNT, PEER, "first"))
+        sendEntered.await()
+        val newer = presenter.updateDraft(snapshot(ACCOUNT, PEER, "newer"))
+        val other = presenter.updateDraft(snapshot(ACCOUNT, OTHER_PEER, "other"))
+        assertTrue(!newer.isCompleted)
+        assertTrue(!other.isCompleted)
+
+        releaseSend.complete(Unit)
+        assertTrue(send.await())
+        assertTrue(newer.await())
+        assertTrue(other.await())
+        assertEquals("first", store.messages(ACCOUNT).single().body)
+        assertEquals("newer", repository.observeDraft(ACCOUNT, PEER).first())
+        assertEquals("other", repository.observeDraft(ACCOUNT, OTHER_PEER).first())
+        presenter.close()
+    }
+
+    @Test
+    fun failedSendDoesNotStallLaterDraftPersists() = runBlocking {
+        val repository = ChatRepository(database)
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = repository,
+            scope = scope,
+            enqueue = { _, _ -> error("send exploded") },
+        )
+        assertTrue(presenter.updateDraft(snapshot(ACCOUNT, PEER, "before")).await())
+        runCatching { presenter.sendDraft(snapshot(ACCOUNT, PEER, "before")).await() }
+        assertTrue(presenter.updateDraft(snapshot(ACCOUNT, PEER, "after")).await())
+        assertEquals("after", repository.observeDraft(ACCOUNT, PEER).first())
+        presenter.close()
+    }
+
+    @Test
+    fun draftUpdatesDoNotRefetchPeerIdentities() = runBlocking {
+        var identityCalls = 0
+        MessageStore(database).ingest(incoming(ACCOUNT, "seed", "hello"))
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = ChatRepository(database),
+            scope = scope,
+            enqueue = { _, _ -> true },
+            ensurePeerIdentities = { _, _ -> identityCalls += 1 },
+        )
+        presenter.state.first { it.conversationsReady && it.conversations.isNotEmpty() }
+        while (identityCalls == 0) {
+            yield()
+        }
+        val afterReady = identityCalls
+
+        repeat(8) { index ->
+            assertTrue(
+                presenter.updateDraft(
+                    snapshot(ACCOUNT, PEER, "typed-$index", revision = index.toLong()),
+                ).await(),
+            )
+        }
+
+        assertEquals(afterReady, identityCalls)
         presenter.close()
     }
 

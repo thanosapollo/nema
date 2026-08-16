@@ -492,6 +492,11 @@ class DirectChatPresenter(
     private val threadingPolicy: ThreadingPolicy = ThreadingPolicy(),
     private val restoreRouteOnStart: Boolean = false,
 ) {
+    private data class PendingDraft(
+        var snapshot: DraftSnapshot,
+        val waiters: MutableList<CompletableDeferred<Boolean>> = mutableListOf(),
+    )
+
     private data class SelectedConversation(
         val route: ChatRoute?,
         val messages: List<TimelineMessage>,
@@ -506,6 +511,9 @@ class DirectChatPresenter(
     private val presenterJob = SupervisorJob(scope.coroutineContext[Job])
     private val presenterScope = CoroutineScope(scope.coroutineContext + presenterJob)
     private var actionTail: Job? = null
+    private val coalescedDrafts = linkedMapOf<DirectConversationKey, PendingDraft>()
+    private var draftFlushScheduled = false
+    private var ensuredPeerJids: Set<String> = emptySet()
     private val routeReady = CompletableDeferred<Unit>()
     private val selectedRoute = flow {
         if (!restoreRouteOnStart) repository.saveRoute(account.id.value, null)
@@ -576,7 +584,8 @@ class DirectChatPresenter(
                     snapshot.conversations.forEach { add(it.peerJid) }
                     snapshot.selectedPeer?.let(::add)
                 }
-                if (peers.isNotEmpty()) {
+                if (peers.isNotEmpty() && peers != ensuredPeerJids) {
+                    ensuredPeerJids = peers
                     try {
                         ensurePeerIdentities(account.id, peers)
                     } catch (cancelled: CancellationException) {
@@ -679,13 +688,37 @@ class DirectChatPresenter(
         presenterJob.cancel()
     }
 
-    fun updateDraft(snapshot: DraftSnapshot): Deferred<Boolean> = submitAction {
-        if (!owns(snapshot.key)) {
-            false
-        } else {
-            repository.saveDraft(snapshot.key, snapshot.body, snapshot.reply)
-            true
+    fun updateDraft(snapshot: DraftSnapshot): Deferred<Boolean> {
+        val result = CompletableDeferred<Boolean>()
+        synchronized(actionLock) {
+            val pending = coalescedDrafts.getOrPut(snapshot.key) { PendingDraft(snapshot) }
+            pending.snapshot = snapshot
+            pending.waiters += result
+            if (!draftFlushScheduled) {
+                draftFlushScheduled = true
+                val predecessor = actionTail
+                presenterScope.async(start = CoroutineStart.LAZY) {
+                    try {
+                        try {
+                            predecessor?.join()
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                        }
+                        flushCoalescedDrafts()
+                    } catch (cancelled: CancellationException) {
+                        failPendingDrafts()
+                        throw cancelled
+                    } catch (_: Exception) {
+                        failPendingDrafts()
+                    }
+                }.also {
+                    actionTail = it
+                    it.start()
+                }
+            }
         }
+        return result
     }
 
     fun sendDraft(snapshot: DraftSnapshot): Deferred<Boolean> = submitAction {
@@ -735,6 +768,53 @@ class DirectChatPresenter(
 
     suspend fun retryUncertain(key: RetryUncertainKey) {
         if (key.accountId == account.id.value) retry(account, key)
+    }
+
+    private suspend fun flushCoalescedDrafts() {
+        while (true) {
+            val batch: List<PendingDraft>
+            synchronized(actionLock) {
+                if (coalescedDrafts.isEmpty()) {
+                    draftFlushScheduled = false
+                    return
+                }
+                batch = coalescedDrafts.values.map { pending ->
+                    PendingDraft(pending.snapshot, pending.waiters.toMutableList())
+                }
+                coalescedDrafts.clear()
+            }
+            for (pending in batch) {
+                val ok = try {
+                    if (!owns(pending.snapshot.key)) {
+                        false
+                    } else {
+                        repository.saveDraft(
+                            pending.snapshot.key,
+                            pending.snapshot.body,
+                            pending.snapshot.reply,
+                        )
+                        true
+                    }
+                } catch (cancelled: CancellationException) {
+                    pending.waiters.forEach { waiter -> waiter.complete(false) }
+                    failPendingDrafts()
+                    throw cancelled
+                } catch (_: Exception) {
+                    false
+                }
+                pending.waiters.forEach { waiter -> waiter.complete(ok) }
+            }
+        }
+    }
+
+    private fun failPendingDrafts() {
+        val waiters = synchronized(actionLock) {
+            val pending = coalescedDrafts.values.flatMap { it.waiters }
+            coalescedDrafts.clear()
+            draftFlushScheduled = false
+            pending
+        }
+        waiters.forEach { waiter -> waiter.complete(false) }
     }
 
     private fun submitAction(action: suspend () -> Boolean): Deferred<Boolean> = synchronized(actionLock) {
