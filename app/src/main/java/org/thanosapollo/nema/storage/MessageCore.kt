@@ -31,6 +31,17 @@ abstract class MessageDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     abstract suspend fun insertPeer(peer: PeerEntity): Long
 
+    @Query(
+        """
+        UPDATE peers SET lastReadLocalSequence = (
+          SELECT COALESCE(MAX(localSequence), 0) FROM messages
+          WHERE accountId = :accountId AND peerJid = :peerJid
+        )
+        WHERE accountId = :accountId AND jid = :peerJid
+        """,
+    )
+    abstract suspend fun updatePeerLastRead(accountId: String, peerJid: String): Int
+
     @Upsert
     abstract suspend fun upsertPeer(peer: PeerEntity)
 
@@ -586,7 +597,16 @@ abstract class MessageDao {
           peers.localNickname AS localNickname,
           peers.photoBytes AS photoBytes,
           peers.photoMime AS photoMime,
-          COALESCE(peers.room, 0) AS room
+          COALESCE(peers.room, 0) AS room,
+          (
+            SELECT COUNT(*)
+            FROM messages AS unread
+            WHERE unread.accountId = :accountId
+              AND unread.peerJid = messages.peerJid
+              AND unread.direction = 'INBOUND'
+              AND unread.replaceId IS NULL
+              AND unread.localSequence > COALESCE(peers.lastReadLocalSequence, 0)
+          ) AS unreadCount
         FROM latest_messages AS messages
         LEFT JOIN peers
           ON peers.accountId = messages.accountId
@@ -623,7 +643,16 @@ abstract class MessageDao {
           peers.localNickname AS localNickname,
           peers.photoBytes AS photoBytes,
           peers.photoMime AS photoMime,
-          COALESCE(peers.room, 0) AS room
+          COALESCE(peers.room, 0) AS room,
+          (
+            SELECT COUNT(*)
+            FROM messages AS unread
+            WHERE unread.accountId = :accountId
+              AND unread.peerJid = messages.peerJid
+              AND unread.direction = 'INBOUND'
+              AND unread.replaceId IS NULL
+              AND unread.localSequence > COALESCE(peers.lastReadLocalSequence, 0)
+          ) AS unreadCount
         FROM messages
         INNER JOIN (
           SELECT peerJid, MAX(localSequence) AS localSequence
@@ -671,7 +700,16 @@ abstract class MessageDao {
           peers.localNickname AS localNickname,
           peers.photoBytes AS photoBytes,
           peers.photoMime AS photoMime,
-          COALESCE(peers.room, 0) AS room
+          COALESCE(peers.room, 0) AS room,
+          (
+            SELECT COUNT(*)
+            FROM messages AS unread
+            WHERE unread.accountId = :accountId
+              AND unread.peerJid = messages.peerJid
+              AND unread.direction = 'INBOUND'
+              AND unread.replaceId IS NULL
+              AND unread.localSequence > COALESCE(peers.lastReadLocalSequence, 0)
+          ) AS unreadCount
         FROM messages
         INNER JOIN (
           SELECT peerJid, MAX(localSequence) AS localSequence
@@ -1242,6 +1280,7 @@ data class ConversationListRow(
     val sentAtEpochMs: Long?,
     val sentTimeSource: MessageTimeSource?,
     val conversationArchiveOrdinal: Long?,
+    val unreadCount: Int = 0,
 ) {
     val groupChat: Boolean
         get() = messageKind == MessageKind.GROUPCHAT || room

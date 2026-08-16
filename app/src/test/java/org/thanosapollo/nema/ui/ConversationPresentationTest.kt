@@ -38,4 +38,11 @@ class ConversationPresentationTest {
         assertTrue(conversationMatches(conversation, "EXAMPLE"))
         assertFalse(conversationMatches(conversation, "bob"))
     }
+
+    @Test
+    fun unreadBadgeCapsAtNinetyNine() {
+        assertNull(unreadBadgeLabel(0))
+        assertEquals("3", unreadBadgeLabel(3))
+        assertEquals("99+", unreadBadgeLabel(100))
+    }
 }

@@ -94,6 +94,45 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
+    fun inboundAfterLastReadCountsAsUnreadUntilOpened() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(incoming(ACCOUNT, "first", "first body"))
+        val repository = ChatRepository(database)
+        assertEquals(1, repository.observeConversations(ACCOUNT).first().single().unreadCount)
+
+        assertTrue(repository.markConversationRead(ACCOUNT, PEER))
+        assertEquals(0, repository.observeConversations(ACCOUNT).first().single().unreadCount)
+
+        store.ingest(incoming(ACCOUNT, "second", "second body"))
+        assertEquals(1, repository.observeConversations(ACCOUNT).first().single().unreadCount)
+    }
+
+    @Test
+    fun openingChatClearsUnreadAndSelectedPeerDoesNotAutoReadLaterInbound() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(incoming(ACCOUNT, "first", "first body"))
+        val repository = ChatRepository(database)
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = repository,
+            scope = scope,
+            enqueue = { _, _ -> true },
+        )
+        presenter.state.first { it.conversations.singleOrNull()?.unreadCount == 1 }
+        assertTrue(presenter.selectPeer(PEER))
+        presenter.state.first { it.selectedPeer == PEER && it.conversations.single().unreadCount == 0 }
+
+        store.ingest(incoming(ACCOUNT, "later", "later body"))
+        presenter.state.first { it.conversations.single().unreadCount == 1 }
+        yield()
+        assertEquals(1, repository.observeConversations(ACCOUNT).first().single().unreadCount)
+
+        assertTrue(presenter.markVisibleConversationRead())
+        presenter.state.first { it.conversations.single().unreadCount == 0 }
+        presenter.close()
+    }
+
+    @Test
     fun cachedConversationsReadSqliteWithoutArchiveRanking() = runBlocking {
         val store = MessageStore(database)
         store.ingest(incoming(ACCOUNT, "hello", "cached body"))

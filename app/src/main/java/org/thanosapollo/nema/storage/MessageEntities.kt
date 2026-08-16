@@ -33,6 +33,8 @@ data class PeerEntity(
     val vcardFailureAtMs: Long? = null,
     @ColumnInfo(defaultValue = "0")
     val room: Boolean = false,
+    @ColumnInfo(defaultValue = "0")
+    val lastReadLocalSequence: Long = 0,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -46,6 +48,7 @@ data class PeerEntity(
             vcardFetchedAtMs == other.vcardFetchedAtMs &&
             vcardFailureAtMs == other.vcardFailureAtMs &&
             room == other.room &&
+            lastReadLocalSequence == other.lastReadLocalSequence &&
             photoBytes.contentEquals(other.photoBytes)
     }
 
@@ -59,6 +62,7 @@ data class PeerEntity(
         result = 31 * result + (vcardFetchedAtMs?.hashCode() ?: 0)
         result = 31 * result + (vcardFailureAtMs?.hashCode() ?: 0)
         result = 31 * result + room.hashCode()
+        result = 31 * result + lastReadLocalSequence.hashCode()
         result = 31 * result + (photoBytes?.contentHashCode() ?: 0)
         return result
     }

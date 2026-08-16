@@ -10,6 +10,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
@@ -68,6 +69,38 @@ class HomeContentTest {
         composeRule.onNodeWithContentDescription("New chat").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Own profile").performClick()
         composeRule.runOnIdle { assertEquals(1, profileClicks) }
+    }
+
+    @Test
+    fun homeShowsUnreadCountOnConversationRow() {
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = DirectChatState(
+                        accountId = "account-a",
+                        conversations = listOf(
+                            ConversationSummary(
+                                peerJid = "alice@example.org",
+                                preview = "new message",
+                                localSequence = 2,
+                                displayName = "Alice",
+                                unreadCount = 3,
+                            ),
+                        ),
+                        conversationsReady = true,
+                    ),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("conversation-unread", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithText("3", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("3 unread", useUnmergedTree = true).assertIsDisplayed()
     }
 
     @Test

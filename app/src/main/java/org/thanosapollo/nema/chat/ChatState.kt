@@ -59,6 +59,7 @@ data class ConversationSummary(
     val photoMime: String? = null,
     val groupChat: Boolean = false,
     val sentAtEpochMs: Long? = null,
+    val unreadCount: Int = 0,
 ) {
     val displayLabel: String
         get() = peerDisplayLabel(peerJid, displayName, localNickname)
@@ -74,6 +75,7 @@ data class ConversationSummary(
             photoMime == other.photoMime &&
             groupChat == other.groupChat &&
             sentAtEpochMs == other.sentAtEpochMs &&
+            unreadCount == other.unreadCount &&
             photoBytes.contentEquals(other.photoBytes)
     }
 
@@ -86,6 +88,7 @@ data class ConversationSummary(
         result = 31 * result + (photoMime?.hashCode() ?: 0)
         result = 31 * result + groupChat.hashCode()
         result = 31 * result + (sentAtEpochMs?.hashCode() ?: 0)
+        result = 31 * result + unreadCount
         result = 31 * result + (photoBytes?.contentHashCode() ?: 0)
         return result
     }
@@ -300,6 +303,11 @@ class ChatRepository(database: NemaDatabase) {
             dao.rooms(accountId),
         )
 
+    suspend fun markConversationRead(accountId: String, peerJid: String): Boolean {
+        dao.insertPeer(PeerEntity(accountId, peerJid))
+        return dao.updatePeerLastRead(accountId, peerJid) == 1
+    }
+
     private fun conversationSummaries(
         rows: List<ConversationListRow>,
         rooms: List<PeerEntity>,
@@ -321,6 +329,7 @@ class ChatRepository(database: NemaDatabase) {
                 photoMime = row.photoMime,
                 groupChat = row.groupChat,
                 sentAtEpochMs = row.sentAtEpochMs,
+                unreadCount = row.unreadCount,
             )
         }
         val emptyRooms = rooms
@@ -640,12 +649,19 @@ class DirectChatPresenter(
     suspend fun selectPeer(value: String): Boolean {
         val canonical = canonicalDirectPeer(value) ?: return false
         selectRoute(ChatRoute(canonical))
+        repository.markConversationRead(account.id.value, canonical)
         return true
+    }
+
+    suspend fun markVisibleConversationRead(): Boolean {
+        val peer = selectedRoute.value?.peerJid ?: return false
+        return repository.markConversationRead(account.id.value, peer)
     }
 
     suspend fun joinRoom(value: String): Boolean {
         val canonical = canonicalDirectPeer(value) ?: return false
         selectRoute(ChatRoute(canonical))
+        repository.markConversationRead(account.id.value, canonical)
         presenterScope.launch {
             repository.markRoom(account.id.value, canonical)
             if (joinedRooms.add(canonical)) {

@@ -316,6 +316,7 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean, activityRe
                             onSelectPeer = presenter::selectPeer,
                             onJoinRoom = presenter::joinRoom,
                             onCloseConversation = presenter::closeConversation,
+                            onMarkVisibleRead = presenter::markVisibleConversationRead,
                             onDraftChange = presenter::updateDraft,
                             onSend = presenter::sendDraft,
                             onSendAsNewThread = presenter::sendDraftAsNewThread,

@@ -512,6 +512,52 @@ class NemaDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migration14To15BackfillsLastReadToCurrentMaxSequence() {
+        helper.createDatabase(DATABASE_NAME, 14).apply {
+            execSQL(
+                "INSERT INTO accounts (id, bareJid, authenticationId, serviceDomain) " +
+                    "VALUES ('account-a', 'self@example.org', 'self', 'example.org')",
+            )
+            execSQL(
+                "INSERT INTO peers (accountId, jid, room) " +
+                    "VALUES ('account-a', 'peer@example.org', 0)",
+            )
+            execSQL(
+                """
+                INSERT INTO message_threads (
+                    accountId, peerJid, messageKind, threadId, parentThreadId
+                ) VALUES ('account-a', 'peer@example.org', 'CHAT', 'session-a', NULL)
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO messages (
+                    accountId, localMessageId, peerJid, senderJid, direction,
+                    messageKind, threadId, parentThreadId, body, localSequence, markable
+                ) VALUES ('account-a', 'legacy', 'peer@example.org', 'peer@example.org',
+                    'INBOUND', 'CHAT', 'session-a', NULL, 'legacy', 7, 0)
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_NAME,
+            15,
+            true,
+            MessageSchema.MIGRATION_14_15,
+        ).use { database ->
+            database.query(
+                "SELECT lastReadLocalSequence FROM peers WHERE jid = 'peer@example.org'",
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(7L, cursor.getLong(0))
+            }
+            assertForeignKeysClean(database)
+        }
+    }
+
     private fun assertTableEmpty(database: androidx.sqlite.db.SupportSQLiteDatabase, table: String) {
         database.query("SELECT COUNT(*) FROM $table").use { cursor ->
             assertTrue(cursor.moveToFirst())

@@ -158,6 +158,7 @@ fun DirectChatContent(
     onSelectPeer: suspend (String) -> Boolean,
     onJoinRoom: suspend (String) -> Boolean = onSelectPeer,
     onCloseConversation: () -> Unit,
+    onMarkVisibleRead: suspend () -> Boolean = { true },
     onDraftChange: (DraftSnapshot) -> Deferred<Boolean>,
     onSend: (DraftSnapshot) -> Deferred<Boolean>,
     onSendAsNewThread: (DraftSnapshot) -> Deferred<Boolean> = { CompletableDeferred(false) },
@@ -214,6 +215,12 @@ fun DirectChatContent(
         val overlayPeer = selectedPeer.takeIf { it != dismissedPeer }
         LaunchedEffect(selectedPeer) {
             if (selectedPeer == null) dismissedPeer = null
+        }
+        LaunchedEffect(overlayPeer, state.conversations) {
+            val peer = overlayPeer ?: return@LaunchedEffect
+            if (state.conversations.any { it.peerJid == peer && it.unreadCount > 0 }) {
+                onMarkVisibleRead()
+            }
         }
         Box(modifier.fillMaxSize()) {
             ChatBackground(backgroundUri)

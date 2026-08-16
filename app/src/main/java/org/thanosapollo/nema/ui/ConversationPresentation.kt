@@ -20,5 +20,11 @@ fun conversationMatches(conversation: ConversationSummary, query: String): Boole
         conversation.peerJid.contains(needle, ignoreCase = true)
 }
 
+fun unreadBadgeLabel(count: Int): String? = when {
+    count <= 0 -> null
+    count > 99 -> "99+"
+    else -> count.toString()
+}
+
 private val PAYLOAD_PREFIX = Regex("^<[A-Za-z!?/]")
 private const val PREVIEW_LIMIT = 80
