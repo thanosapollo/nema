@@ -4,6 +4,7 @@
 
 + Base changes on =master=.
 + Keep commits focused.
++ Commit reviewed source before building or installing a debug APK.
 + Add or update tests for changed behavior.
 + Keep exported Room schemas in sync with database changes.
 + Do not include credentials, account data, device databases, build output,
