@@ -147,7 +147,7 @@ fun semanticPalette(spec: AppearanceSpec, dark: Boolean): SemanticPalette {
         val elevated = blend(background, content, 0.10)
         val outgoing = blend(background, custom.primary, 0.28)
         val incoming = blend(background, content, 0.12)
-        val error = readableRole(
+        val error = readableOn(
             candidate = if (dark) 0xFFF2B8B5.toInt() else 0xFFB3261E.toInt(),
             container = background,
         )
@@ -156,7 +156,7 @@ fun semanticPalette(spec: AppearanceSpec, dark: Boolean): SemanticPalette {
             surface = surface,
             surfaceElevated = elevated,
             content = content,
-            mutedContent = readableRole(blend(content, background, 0.30), elevated),
+            mutedContent = readableOn(blend(content, background, 0.30), elevated),
             accent = custom.primary,
             onAccent = readableForeground(custom.primary),
             outgoingBubble = outgoing,
@@ -190,7 +190,7 @@ internal fun readableForeground(background: Int): Int {
     return if (contrastRatio(black, background) >= contrastRatio(white, background)) black else white
 }
 
-private fun readableRole(candidate: Int, container: Int): Int =
+internal fun readableOn(candidate: Int, container: Int): Int =
     if (contrastRatio(candidate, container) >= MIN_TEXT_CONTRAST) candidate else readableForeground(container)
 
 private fun blend(base: Int, overlay: Int, overlayFraction: Double): Int {

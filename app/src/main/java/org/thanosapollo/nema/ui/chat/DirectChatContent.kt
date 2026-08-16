@@ -12,6 +12,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -40,6 +41,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Call
@@ -138,6 +140,8 @@ import org.thanosapollo.nema.thread.draftKey
 import org.thanosapollo.nema.ui.HomeContent
 import org.thanosapollo.nema.ui.quietConnectionStatus
 import org.thanosapollo.nema.ui.theme.LocalChatBackgroundUri
+import org.thanosapollo.nema.ui.theme.readableOn
+import org.thanosapollo.nema.ui.theme.toComposeColor
 import org.thanosapollo.nema.xmpp.blocking.PeerBlockingState
 import org.thanosapollo.nema.xmpp.blocking.PeerBlockingMutationResult
 import org.thanosapollo.nema.xmpp.httpupload.attachmentCaption
@@ -2017,6 +2021,11 @@ private fun ThreadSummaryButton(
     onClick: () -> Unit,
 ) {
     val replies = threadSummaryLabel(summary.replyCount)
+    val fill = MaterialTheme.colorScheme.surfaceVariant
+    val accent = readableOn(
+        MaterialTheme.colorScheme.primary.toArgb(),
+        fill.toArgb(),
+    ).toComposeColor()
     Surface(
         modifier = Modifier
             .fillMaxWidth()
@@ -2028,20 +2037,32 @@ private fun ThreadSummaryButton(
                     "Open thread with ${summary.replyCount} replies. Latest: ${summary.latestPreview}"
             }
             .testTag("thread-summary-${summary.thread.draftKey()}"),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.55f),
+        color = fill,
+        border = BorderStroke(1.dp, accent),
         shape = RoundedCornerShape(10.dp),
     ) {
-        Column(Modifier.padding(horizontal = 8.dp, vertical = 5.dp)) {
-            Text(
-                replies,
-                color = MaterialTheme.colorScheme.onSurface,
-                style = MaterialTheme.typography.labelMedium,
-            )
-            Text(
-                summary.latestPreview,
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    replies,
+                    color = accent,
+                    style = MaterialTheme.typography.labelMedium,
+                )
+                Text(
+                    summary.latestPreview,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Icon(
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                contentDescription = null,
+                tint = accent,
             )
         }
     }
