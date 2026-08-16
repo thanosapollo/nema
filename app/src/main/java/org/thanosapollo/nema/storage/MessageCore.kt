@@ -1383,6 +1383,7 @@ data class IngestionResult(
     val messageId: String,
     val mergedRows: Int,
     val identityConflict: Boolean,
+    val inserted: Boolean,
 )
 
 class OutboxClaim internal constructor(
@@ -1693,6 +1694,7 @@ class MessageStore private constructor(
         val matched = existingLocal ?: mappedMessages
             .filter { it.isCompatibleWith(incoming) }
             .minWithOrNull(compareBy(MessageEntity::localSequence, MessageEntity::localMessageId))
+        val inserted = matched == null
         var winner: MessageEntity
         if (matched == null) {
             val created = incoming.toEntity(allocateSequence(incoming.accountId))
@@ -1758,7 +1760,7 @@ class MessageStore private constructor(
             winner = winner.copy(directSessionTransitionApplied = true)
             dao.updateMessage(winner)
         }
-        return IngestionResult(winner.localMessageId, mergedRows, identityConflict)
+        return IngestionResult(winner.localMessageId, mergedRows, identityConflict, inserted)
     }
 
     private suspend fun reconcileCorrections(
@@ -2151,6 +2153,7 @@ class MessageStore private constructor(
         }
 
         var ingested = 0
+        var inserted = 0
         page.messages.forEachIndexed { index, archived ->
             archived.signal?.let { signal ->
                 recordReceiptSignalInTransaction(
@@ -2185,6 +2188,7 @@ class MessageStore private constructor(
                 ),
             )
             ingested++
+            if (result.inserted && !result.identityConflict) inserted++
         }
 
         val pageOldestOrdinal = page.firstId?.let { startOrdinal }
@@ -2220,7 +2224,7 @@ class MessageStore private constructor(
         writeBoundary(MessageWriteBoundary.BEFORE_ARCHIVE_CURSOR)
         dao.upsertArchiveCursor(next)
         writeBoundary(MessageWriteBoundary.AFTER_ARCHIVE_CURSOR)
-        ArchivePageResult(ArchivePageStatus.APPLIED, next, ingested)
+        ArchivePageResult(ArchivePageStatus.APPLIED, next, ingested, inserted)
     }
 
     suspend fun claim(accountId: String, operationId: String, generation: Long): OutboxClaim? {

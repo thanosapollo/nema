@@ -1324,6 +1324,19 @@ class MessageStoreTest {
     }
 
     @Test
+    fun firstIngestIsInsertedAndAliasReplayIsNot() = runBlocking {
+        val store = MessageStore(database)
+        val origin = alias("wire-1")
+        val first = store.ingest(incoming(localId = "live-1", aliases = listOf(origin)))
+        assertTrue(first.inserted)
+        assertFalse(first.identityConflict)
+        val replay = store.ingest(incoming(localId = "mam-1", aliases = listOf(origin)))
+        assertFalse(replay.inserted)
+        assertEquals(first.messageId, replay.messageId)
+        assertEquals(1, store.messages(ACCOUNT).size)
+    }
+
+    @Test
     fun dependentReparentFaultRollsBackWholeMerge() = runBlocking {
         val firstAlias = alias("first")
         val secondAlias = alias("second")

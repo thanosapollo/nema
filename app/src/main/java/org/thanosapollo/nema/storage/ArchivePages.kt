@@ -75,6 +75,7 @@ data class ArchivePageResult(
     val status: ArchivePageStatus,
     val cursor: ArchiveCursorEntity,
     val ingested: Int,
+    val inserted: Int = 0,
 )
 
 internal class ArchivePageRejectedException(message: String) : Exception(message)
