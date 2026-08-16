@@ -1814,7 +1814,7 @@ fun MessageTimeline(
             ) { message ->
                 var messageActionsOpen by remember(message.id) { mutableStateOf(false) }
                 val (bubbleContainerColor, bubbleContentColor) = messageBubbleColors(message.outgoing)
-                val quote = remember(message.body) { message.body.leadingManualQuote() }
+                val segments = remember(message.body) { parseQuotedBody(message.body) }
                 val correctionTarget = message.correctionTargetOrNull(conversationGroupChat)
                     .takeIf { editActionsEnabled }
                 Box(modifier = Modifier.fillMaxWidth()) {
@@ -1873,12 +1873,18 @@ fun MessageTimeline(
                                 message.reply?.let { reply ->
                                     MessageReplyPreview(reply.senderLabel, reply.body)
                                 }
-                                if (quote == null) {
+                                if (segments.none { it is BodySegment.Quote }) {
                                     Text(message.body, style = MaterialTheme.typography.bodyMedium)
                                 } else {
-                                    ManualQuoteBlock(quote.quoted)
-                                    quote.remainder.takeIf(String::isNotEmpty)?.let {
-                                        Text(it, style = MaterialTheme.typography.bodyMedium)
+                                    segments.forEach { segment ->
+                                        when (segment) {
+                                            is BodySegment.Plain ->
+                                                segment.text.takeIf(String::isNotEmpty)?.let {
+                                                    Text(it, style = MaterialTheme.typography.bodyMedium)
+                                                }
+                                            is BodySegment.Quote ->
+                                                ManualQuoteBlock(segment.text, segment.depth)
+                                        }
                                     }
                                 }
                                 if (message.edited) {
@@ -2048,11 +2054,11 @@ private fun MessageReplyPreview(senderLabel: String, body: String) {
 }
 
 @Composable
-private fun ManualQuoteBlock(body: String) {
+private fun ManualQuoteBlock(body: String, depth: Int = 1) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(bottom = 4.dp)
+            .padding(start = ((depth - 1).coerceAtLeast(0) * 8).dp, bottom = 4.dp)
             .background(
                 MaterialTheme.colorScheme.surface.copy(alpha = 0.35f),
                 RoundedCornerShape(4.dp),
@@ -2073,19 +2079,6 @@ private fun ManualQuoteBlock(body: String) {
             style = MaterialTheme.typography.bodyMedium,
         )
     }
-}
-
-private data class ManualQuote(val quoted: String, val remainder: String)
-
-private fun String.leadingManualQuote(): ManualQuote? {
-    val lines = split('\n')
-    if (lines.firstOrNull()?.startsWith('>') != true) return null
-    val quotedLines = lines.takeWhile { it.startsWith('>') }
-    val remainder = lines.drop(quotedLines.size).dropWhile(String::isEmpty).joinToString("\n")
-    return ManualQuote(
-        quoted = quotedLines.joinToString("\n") { it.removePrefix(">").removePrefix(" ") },
-        remainder = remainder,
-    )
 }
 
 private fun TimelineMessage.senderLabel(): String =
