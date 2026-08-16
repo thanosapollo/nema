@@ -944,15 +944,12 @@ class XmppConnectionService : Service() {
                 },
             )
             notifications.createNotificationChannel(
-                NotificationChannel(
-                    MESSAGE_CHANNEL_ID,
+                incomingMessageChannel(
                     getString(R.string.message_channel_name),
-                    NotificationManager.IMPORTANCE_DEFAULT,
-                ).apply {
-                    description = getString(R.string.message_channel_description)
-                    setShowBadge(true)
-                },
+                    getString(R.string.message_channel_description),
+                ),
             )
+            notifications.deleteNotificationChannel(LEGACY_MESSAGE_CHANNEL_ID)
             notificationChannelReady = true
         } catch (_: RuntimeException) {
             notificationChannelReady = false
@@ -1161,13 +1158,13 @@ class XmppConnectionService : Service() {
         try {
             notifications.notify(
                 MESSAGE_NOTIFICATION_BASE + peer.hashCode(),
-                Notification.Builder(this, MESSAGE_CHANNEL_ID)
-                    .setSmallIcon(R.drawable.ic_nema_mark)
-                    .setContentTitle(peer)
-                    .setContentText(preview)
-                    .setContentIntent(openIntent)
-                    .setAutoCancel(true)
-                    .build(),
+                incomingMessageNotification(
+                    context = this,
+                    peer = peer,
+                    preview = preview,
+                    openIntent = openIntent,
+                    icon = R.drawable.ic_nema_mark,
+                ),
             )
         } catch (_: RuntimeException) {
         }
@@ -1181,7 +1178,6 @@ class XmppConnectionService : Service() {
         const val EXTRA_ACCOUNT_ID = "account_id"
         const val EXTRA_PEER_JID = "peer_jid"
         private const val CHANNEL_ID = "xmpp_connection"
-        private const val MESSAGE_CHANNEL_ID = "xmpp_messages"
         private const val NOTIFICATION_ID = 1001
         private const val MESSAGE_NOTIFICATION_BASE = 2000
         private const val VISIBILITY_CHECK_MILLIS = 1_000L
