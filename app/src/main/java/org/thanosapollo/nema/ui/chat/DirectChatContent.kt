@@ -123,6 +123,7 @@ import org.thanosapollo.nema.chat.DraftSnapshot
 import org.thanosapollo.nema.chat.RecentThread
 import org.thanosapollo.nema.chat.ThreadSummary
 import org.thanosapollo.nema.chat.TimelineMessage
+import org.thanosapollo.nema.chat.threadSummaryLabel
 import org.thanosapollo.nema.session.SessionIdentity
 import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.thread.ThreadId
@@ -1996,7 +1997,7 @@ private fun ThreadSummaryButton(
     summary: ThreadSummary,
     onClick: () -> Unit,
 ) {
-    val replies = "Replies ${summary.replyCount}"
+    val replies = threadSummaryLabel(summary.replyCount)
     Surface(
         modifier = Modifier
             .fillMaxWidth()

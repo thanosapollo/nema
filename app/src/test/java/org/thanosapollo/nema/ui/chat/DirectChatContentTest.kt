@@ -508,7 +508,7 @@ class DirectChatContentTest {
             }
         }
 
-        val incoming = contrastRatio(renderedTextColor("Replies 1"), containers.second)
+        val incoming = contrastRatio(renderedTextColor("Thread · 1 replies"), containers.second)
 
         composeRule.onNodeWithText("Retry — duplicate possible").assertDoesNotExist()
         composeRule.onNodeWithText("May have sent").assertDoesNotExist()
@@ -2347,9 +2347,9 @@ class DirectChatContentTest {
             }
         }
 
-        composeRule.onNodeWithText("Replies 2").assertIsDisplayed()
+        composeRule.onNodeWithText("Thread · 2 replies").assertIsDisplayed()
         composeRule.onNodeWithText("latest answer").assertIsDisplayed()
-        composeRule.onNodeWithText("Replies 2").performClick()
+        composeRule.onNodeWithText("Thread · 2 replies").performClick()
         composeRule.waitForIdle()
         assertEquals(thread, opened)
     }
@@ -2403,11 +2403,11 @@ class DirectChatContentTest {
 
         composeRule.onNodeWithTag("message-timeline").performScrollToIndex(79)
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("Replies 1").assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("Thread · 1 replies").assertIsDisplayed().performClick()
         composeRule.onNodeWithContentDescription("Back to conversation").performClick()
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithText("Replies 1").assertIsDisplayed()
+        composeRule.onNodeWithText("Thread · 1 replies").assertIsDisplayed()
         composeRule.onNodeWithText("message-21").assertIsDisplayed()
     }
 
@@ -2459,7 +2459,7 @@ class DirectChatContentTest {
             }
         }
 
-        composeRule.onNodeWithText("Replies 1").performClick()
+        composeRule.onNodeWithText("Thread · 1 replies").performClick()
         composeRule.waitForIdle()
         assertEquals("thread-a", opened?.id?.value)
         assertTrue(opened?.id?.value != "message-identity")

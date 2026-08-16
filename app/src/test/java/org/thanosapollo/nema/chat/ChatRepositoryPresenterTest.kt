@@ -702,7 +702,8 @@ class ChatRepositoryPresenterTest {
 
         assertEquals(listOf("legacy-root", "session-member"), overview.map(TimelineMessage::id))
         assertEquals(child, overview.first().threadSummaries.single().thread)
-        assertEquals(listOf("child-member"), focused.map(TimelineMessage::id))
+        assertEquals(listOf("legacy-root", "child-member"), focused.map(TimelineMessage::id))
+        assertEquals(1, overview.first().threadSummaries.single().replyCount)
     }
 
     @Test
@@ -830,15 +831,14 @@ class ChatRepositoryPresenterTest {
             ),
             overview.single().threadSummaries,
         )
-        assertEquals(listOf("thread-first", "thread-later"), dedicated.map(TimelineMessage::id))
-        assertTrue(dedicated.all { it.thread == thread })
+        assertEquals(listOf("root", "thread-first", "thread-later"), dedicated.map(TimelineMessage::id))
 
         database.close()
         database = NemaDatabase.create(context, databaseName)
         val reopened = ChatRepository(database)
         assertEquals(listOf("root"), reopened.observeTimeline(ACCOUNT, PEER).first().map(TimelineMessage::id))
         assertEquals(
-            listOf("thread-first", "thread-later"),
+            listOf("root", "thread-first", "thread-later"),
             reopened.observeTimeline(DirectConversationKey(ACCOUNT, PEER, thread)).first().map(TimelineMessage::id),
         )
     }
@@ -885,7 +885,7 @@ class ChatRepositoryPresenterTest {
 
         assertEquals(listOf("backfilled-root"), overview.map(TimelineMessage::id))
         assertEquals(
-            listOf("thread-first", "thread-later"),
+            listOf("backfilled-root", "thread-first", "thread-later"),
             dedicated.map(TimelineMessage::id),
         )
     }
@@ -937,7 +937,7 @@ class ChatRepositoryPresenterTest {
         assertEquals(listOf("first-root", "later-target"), overview.map(TimelineMessage::id))
         assertEquals(thread, overview.first().threadSummaries.single().thread)
         assertTrue(overview.last().threadSummaries.isEmpty())
-        assertEquals(listOf("thread-first", "thread-later"), dedicated.map(TimelineMessage::id))
+        assertEquals(listOf("first-root", "thread-first", "thread-later"), dedicated.map(TimelineMessage::id))
     }
 
     @Test
@@ -1011,8 +1011,8 @@ class ChatRepositoryPresenterTest {
         assertEquals(child, overview.last().threadSummaries.single().thread)
         assertEquals(listOf("parent-reply"), parentView.map(TimelineMessage::id))
         assertEquals(child, parentView.single().threadSummaries.single().thread)
-        assertEquals(listOf("child-reply"), childView.map(TimelineMessage::id))
-        assertTrue(childView.single().threadSummaries.isEmpty())
+        assertEquals(listOf("parent-reply", "child-reply"), childView.map(TimelineMessage::id))
+        assertTrue(childView.all { it.threadSummaries.isEmpty() })
     }
 
     @Test

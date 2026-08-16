@@ -114,6 +114,8 @@ data class ThreadSummary(
     val latestPreview: String,
 )
 
+fun threadSummaryLabel(replyCount: Int): String = "Thread · $replyCount replies"
+
 data class RecentThread(
     val thread: ThreadRef,
     val title: String,
@@ -1032,7 +1034,9 @@ private fun List<TimelineMessage>.projectThreads(
         val hidden = resolved.flatMap(ResolvedThread::members).mapTo(mutableSetOf(), TimelineMessage::id)
         filterNot { it.id in hidden }
     } else {
-        filter { it.thread == selected }
+        val memberIds = filter { it.thread == selected }.mapTo(mutableSetOf(), TimelineMessage::id)
+        resolved.firstOrNull { it.thread == selected }?.root?.id?.let(memberIds::add)
+        filter { it.id in memberIds }
     }
     val summaries = resolved.groupBy { it.root.id }
     return visible.map { message ->
