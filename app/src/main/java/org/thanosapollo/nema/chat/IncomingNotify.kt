@@ -7,14 +7,12 @@ fun shouldNotifyInsertedInbound(
     result: IngestionResult,
     inbound: Boolean,
     groupChat: Boolean,
-    archiveReady: Boolean,
     visiblePeer: String?,
     peerJid: String,
     direction: ArchiveDirection? = null,
 ): Boolean {
     if (!result.inserted || result.identityConflict || !inbound || groupChat) return false
     if (direction != null && direction != ArchiveDirection.AFTER) return false
-    if (!archiveReady) return false
     if (visiblePeer == peerJid) return false
     return peerJid.isNotBlank()
 }

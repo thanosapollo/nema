@@ -309,15 +309,12 @@ class SessionRuntime(
         return controller.uploadHttpFile(lease.identity.accountId, lease.identity.generation, request)
     }
 
-    private fun archiveReady(): Boolean = archive.state.value is ArchiveSyncState.Ready
-
     private fun emitInsertedLive(envelope: IncomingMessageEnvelope, result: IngestionResult) {
         if (
             shouldNotifyInsertedInbound(
                 result = result,
                 inbound = !envelope.outbound,
                 groupChat = envelope.kind == MessageKind.GROUPCHAT,
-                archiveReady = archiveReady(),
                 visiblePeer = visiblePeer.get(),
                 peerJid = envelope.peer,
             )
@@ -327,7 +324,6 @@ class SessionRuntime(
     }
 
     private fun emitInsertedArchive(inserted: List<InsertedInbound>, direction: ArchiveDirection) {
-        val ready = archiveReady()
         val visible = visiblePeer.get()
         inserted.forEach { inbound ->
             if (
@@ -335,7 +331,6 @@ class SessionRuntime(
                     result = IngestionResult(inbound.peerJid, 0, identityConflict = false, inserted = true),
                     inbound = inbound.inbound,
                     groupChat = inbound.groupChat,
-                    archiveReady = ready,
                     visiblePeer = visible,
                     peerJid = inbound.peerJid,
                     direction = direction,
