@@ -536,6 +536,7 @@ class DirectChatPresenter(
     private var ensuredPeerJids: Set<String> = emptySet()
     private val routeReady = CompletableDeferred<Unit>()
     private val routeGeneration = AtomicInteger(0)
+    private val joinedRooms = mutableSetOf<String>()
     private val selectedRoute = MutableStateFlow<ChatRoute?>(null)
     private val selectedConversation = selectedRoute.flatMapLatest { route ->
         if (route == null) {
@@ -645,7 +646,9 @@ class DirectChatPresenter(
         selectRoute(ChatRoute(canonical))
         presenterScope.launch {
             repository.markRoom(account.id.value, canonical)
-            joinMuc(canonical)
+            if (joinedRooms.add(canonical)) {
+                joinMuc(canonical)
+            }
         }
         return true
     }

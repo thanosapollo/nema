@@ -1666,6 +1666,31 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
+    fun joiningTheSameRoomDoesNotStartArchiveSyncTwice() = runBlocking {
+        var joins = 0
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = ChatRepository(database),
+            scope = scope,
+            enqueue = { _, _ -> true },
+            joinMuc = {
+                joins += 1
+                true
+            },
+        )
+        val room = "room@conference.example.org"
+        assertTrue(presenter.joinRoom(room))
+        presenter.closeConversation()
+        assertTrue(presenter.joinRoom(room))
+        while (joins == 0) {
+            yield()
+        }
+        repeat(4) { yield() }
+        assertEquals(1, joins)
+        presenter.close()
+    }
+
+    @Test
     fun closingAChatReturnsHomeWithoutWaitingForRoutePersist() = runBlocking {
         val presenter = DirectChatPresenter(
             account = accountConfiguration(ACCOUNT, SELF),

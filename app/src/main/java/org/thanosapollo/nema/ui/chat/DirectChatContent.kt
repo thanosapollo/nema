@@ -263,7 +263,6 @@ fun DirectChatContent(
                         }
                         backProgress = 0f
                         dismissedPeer = selectedPeer
-                        onCloseConversation()
                     } catch (cancelled: CancellationException) {
                         backProgress = 0f
                         throw cancelled
@@ -487,7 +486,6 @@ fun DirectChatContent(
                                 onClick = if (state.selectedThread == null) {
                                     {
                                         dismissedPeer = selectedPeer
-                                        onCloseConversation()
                                     }
                                 } else {
                                     onCloseThread

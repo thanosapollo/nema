@@ -550,10 +550,6 @@ class DirectChatContentTest {
         composeRule.runOnIdle { owner.completeBack() }
         assertEquals(1, closeThread)
         assertEquals(0, closeConversation)
-        composeRule.runOnIdle { show(state(ACCOUNT_A, PEER_A)) }
-        composeRule.runOnIdle { owner.completeBack() }
-        assertEquals(1, closeThread)
-        assertEquals(1, closeConversation)
     }
 
     @Test
