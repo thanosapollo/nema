@@ -148,7 +148,9 @@ data class IncomingMessageEnvelope(
         require(sender.isNotEmpty()) { "Sender must not be empty" }
         require(originId == null || originId.isNotEmpty()) { "Origin ID must not be empty" }
         require(replaceId == null || replaceId.isNotEmpty()) { "Correction target must not be empty" }
-        require(body.isNotEmpty()) { "Message body must not be empty" }
+        // WIP-FOUNDATION: crypto/protection later. Empty body is legal only with an attachment.
+        // Mapper still copies OOB URL into body for persist/preview; do not change that here.
+        require(body.isNotEmpty() || !attachmentUrl.isNullOrEmpty()) { "Message payload must not be empty" }
         require(stanzaIds.distinct().size == stanzaIds.size) { "Stanza IDs must be unique" }
         require((sentAtEpochMs == null) == (sentTimeSource == null)) {
             "Message time and provenance must be stored together"
@@ -289,7 +291,8 @@ data class OutgoingMessageEnvelope(
         require(operationId.isNotEmpty()) { "Operation ID must not be empty" }
         require(originId.isNotEmpty()) { "Origin ID must not be empty" }
         require(recipient.isNotEmpty()) { "Recipient must not be empty" }
-        require(body.isNotEmpty()) { "Message body must not be empty" }
+        // WIP-FOUNDATION: crypto/protection later. Empty body is legal only with an attachment.
+        require(body.isNotEmpty() || !attachmentUrl.isNullOrEmpty()) { "Message payload must not be empty" }
         require(replaceId == null || replaceId.isNotEmpty()) { "Correction target must not be empty" }
         require(kind == MessageKind.CHAT || replaceId == null) { "Only direct chat messages may be corrected" }
     }

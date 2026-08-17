@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertThrows
 import org.junit.Test
 import org.thanosapollo.nema.thread.ThreadId
 import org.thanosapollo.nema.thread.ThreadRef
@@ -56,6 +57,74 @@ class XmppTransportTest {
         transport.recordIncoming(envelope)
 
         assertEquals(envelope, received.await())
+    }
+
+    @Test
+    fun `incoming envelope accepts empty body when attachment url is present`() {
+        val envelope = IncomingMessageEnvelope(
+            accountId = accountId,
+            generation = generation,
+            peer = "sender@example.org",
+            sender = "sender@example.org",
+            outbound = false,
+            originId = null,
+            body = "",
+            thread = null,
+            attachmentUrl = "https://upload.example.org/file",
+        )
+
+        assertEquals("", envelope.body)
+        assertEquals("https://upload.example.org/file", envelope.attachmentUrl)
+    }
+
+    @Test
+    fun `incoming envelope rejects empty body without attachment`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            IncomingMessageEnvelope(
+                accountId = accountId,
+                generation = generation,
+                peer = "sender@example.org",
+                sender = "sender@example.org",
+                outbound = false,
+                originId = null,
+                body = "",
+                thread = null,
+            )
+        }
+    }
+
+    @Test
+    fun `outgoing envelope accepts empty body when attachment url is present`() {
+        val envelope = OutgoingMessageEnvelope(
+            accountId = accountId,
+            generation = generation,
+            attempt = 1,
+            operationId = "operation",
+            originId = "origin",
+            recipient = "peer@example.org",
+            body = "",
+            thread = null,
+            attachmentUrl = "https://upload.example.org/file",
+        )
+
+        assertEquals("", envelope.body)
+        assertEquals("https://upload.example.org/file", envelope.attachmentUrl)
+    }
+
+    @Test
+    fun `outgoing envelope rejects empty body without attachment`() {
+        assertThrows(IllegalArgumentException::class.java) {
+            OutgoingMessageEnvelope(
+                accountId = accountId,
+                generation = generation,
+                attempt = 1,
+                operationId = "operation",
+                originId = "origin",
+                recipient = "peer@example.org",
+                body = "",
+                thread = null,
+            )
+        }
     }
 
     @Test
