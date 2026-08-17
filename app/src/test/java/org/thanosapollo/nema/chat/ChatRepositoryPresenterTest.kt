@@ -830,6 +830,82 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
+    fun outgoingRootKeepsThreadSummaryWhenPeerRepliesInChild() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(
+            incoming(ACCOUNT, "own-root", "own send").copy(
+                senderJid = SELF,
+                direction = MessageDirection.OUTBOUND,
+                aliases = listOf(
+                    TrustedIdentityAlias(
+                        IdentityAliasKind.ORIGIN_ID,
+                        MessageStore.OUTBOUND_ORIGIN_AUTHORITY,
+                        "own-origin",
+                    ),
+                ),
+            ),
+        )
+        val session = requireNotNull(ChatRepository(database).observeCurrentSession(ACCOUNT, PEER).first())
+        val child = ThreadRef(ThreadId.require("own-child"), session.id)
+        store.ingest(
+            incoming(
+                ACCOUNT,
+                "peer-reply",
+                "peer answer",
+                threadId = child.id.value,
+                parentThreadId = session.id.value,
+            ).copy(
+                replyToId = "own-origin",
+                replyToJid = SELF,
+            ),
+        )
+
+        val overview = ChatRepository(database).observeTimeline(ACCOUNT, PEER).first()
+        val root = overview.single { it.id == "own-root" }
+        assertTrue(root.outgoing)
+        assertEquals(child, root.threadSummaries.single().thread)
+        assertEquals(1, root.threadSummaries.single().replyCount)
+        assertEquals(listOf("own-root"), overview.map(TimelineMessage::id))
+    }
+
+    @Test
+    fun outgoingChildStaysVisibleWithThreadSummary() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(
+            incoming(ACCOUNT, "peer-root", "peer root").copy(
+                aliases = listOf(
+                    TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "peer-origin"),
+                ),
+            ),
+        )
+        val session = requireNotNull(ChatRepository(database).observeCurrentSession(ACCOUNT, PEER).first())
+        val child = ThreadRef(ThreadId.require("own-reply-thread"), session.id)
+        store.ingest(
+            incoming(ACCOUNT, "own-reply", "own thread send").copy(
+                senderJid = SELF,
+                direction = MessageDirection.OUTBOUND,
+                threadId = child.id.value,
+                parentThreadId = session.id.value,
+                replyToId = "peer-origin",
+                replyToJid = PEER,
+                aliases = listOf(
+                    TrustedIdentityAlias(
+                        IdentityAliasKind.ORIGIN_ID,
+                        MessageStore.OUTBOUND_ORIGIN_AUTHORITY,
+                        "own-reply-origin",
+                    ),
+                ),
+            ),
+        )
+
+        val overview = ChatRepository(database).observeTimeline(ACCOUNT, PEER).first()
+        assertEquals(listOf("peer-root", "own-reply"), overview.map(TimelineMessage::id))
+        assertEquals(child, overview.first().threadSummaries.single().thread)
+        assertEquals(child, overview.last().threadSummaries.single().thread)
+        assertTrue(overview.last().outgoing)
+    }
+
+    @Test
     fun recentChildUsesExternalRootTitleAndCountsEveryReply() = runBlocking {
         val store = MessageStore(database)
         store.ingest(

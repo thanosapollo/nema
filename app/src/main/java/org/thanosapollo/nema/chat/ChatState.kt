@@ -1068,16 +1068,23 @@ private fun List<TimelineMessage>.projectThreads(
         .mapNotNull(::resolveThread)
         .toList()
     val visible = if (selected == null) {
-        val hidden = resolved.flatMap(ResolvedThread::members).mapTo(mutableSetOf(), TimelineMessage::id)
+        val hidden = resolved.flatMap(ResolvedThread::members)
+            .filterNot(TimelineMessage::outgoing)
+            .mapTo(mutableSetOf(), TimelineMessage::id)
         filterNot { it.id in hidden }
     } else {
         val memberIds = filter { it.thread == selected }.mapTo(mutableSetOf(), TimelineMessage::id)
         resolved.firstOrNull { it.thread == selected }?.root?.id?.let(memberIds::add)
         filter { it.id in memberIds }
     }
-    val summaries = resolved.groupBy { it.root.id }
+    val summariesByRoot = resolved.groupBy { it.root.id }
+    val summariesByThread = resolved.groupBy { it.thread }
     return visible.map { message ->
-        val attached = summaries[message.id].orEmpty()
+        val attached = buildList {
+            addAll(summariesByRoot[message.id].orEmpty())
+            if (message.outgoing) addAll(summariesByThread[message.thread].orEmpty())
+        }
+            .distinctBy(ResolvedThread::thread)
             .filter { it.thread != selected }
             .map { thread ->
                 val latest = thread.members.lastOrNull() ?: thread.root
