@@ -47,6 +47,7 @@ import org.thanosapollo.nema.session.SessionIdentity
 import org.thanosapollo.nema.ui.AccountSettingsContent
 import org.thanosapollo.nema.ui.LoginFormContent
 import org.thanosapollo.nema.ui.PrimaryDestination
+import org.thanosapollo.nema.ui.selectSessionDestination
 import org.thanosapollo.nema.ui.SessionBottomBar
 import org.thanosapollo.nema.ui.chat.DirectChatContent
 import org.thanosapollo.nema.ui.showLoginSessionChrome
@@ -222,9 +223,6 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean, activityRe
     val activeAccount by application.sessionRuntime.activeAccount.collectAsState(initial = null)
     val configuredAccounts by application.sessionRuntime.configuredAccounts.collectAsState(initial = emptyList())
     var destination by rememberPrimaryDestination(application.processToken)
-    fun selectDestination(next: PrimaryDestination) {
-        destination = next
-    }
     var addingAccount by remember { mutableStateOf(false) }
     val backgroundTarget = rememberPendingBackgroundScope()
     var appearanceMessage by remember { mutableStateOf<String?>(null) }
@@ -254,6 +252,9 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean, activityRe
                 observeTyping = { peer -> application.sessionRuntime.chatStates.observe(peer) },
                 restoreRouteOnStart = restoreChatRouteOnStart,
             )
+        }
+        fun selectDestination(next: PrimaryDestination) {
+            destination = selectSessionDestination(next, presenter::closeConversation)
         }
         DisposableEffect(presenter) {
             onDispose(presenter::close)

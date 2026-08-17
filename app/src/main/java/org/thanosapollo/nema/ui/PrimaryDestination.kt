@@ -11,3 +11,11 @@ enum class PrimaryDestination {
             entries.firstOrNull { it.name == name } ?: HOME
     }
 }
+
+fun selectSessionDestination(
+    next: PrimaryDestination,
+    closeConversation: () -> Unit,
+): PrimaryDestination {
+    if (next == PrimaryDestination.HOME) closeConversation()
+    return next
+}
