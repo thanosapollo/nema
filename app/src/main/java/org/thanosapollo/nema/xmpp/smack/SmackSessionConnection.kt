@@ -993,10 +993,10 @@ internal fun Message.toIncomingChatState(
     expectedBareJid: String,
     ownRoomNick: String? = null,
 ): IncomingChatState? {
-    if (type != Message.Type.chat && type != Message.Type.groupchat) return null
+    if (type != Message.Type.chat && type != Message.Type.groupchat && type != Message.Type.normal) return null
     val fromJid = from ?: return null
     val activities = extensions.mapNotNull { extension ->
-        if (extension.namespace == CHAT_STATES_NAMESPACE && extension is StandardExtensionElement) {
+        if (extension.namespace == CHAT_STATES_NAMESPACE) {
             chatActivityNamed(extension.elementName)
         } else {
             null

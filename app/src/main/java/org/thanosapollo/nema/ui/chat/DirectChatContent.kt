@@ -487,30 +487,26 @@ fun DirectChatContent(
                                             overflow = TextOverflow.Ellipsis,
                                         )
                                     }
-                                    status?.let {
-                                        Text(
-                                            it,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                    } ?: state.typingLabel?.let { typing ->
-                                        Text(
-                                            typing,
+                                    when {
+                                        state.typingLabel != null -> Text(
+                                            requireNotNull(state.typingLabel),
                                             style = MaterialTheme.typography.labelSmall,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
                                             modifier = Modifier.testTag("typing-indicator"),
                                         )
-                                    } ?: if (state.selectedThread == null && state.selectedPeerGroupChat) {
-                                        Text(
+                                        status != null -> Text(
+                                            requireNotNull(status),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                        state.selectedThread == null && state.selectedPeerGroupChat -> Text(
                                             roomSubtitle(state.selectedRoomSubject, state.selectedRoomOccupantCount),
                                             style = MaterialTheme.typography.labelSmall,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
                                         )
-                                    } else {
-                                        Unit
                                     }
                                 }
                             }

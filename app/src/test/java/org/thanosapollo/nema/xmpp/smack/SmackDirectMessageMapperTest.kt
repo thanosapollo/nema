@@ -1384,4 +1384,27 @@ class SmackDirectMessageMapperTest {
         assertTrue(muc.groupChat)
         assertNull(selfNick.toIncomingChatState(attempt, "account@example.org", ownRoomNick = "me"))
     }
+
+    @Test
+    fun `wire composing parses after smack native provider`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        val xml = """
+            <message xmlns='jabber:client'
+                     from='talos@chat.example.org/bot'
+                     to='account@example.org/nema'
+                     type='chat'>
+              <composing xmlns='http://jabber.org/protocol/chatstates'/>
+            </message>
+        """.trimIndent()
+        val message = PacketParserUtils.parseStanza(xml) as Message
+        val mapped = requireNotNull(message.toIncomingChatState(attempt, "account@example.org"))
+        assertEquals("talos@chat.example.org", mapped.peer)
+        assertEquals(ChatActivity.COMPOSING, mapped.activity)
+        assertFalse(mapped.groupChat)
+    }
 }
