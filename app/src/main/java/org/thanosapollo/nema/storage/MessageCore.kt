@@ -957,7 +957,10 @@ abstract class MessageDao {
         WHERE messages.accountId = :accountId AND messages.peerJid = :peerJid
           AND messages.messageKind IN ('CHAT', 'GROUPCHAT')
           AND messages.replaceId IS NULL
-        ORDER BY messages.localSequence DESC, messages.localMessageId DESC
+        ORDER BY messages.sentAtEpochMs IS NULL,
+          messages.sentAtEpochMs DESC,
+          messages.localSequence DESC,
+          messages.localMessageId DESC
         LIMIT 80
         """,
     )

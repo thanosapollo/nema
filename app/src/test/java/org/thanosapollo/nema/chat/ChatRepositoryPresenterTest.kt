@@ -174,6 +174,29 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
+    fun cachedTimelineKeepsLatestSentAmongLaterIngestedHistory() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(
+            incoming(ACCOUNT, "latest-live", "latest body").copy(
+                sentAtEpochMs = 5_000L,
+                sentTimeSource = MessageTimeSource.MAM,
+            ),
+        )
+        repeat(90) { index ->
+            store.ingest(
+                incoming(ACCOUNT, "old-$index", "old $index").copy(
+                    sentAtEpochMs = 1_000L + index,
+                    sentTimeSource = MessageTimeSource.MAM,
+                ),
+            )
+        }
+
+        val cached = ChatRepository(database).cachedTimeline(DirectConversationKey(ACCOUNT, PEER))
+        assertEquals("latest-live", cached.last().id)
+        assertTrue(cached.none { it.id.startsWith("old-") && it.id.removePrefix("old-").toInt() < 10 })
+    }
+
+    @Test
     fun correctionProjectsOneStableEditedMessageAndUpdatedPreview() = runBlocking {
         val store = MessageStore(database)
         store.ingest(
