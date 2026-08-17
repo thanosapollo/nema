@@ -956,12 +956,15 @@ class DirectChatContentTest {
     }
 
     @Test
-    fun typingIndicatorShowsEmacsJabberWording() {
+    fun typingIndicatorShowsInTimelineNotTopBar() {
         composeRule.setContent {
             MaterialTheme {
                 DirectChatContent(
-                    state = state(ACCOUNT_A, PEER_A).copy(typingLabel = "Talos is typing..."),
-                    connectionStatus = "Connected",
+                    state = state(ACCOUNT_A, PEER_A).copy(
+                        messages = listOf(message("live", outgoing = false)),
+                        typingLabel = "Talos is typing...",
+                    ),
+                    connectionStatus = "Reconnecting",
                     onSelectPeer = { true },
                     onCloseConversation = {},
                     onDraftChange = { CompletableDeferred(true) },
@@ -970,8 +973,132 @@ class DirectChatContentTest {
             }
         }
 
-        composeRule.onNode(hasTestTag("typing-indicator"), useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNode(
+            hasTestTag("message-timeline") and hasAnyDescendant(hasTestTag("typing-indicator")),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
         composeRule.onNodeWithText("Talos is typing...").assertIsDisplayed()
+        composeRule.onNode(
+            hasTestTag("conversation-top-bar") and hasAnyDescendant(
+                androidx.compose.ui.test.hasText("Reconnecting"),
+            ),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+        composeRule.onNode(
+            hasTestTag("conversation-top-bar") and hasAnyDescendant(hasTestTag("typing-indicator")),
+            useUnmergedTree = true,
+        ).assertDoesNotExist()
+    }
+
+    @Test
+    fun typingIndexSkipsTheEphemeralRow() {
+        assertEquals(0, timelineMessageIndex(0, typingPresent = true, messageCount = 5))
+        assertEquals(0, timelineMessageIndex(1, typingPresent = true, messageCount = 5))
+        assertEquals(1, timelineMessageIndex(2, typingPresent = true, messageCount = 5))
+        assertEquals(0, timelineMessageIndex(0, typingPresent = false, messageCount = 5))
+        assertEquals(0, timelineListIndex(0, typingPresent = true))
+        assertEquals(2, timelineListIndex(1, typingPresent = true))
+        assertEquals(1, timelineListIndex(1, typingPresent = false))
+    }
+
+    @Test
+    fun typingAppearsAtNewestEdgeWithoutJump() {
+        lateinit var show: (String?) -> Unit
+        composeRule.setContent {
+            MaterialTheme {
+                var typing by remember { mutableStateOf<String?>(null) }
+                show = { typing = it }
+                MessageTimeline(
+                    messages = (1..20).map { number -> message("message-$number", outgoing = false) },
+                    typingLabel = typing,
+                )
+            }
+        }
+        composeRule.onNodeWithText("message-20").assertIsDisplayed()
+        composeRule.runOnIdle { show("Talos is typing...") }
+        composeRule.waitForIdle()
+
+        composeRule.onNode(
+            hasTestTag("message-timeline") and hasAnyDescendant(hasTestTag("typing-indicator")),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+        composeRule.onNodeWithText("Talos is typing...").assertIsDisplayed()
+        composeRule.onNodeWithText("+1").assertDoesNotExist()
+    }
+
+    @Test
+    fun typingDoesNotYankHistoryReader() {
+        lateinit var show: (String?) -> Unit
+        composeRule.setContent {
+            MaterialTheme {
+                var typing by remember { mutableStateOf<String?>(null) }
+                show = { typing = it }
+                MessageTimeline(
+                    messages = (1..20).map { number -> message("message-$number", outgoing = false) },
+                    typingLabel = typing,
+                )
+            }
+        }
+        composeRule.onNodeWithTag("message-timeline").performScrollToIndex(5)
+        composeRule.runOnIdle { show("Talos is typing...") }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("Talos is typing...").assertDoesNotExist()
+    }
+
+    @Test
+    fun typingViewportKeepsNewestMessageAnchor() {
+        val anchors = mutableListOf<TimelineViewportAnchor>()
+        lateinit var show: (String?) -> Unit
+        composeRule.setContent {
+            MaterialTheme {
+                var typing by remember { mutableStateOf<String?>(null) }
+                show = { typing = it }
+                MessageTimeline(
+                    messages = listOf(
+                        message("old", outgoing = false),
+                        message("newest", outgoing = false),
+                    ),
+                    typingLabel = typing,
+                    onViewportChanged = { anchors.add(it) },
+                )
+            }
+        }
+        composeRule.waitForIdle()
+        composeRule.runOnIdle { show("Talos is typing...") }
+        composeRule.waitForIdle()
+
+        assertEquals("newest", anchors.last().messageId)
+        assertEquals(0, anchors.last().fallbackIndex)
+    }
+
+    @Test
+    fun typingViewportKeepsDetachedMessageAnchor() {
+        val anchors = mutableListOf<TimelineViewportAnchor>()
+        lateinit var show: (String?) -> Unit
+        val messages = (1..20).map { number -> message("message-$number", outgoing = false) }
+        composeRule.setContent {
+            MaterialTheme {
+                var typing by remember { mutableStateOf<String?>(null) }
+                show = { typing = it }
+                MessageTimeline(
+                    messages = messages,
+                    typingLabel = typing,
+                    onViewportChanged = { anchors.add(it) },
+                )
+            }
+        }
+        composeRule.onNodeWithTag("message-timeline").performScrollToIndex(5)
+        composeRule.waitForIdle()
+        val detached = anchors.last()
+        composeRule.runOnIdle { show("Talos is typing...") }
+        composeRule.waitForIdle()
+        assertEquals(detached.messageId, anchors.last().messageId)
+        assertEquals(detached.fallbackIndex, anchors.last().fallbackIndex)
+        composeRule.runOnIdle { show(null) }
+        composeRule.waitForIdle()
+        assertEquals(detached.messageId, anchors.last().messageId)
+        assertEquals(detached.fallbackIndex, anchors.last().fallbackIndex)
     }
 
     @Test

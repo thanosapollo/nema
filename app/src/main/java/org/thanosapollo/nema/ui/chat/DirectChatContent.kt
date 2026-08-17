@@ -488,13 +488,6 @@ fun DirectChatContent(
                                         )
                                     }
                                     when {
-                                        state.typingLabel != null -> Text(
-                                            requireNotNull(state.typingLabel),
-                                            style = MaterialTheme.typography.labelSmall,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                            modifier = Modifier.testTag("typing-indicator"),
-                                        )
                                         status != null -> Text(
                                             requireNotNull(status),
                                             style = MaterialTheme.typography.labelSmall,
@@ -592,6 +585,7 @@ fun DirectChatContent(
                             editActionsEnabled = editActionsEnabled,
                             readReceiptsEnabled = readReceiptsEnabled,
                             activityResumed = activityResumed,
+                            typingLabel = state.typingLabel,
                             onMessageDisplayed = onMessageDisplayed,
                             latestFocusRequest = latestFocusRequest,
                             initialViewport = timelineViewports[conversationKey],
@@ -1675,6 +1669,17 @@ internal fun restoredTimelineIndex(
     return if (exact >= 0) exact else anchor.fallbackIndex.coerceIn(0, messages.lastIndex)
 }
 
+internal fun timelineMessageIndex(listIndex: Int, typingPresent: Boolean, messageCount: Int): Int {
+    if (messageCount <= 0) return 0
+    val offset = if (typingPresent) 1 else 0
+    return (listIndex - offset).coerceIn(0, messageCount - 1)
+}
+
+internal fun timelineListIndex(messageIndex: Int, typingPresent: Boolean): Int {
+    if (!typingPresent) return messageIndex
+    return if (messageIndex == 0) 0 else messageIndex + 1
+}
+
 internal fun displayedMarkerCandidates(
     messages: List<TimelineMessage>,
     visibleMessageIds: Set<String>,
@@ -1727,12 +1732,14 @@ fun MessageTimeline(
     onUseAttachment: suspend (String, String?, String?) -> Boolean = { _, _, _ -> false },
     isAttachmentCached: (String) -> Boolean = { false },
     onLoadInlineImage: suspend (String) -> ImageBitmap? = { null },
+    typingLabel: String? = null,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val currentOnViewportChanged by rememberUpdatedState(onViewportChanged)
     val currentOnMessageDisplayed by rememberUpdatedState(onMessageDisplayed)
+    val currentTypingPresent by rememberUpdatedState(typingLabel != null)
     val nearLatest by remember {
         derivedStateOf {
             listState.firstVisibleItemIndex <= NEAR_LATEST_ITEM_THRESHOLD
@@ -1759,7 +1766,10 @@ fun MessageTimeline(
     LaunchedEffect(initialViewport, viewportRestored, messages.isNotEmpty()) {
         if (!viewportRestored && currentMessages.value.isNotEmpty()) {
             val anchor = requireNotNull(initialViewport)
-            val index = restoredTimelineIndex(currentMessages.value, anchor)
+            val index = timelineListIndex(
+                restoredTimelineIndex(currentMessages.value, anchor),
+                typingLabel != null,
+            )
             listState.scrollToItem(index, anchor.offset)
             viewportRestored = true
         }
@@ -1771,8 +1781,8 @@ fun MessageTimeline(
             .collect { (index, offset) ->
                 val reversed = currentMessages.value.asReversed()
                 if (reversed.isEmpty()) return@collect
-                val bounded = index.coerceIn(0, reversed.lastIndex)
-                currentOnViewportChanged(TimelineViewportAnchor(reversed[bounded].id, offset, bounded))
+                val messageIndex = timelineMessageIndex(index, currentTypingPresent, reversed.size)
+                currentOnViewportChanged(TimelineViewportAnchor(reversed[messageIndex].id, offset, messageIndex))
             }
     }
     LaunchedEffect(listState, viewportRestored) {
@@ -1827,6 +1837,11 @@ fun MessageTimeline(
             newIncoming = 0
         }
     }
+    LaunchedEffect(typingLabel) {
+        if (viewportRestored && typingLabel != null && followLatest) {
+            listState.scrollToItem(0)
+        }
+    }
     LaunchedEffect(latestId) {
         val previous = previousLatestId
         if (previous != null) {
@@ -1850,6 +1865,19 @@ fun MessageTimeline(
                 .testTag("message-timeline"),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            if (typingLabel != null) {
+                item(key = "typing-indicator", contentType = "typing") {
+                    Text(
+                        typingLabel,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 6.dp)
+                            .testTag("typing-indicator"),
+                    )
+                }
+            }
             items(
                 items = messages.asReversed(),
                 key = TimelineMessage::id,
