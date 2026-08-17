@@ -38,6 +38,15 @@ class HttpFileUploadTest {
     }
 
     @Test
+    fun attachmentCaptionHidesUrlOnlyBody() {
+        assertEquals(null, attachmentBodyCaption("https://example.org/pic.png", "https://example.org/pic.png"))
+        assertEquals(null, attachmentBodyCaption("  https://example.org/pic.png\n", "https://example.org/pic.png"))
+        assertEquals(null, attachmentBodyCaption("", "https://example.org/pic.png"))
+        assertEquals("look at this", attachmentBodyCaption("look at this", "https://example.org/pic.png"))
+        assertEquals("hello", attachmentBodyCaption("hello", null))
+    }
+
+    @Test
     fun onlyHttpsAttachmentUrlsAreFetched() {
         assertEquals(
             "https://example.org/abc",

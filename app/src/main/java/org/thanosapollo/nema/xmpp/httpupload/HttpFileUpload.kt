@@ -54,4 +54,11 @@ fun attachmentActionLabel(image: Boolean, downloaded: Boolean, name: String?): S
     return if (image) "$verb image" else "$verb file"
 }
 
+fun attachmentBodyCaption(body: String, attachmentUrl: String?): String? {
+    val caption = body.trim()
+    if (caption.isEmpty()) return null
+    if (attachmentUrl != null && caption == attachmentUrl.trim()) return null
+    return caption
+}
+
 private val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp")

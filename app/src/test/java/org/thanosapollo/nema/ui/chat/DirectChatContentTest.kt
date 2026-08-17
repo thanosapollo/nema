@@ -751,6 +751,54 @@ class DirectChatContentTest {
     }
 
     @Test
+    fun inlineImageHidesOobUrlAndKeepsCaption() {
+        val preview = android.graphics.Bitmap.createBitmap(2, 2, android.graphics.Bitmap.Config.ARGB_8888)
+            .asImageBitmap()
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(
+                        message("https://example.org/pic.png", outgoing = false).copy(
+                            body = "https://example.org/pic.png",
+                            attachmentUrl = "https://example.org/pic.png",
+                            attachmentName = "pic.png",
+                            attachmentMime = "image/png",
+                        ),
+                    ),
+                    onLoadInlineImage = { preview },
+                )
+            }
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("message-inline-image", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithText("https://example.org/pic.png").assertDoesNotExist()
+    }
+
+    @Test
+    fun inlineImageKeepsRealCaption() {
+        val preview = android.graphics.Bitmap.createBitmap(2, 2, android.graphics.Bitmap.Config.ARGB_8888)
+            .asImageBitmap()
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(
+                        message("look at this", outgoing = false).copy(
+                            body = "look at this",
+                            attachmentUrl = "https://example.org/pic.png",
+                            attachmentName = "pic.png",
+                            attachmentMime = "image/png",
+                        ),
+                    ),
+                    onLoadInlineImage = { preview },
+                )
+            }
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("message-inline-image", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithText("look at this").assertIsDisplayed()
+    }
+
+    @Test
     fun roomImageKeepsDownloadButton() {
         val preview = android.graphics.Bitmap.createBitmap(2, 2, android.graphics.Bitmap.Config.ARGB_8888)
             .asImageBitmap()

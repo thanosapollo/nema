@@ -145,6 +145,7 @@ import org.thanosapollo.nema.ui.theme.toComposeColor
 import org.thanosapollo.nema.xmpp.blocking.PeerBlockingState
 import org.thanosapollo.nema.xmpp.blocking.PeerBlockingMutationResult
 import org.thanosapollo.nema.xmpp.httpupload.attachmentActionLabel
+import org.thanosapollo.nema.xmpp.httpupload.attachmentBodyCaption
 import org.thanosapollo.nema.xmpp.httpupload.isInlineImage
 import org.thanosapollo.nema.xmpp.httpupload.shouldRenderInlineImage
 import org.thanosapollo.nema.xmpp.muc.roomSubtitle
@@ -1843,7 +1844,14 @@ fun MessageTimeline(
             ) { message ->
                 var messageActionsOpen by remember(message.id) { mutableStateOf(false) }
                 val (bubbleContainerColor, bubbleContentColor) = messageBubbleColors(message.outgoing)
-                val segments = remember(message.body) { parseQuotedBody(message.body) }
+                val visibleBody = remember(message.body, message.attachmentUrl) {
+                    if (message.attachmentUrl == null) {
+                        message.body
+                    } else {
+                        attachmentBodyCaption(message.body, message.attachmentUrl) ?: ""
+                    }
+                }
+                val segments = remember(visibleBody) { parseQuotedBody(visibleBody) }
                 val correctionTarget = message.correctionTargetOrNull(conversationGroupChat)
                     .takeIf { editActionsEnabled }
                 Box(modifier = Modifier.fillMaxWidth()) {
@@ -1909,9 +1917,9 @@ fun MessageTimeline(
                                 message.reply?.let { reply ->
                                     MessageReplyPreview(reply.senderLabel, reply.body)
                                 }
-                                if (segments.none { it is BodySegment.Quote }) {
-                                    LinkedMessageText(message.body, style = MaterialTheme.typography.bodyMedium)
-                                } else {
+                                if (visibleBody.isNotEmpty() && segments.none { it is BodySegment.Quote }) {
+                                    LinkedMessageText(visibleBody, style = MaterialTheme.typography.bodyMedium)
+                                } else if (visibleBody.isNotEmpty()) {
                                     segments.forEach { segment ->
                                         when (segment) {
                                             is BodySegment.Plain ->
