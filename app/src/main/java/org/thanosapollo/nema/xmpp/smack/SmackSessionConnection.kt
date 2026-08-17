@@ -290,8 +290,7 @@ internal class SmackSessionConnection(
         resolveStableIdGateOnCapabilityFailure(stableIdGate, attempt, ::deliver) {
             val mam = MamManager.getInstanceFor(connection).isSupported
             val carbonManager = CarbonManager.getInstanceFor(connection)
-            val carbons = carbonManager.isSupportedByServer
-            if (carbons) carbonManager.enableCarbons()
+            val carbons = enableLiveCarbons(carbonManager)
             val stableIds = ServiceDiscoveryManager.getInstanceFor(connection).supportsFeature(
                 JidCreate.entityBareFrom(expectedBareJid),
                 StableUniqueStanzaIdManager.NAMESPACE,
@@ -812,6 +811,7 @@ internal class SmackSessionConnection(
                 runCatching { connection.disconnect() }
                 throw SessionFailure(SessionFailureReason.AUTHENTICATION)
             }
+            enableLiveCarbons()
             if (isUsable) {
                 connectionListener.connected()
             } else {
@@ -827,6 +827,18 @@ internal class SmackSessionConnection(
             connectionListener.attemptFailed()
             throw SessionFailure(classifySmackFailure(error), error)
         }
+    }
+
+    private fun enableLiveCarbons() {
+        enableLiveCarbons(CarbonManager.getInstanceFor(connection))
+    }
+
+    private fun enableLiveCarbons(carbonManager: CarbonManager): Boolean {
+        val supported = runCatching { carbonManager.isSupportedByServer }.getOrDefault(false)
+        if (supported && !carbonManager.carbonsEnabled) {
+            runCatching { carbonManager.enableCarbons() }
+        }
+        return supported && carbonManager.carbonsEnabled
     }
 
     private fun ensureNotRevoked() {

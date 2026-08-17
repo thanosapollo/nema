@@ -152,12 +152,6 @@ class ArchiveSynchronizer(
                         "MAM page did not advance newest cursor"
                     }
                 }
-                cursor.hasEarlier -> {
-                    direction = ArchivePageDirection.BEFORE
-                    boundary = requireNotNull(cursor.oldestId) {
-                        "MAM bootstrap did not establish oldest cursor"
-                    }
-                }
                 else -> {
                     mutableState.value = ArchiveSyncState.Ready(identity, capabilities)
                     return

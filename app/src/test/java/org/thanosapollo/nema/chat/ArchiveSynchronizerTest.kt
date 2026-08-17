@@ -65,7 +65,7 @@ class ArchiveSynchronizerTest {
     }
 
     @Test
-    fun synchronizeDiscoversCatchesUpAndBackfillsAllAvailableHistory() = runBlocking {
+    fun synchronizeCatchesUpToNewestWithoutHistoricalBackfill() = runBlocking {
         val requests = mutableListOf<ArchivePageRequest>()
         val localIds = ArrayDeque(listOf("latest", "middle", "latest-repeat", "older", "middle-repeat"))
         val synchronizer = ArchiveSynchronizer(
@@ -117,8 +117,6 @@ class ArchiveSynchronizerTest {
             listOf(
                 ArchivePageDirection.BOOTSTRAP,
                 ArchivePageDirection.AFTER,
-                ArchivePageDirection.BEFORE,
-                ArchivePageDirection.BEFORE,
             ),
             requests.map(ArchivePageRequest::direction),
         )
@@ -129,11 +127,11 @@ class ArchiveSynchronizerTest {
             assertEquals(ACCOUNT_ARCHIVE_SCOPE, it.scope)
         }
 
-        assertEquals(ArchivePageDirection.BEFORE, requests.last().direction)
-        assertEquals(listOf(null, "r2", "r2", "r1"), requests.map(ArchivePageRequest::boundaryId))
-        assertEquals(listOf("older", "middle", "latest"), store.messages(ACCOUNT).map(MessageEntity::body))
+        assertEquals(ArchivePageDirection.AFTER, requests.last().direction)
+        assertEquals(listOf(null, "r2"), requests.map(ArchivePageRequest::boundaryId))
+        assertEquals(listOf("latest"), store.messages(ACCOUNT).map(MessageEntity::body))
         assertEquals(
-            "r0",
+            "r2",
             store.archiveCursor(ArchiveCursorKey(ACCOUNT, BARE_JID, ACCOUNT_ARCHIVE_SCOPE))?.oldestId,
         )
     }
@@ -271,7 +269,7 @@ class ArchiveSynchronizerTest {
         synchronizer.synchronize(IDENTITY, BARE_JID) { true }
 
         assertTrue(synchronizer.state.value is ArchiveSyncState.Ready)
-        assertFalse(synchronizer.backfillOnePage(IDENTITY, BARE_JID) { true })
+        assertTrue(synchronizer.backfillOnePage(IDENTITY, BARE_JID) { true })
         assertEquals(setOf("first", "latest", "different"), store.messages(ACCOUNT).map { it.body }.toSet())
         assertEquals(1, store.conflicts(ACCOUNT).size)
     }
