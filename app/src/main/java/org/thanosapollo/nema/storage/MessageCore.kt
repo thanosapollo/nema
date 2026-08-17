@@ -17,6 +17,9 @@ import org.thanosapollo.nema.thread.ThreadIdFactory
 import org.thanosapollo.nema.thread.ThreadRef
 import org.thanosapollo.nema.thread.UuidThreadIdFactory
 import org.thanosapollo.nema.thread.draftKey
+import org.thanosapollo.nema.xmpp.reactions.decodeReactionEmojis
+import org.thanosapollo.nema.xmpp.reactions.encodeReactionEmojis
+import org.thanosapollo.nema.xmpp.reactions.reactionDisplaysFor
 import org.thanosapollo.nema.xmpp.transport.MessageTimeSource
 import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
 
@@ -91,6 +94,45 @@ abstract class MessageDao {
         peerJid: String,
         targetId: String,
     ): List<MessageEntity>
+
+    @Query(
+        """
+        SELECT * FROM message_reactions
+        WHERE accountId = :accountId AND peerJid = :peerJid
+        """,
+    )
+    abstract suspend fun messageReactions(accountId: String, peerJid: String): List<MessageReactionEntity>
+
+    @Query(
+        """
+        SELECT * FROM message_reactions
+        WHERE accountId = :accountId AND peerJid = :peerJid
+          AND senderBareJid = :senderBareJid AND targetKey = :targetKey
+        """,
+    )
+    abstract suspend fun messageReaction(
+        accountId: String,
+        peerJid: String,
+        senderBareJid: String,
+        targetKey: String,
+    ): MessageReactionEntity?
+
+    @Upsert
+    abstract suspend fun upsertMessageReaction(reaction: MessageReactionEntity)
+
+    @Query(
+        """
+        DELETE FROM message_reactions
+        WHERE accountId = :accountId AND peerJid = :peerJid
+          AND senderBareJid = :senderBareJid AND targetKey = :targetKey
+        """,
+    )
+    abstract suspend fun deleteMessageReaction(
+        accountId: String,
+        peerJid: String,
+        senderBareJid: String,
+        targetKey: String,
+    ): Int
 
     @Upsert
     abstract suspend fun upsertPeer(peer: PeerEntity)
@@ -1192,6 +1234,17 @@ abstract class MessageDao {
     @Query(
         """
         SELECT * FROM trusted_identity_aliases
+        WHERE accountId = :accountId AND messageId = :messageId AND status = 'TRUSTED'
+        """,
+    )
+    abstract suspend fun trustedAliasesForMessage(
+        accountId: String,
+        messageId: String,
+    ): List<TrustedIdentityAliasEntity>
+
+    @Query(
+        """
+        SELECT * FROM trusted_identity_aliases
         WHERE accountId = :accountId AND kind = :kind
           AND authority = :authority AND value = :value
         """,
@@ -1456,6 +1509,30 @@ data class TrustedIdentityAlias(
         require(value.isNotEmpty()) { "Alias value must not be empty" }
     }
 }
+
+enum class ReactionApplyOutcome {
+    APPLIED,
+    PENDING,
+    IGNORED,
+}
+
+data class IncomingReactionApply(
+    val accountId: String,
+    val accountBareJid: String,
+    val peerJid: String,
+    val senderBareJid: String,
+    val targetId: String,
+    val emojis: List<String>,
+    val receivedAtMs: Long,
+    val delayedAtMs: Long? = null,
+)
+
+internal fun reactionTargetKey(localMessageId: String?, wireTargetId: String): String =
+    localMessageId ?: "pending:$wireTargetId"
+
+private fun MessageReactionEntity.toApply(accountBare: String) = IncomingReactionApply(
+    accountId, accountBare, peerJid, senderBareJid, wireTargetId, decodeReactionEmojis(emojis), updatedAtMs,
+)
 
 data class IncomingMessage(
     val accountId: String,
@@ -1884,6 +1961,27 @@ class MessageStore private constructor(
         result
     }
 
+    suspend fun applyIncomingReaction(reaction: IncomingReactionApply): ReactionApplyOutcome =
+        database.withTransaction { applyIncomingReactionInTransaction(reaction) }
+
+    suspend fun reactionDisplays(
+        accountId: String,
+        peerJid: String,
+        chosenSender: String?,
+    ): List<org.thanosapollo.nema.xmpp.reactions.ReactionDisplay> {
+        val rows = database.messageDao().messageReactions(accountId, peerJid)
+            .mapNotNull { row ->
+                row.localMessageId?.takeIf { row.emojis.isNotEmpty() }?.let { it to row }
+            }
+        return rows.groupBy({ it.first }, { it.second }).flatMap { (localId, group) ->
+            reactionDisplaysFor(
+                localMessageId = localId,
+                senderState = group.map { it.senderBareJid to decodeReactionEmojis(it.emojis) },
+                chosenSender = chosenSender,
+            )
+        }
+    }
+
     private suspend fun ingestInTransaction(
         received: IncomingMessage,
         preserveStoredThreadLineage: Boolean = false,
@@ -1994,7 +2092,107 @@ class MessageStore private constructor(
         ) {
             dao.advancePeerLastRead(winner.accountId, winner.peerJid, winner.localSequence)
         }
+        attachPendingReactions(dao, winner)
         return IngestionResult(winner.localMessageId, mergedRows, identityConflict, inserted)
+    }
+
+    private suspend fun applyIncomingReactionInTransaction(
+        reaction: IncomingReactionApply,
+    ): ReactionApplyOutcome {
+        val dao = database.messageDao()
+        if (reaction.senderBareJid !in setOf(reaction.accountBareJid, reaction.peerJid)) {
+            return ReactionApplyOutcome.IGNORED
+        }
+        val matches = (
+            dao.inboundChatByAliasValue(reaction.accountId, reaction.peerJid, reaction.targetId) +
+                dao.outboundChatByAliasValue(reaction.accountId, reaction.peerJid, reaction.targetId)
+            ).distinctBy(MessageEntity::localMessageId)
+        return when (matches.size) {
+            0 -> writeReactionRow(dao, reaction, localMessageId = null)
+            1 -> writeReactionRow(dao, reaction, localMessageId = matches.single().localMessageId)
+            else -> ReactionApplyOutcome.IGNORED
+        }
+    }
+
+    private suspend fun writeReactionRow(
+        dao: MessageDao,
+        reaction: IncomingReactionApply,
+        localMessageId: String?,
+        keepNewest: Boolean = false,
+    ): ReactionApplyOutcome {
+        val eventTime = reaction.delayedAtMs ?: reaction.receivedAtMs
+        val key = reactionTargetKey(localMessageId, reaction.targetId)
+        val existing = dao.messageReaction(
+            reaction.accountId,
+            reaction.peerJid,
+            reaction.senderBareJid,
+            key,
+        )
+        if ((keepNewest || reaction.delayedAtMs != null) &&
+            existing != null &&
+            existing.updatedAtMs > eventTime
+        ) {
+            return ReactionApplyOutcome.IGNORED
+        }
+        val emojis = encodeReactionEmojis(reaction.emojis)
+        if (emojis.isEmpty() && localMessageId != null) {
+            dao.deleteMessageReaction(reaction.accountId, reaction.peerJid, reaction.senderBareJid, key)
+        } else {
+            dao.upsertMessageReaction(
+                MessageReactionEntity(
+                    accountId = reaction.accountId,
+                    peerJid = reaction.peerJid,
+                    senderBareJid = reaction.senderBareJid,
+                    targetKey = key,
+                    localMessageId = localMessageId,
+                    wireTargetId = reaction.targetId,
+                    emojis = emojis,
+                    updatedAtMs = eventTime,
+                ),
+            )
+        }
+        return if (localMessageId == null) ReactionApplyOutcome.PENDING else ReactionApplyOutcome.APPLIED
+    }
+
+    private suspend fun attachPendingReactions(dao: MessageDao, winner: MessageEntity) {
+        if (winner.messageKind != MessageKind.CHAT) return
+        val aliases = dao.trustedAliasesForMessage(winner.accountId, winner.localMessageId)
+            .filter {
+                it.kind == IdentityAliasKind.ORIGIN_ID ||
+                    it.kind == IdentityAliasKind.MESSAGE_ID ||
+                    it.kind == IdentityAliasKind.STANZA_ID
+            }
+            .map { it.value }
+            .toSet()
+        val pending = dao.messageReactions(winner.accountId, winner.peerJid)
+            .filter { it.localMessageId == null && it.wireTargetId in aliases }
+        for (rows in pending.groupBy(MessageReactionEntity::senderBareJid).values) {
+            val newest = rows.maxBy { it.updatedAtMs }
+            writeReactionRow(
+                dao,
+                newest.toApply(requireNotNull(dao.accountBareJid(newest.accountId))),
+                winner.localMessageId,
+                keepNewest = true,
+            )
+            rows.forEach { row ->
+                dao.deleteMessageReaction(row.accountId, row.peerJid, row.senderBareJid, row.targetKey)
+            }
+        }
+    }
+
+    private suspend fun reparentReactions(loser: MessageEntity, winner: MessageEntity) {
+        val dao = database.messageDao()
+        dao.messageReactions(loser.accountId, loser.peerJid)
+            .filter { it.localMessageId == loser.localMessageId }
+            .forEach { row ->
+            writeReactionRow(
+                dao,
+                row.toApply(requireNotNull(dao.accountBareJid(row.accountId))),
+                winner.localMessageId,
+                keepNewest = true,
+            )
+            dao.deleteMessageReaction(row.accountId, row.peerJid, row.senderBareJid, row.targetKey)
+        }
     }
 
     private suspend fun reconcileCorrections(
@@ -2640,6 +2838,7 @@ class MessageStore private constructor(
         reparentConflicts(loser, winner)
         reparentArchivePositions(loser, winner)
         dao.reparentCorrections(winner.accountId, loser.localMessageId, winner.localMessageId)
+        reparentReactions(loser, winner)
         writeBoundary(MessageWriteBoundary.AFTER_DEPENDENT_REPARENT)
         dao.deleteMessage(loser)
         val withArchive = if (winner.archiveOrdinal == null && loser.archiveOrdinal != null) {

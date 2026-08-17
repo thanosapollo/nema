@@ -5,6 +5,35 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 internal object MessageSchema {
+    val MIGRATION_16_17: Migration = object : Migration(16, 17) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS message_reactions (
+                    accountId TEXT NOT NULL,
+                    peerJid TEXT NOT NULL,
+                    senderBareJid TEXT NOT NULL,
+                    targetKey TEXT NOT NULL,
+                    localMessageId TEXT,
+                    wireTargetId TEXT NOT NULL,
+                    emojis TEXT NOT NULL,
+                    updatedAtMs INTEGER NOT NULL,
+                    PRIMARY KEY(accountId, peerJid, senderBareJid, targetKey),
+                    FOREIGN KEY(accountId)
+                        REFERENCES accounts(id)
+                        ON UPDATE NO ACTION ON DELETE CASCADE
+                )
+                """.trimIndent(),
+            )
+            db.execSQL(
+                """
+                CREATE INDEX IF NOT EXISTS index_message_reactions_accountId_peerJid
+                ON message_reactions(accountId, peerJid)
+                """.trimIndent(),
+            )
+        }
+    }
+
     val MIGRATION_15_16: Migration = object : Migration(15, 16) {
         override fun migrate(db: SupportSQLiteDatabase) {
             db.execSQL(

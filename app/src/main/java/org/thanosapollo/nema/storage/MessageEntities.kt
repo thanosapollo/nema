@@ -452,6 +452,30 @@ data class ChatNavigationEntity(
     }
 }
 
+@Entity(
+    tableName = "message_reactions",
+    primaryKeys = ["accountId", "peerJid", "senderBareJid", "targetKey"],
+    foreignKeys = [
+        ForeignKey(
+            entity = AccountEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["accountId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [Index(value = ["accountId", "peerJid"])],
+)
+data class MessageReactionEntity(
+    val accountId: String,
+    val peerJid: String,
+    val senderBareJid: String,
+    val targetKey: String,
+    val localMessageId: String?,
+    val wireTargetId: String,
+    val emojis: String,
+    val updatedAtMs: Long,
+)
+
 class MessageConverters {
     @TypeConverter
     fun messageKind(value: MessageKind): String = value.name
