@@ -1068,23 +1068,16 @@ private fun List<TimelineMessage>.projectThreads(
         .mapNotNull(::resolveThread)
         .toList()
     val visible = if (selected == null) {
-        val hidden = resolved.flatMap(ResolvedThread::members)
-            .filterNot(TimelineMessage::outgoing)
-            .mapTo(mutableSetOf(), TimelineMessage::id)
+        val hidden = resolved.flatMap(ResolvedThread::members).mapTo(mutableSetOf(), TimelineMessage::id)
         filterNot { it.id in hidden }
     } else {
         val memberIds = filter { it.thread == selected }.mapTo(mutableSetOf(), TimelineMessage::id)
         resolved.firstOrNull { it.thread == selected }?.root?.id?.let(memberIds::add)
         filter { it.id in memberIds }
     }
-    val summariesByRoot = resolved.groupBy { it.root.id }
-    val summariesByThread = resolved.groupBy { it.thread }
+    val summaries = resolved.groupBy { it.root.id }
     return visible.map { message ->
-        val attached = buildList {
-            addAll(summariesByRoot[message.id].orEmpty())
-            if (message.outgoing) addAll(summariesByThread[message.thread].orEmpty())
-        }
-            .distinctBy(ResolvedThread::thread)
+        val attached = summaries[message.id].orEmpty()
             .filter { it.thread != selected }
             .map { thread ->
                 val latest = thread.members.lastOrNull() ?: thread.root
@@ -1104,14 +1097,18 @@ private fun List<TimelineMessage>.resolveThread(
 ): ResolvedThread? {
     val members = filter { it.thread == thread && !it.groupChat }
     if (members.isEmpty()) return null
-    val externalRoot = members.first().resolveReplyTarget(this)
-        ?.takeIf { candidate ->
+    val memberIds = members.mapTo(hashSetOf(), TimelineMessage::id)
+    val externalRoot = members.firstNotNullOfOrNull { member ->
+        member.resolveReplyTarget(this)?.takeIf { candidate ->
             !candidate.groupChat &&
+                candidate.id !in memberIds &&
                 (candidate.thread?.id == thread.parentId ||
                     (candidate.thread == null && thread.parentId != null))
         }
-        ?: return null
-    return ResolvedThread(thread, externalRoot, members)
+    }
+    val root = externalRoot ?: members.first()
+    val replies = if (externalRoot == null) members.drop(1) else members
+    return ResolvedThread(thread, root, replies)
 }
 
 private fun List<TimelineMessage>.recentThreads(
