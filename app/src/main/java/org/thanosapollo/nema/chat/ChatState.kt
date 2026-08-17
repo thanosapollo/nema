@@ -1,6 +1,5 @@
 package org.thanosapollo.nema.chat
 
-import java.util.PriorityQueue
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -968,107 +967,6 @@ internal fun canonicalDirectPeer(value: String): String? = runCatching {
     bare.asEntityBareJidOrThrow().toString()
 }.getOrNull()
 
-private fun TimelineRow.toPresentation(replyReferenceIds: Set<String>) = TimelineMessage(
-    id = localMessageId,
-    senderJid = senderJid,
-    body = correctedBody ?: body,
-    outgoing = direction == MessageDirection.OUTBOUND,
-    delivery = if (direction == MessageDirection.OUTBOUND) {
-        receiptStage?.let(org.thanosapollo.nema.xmpp.transport.MessageReceiptStage::valueOf)
-            ?.toPresentation()
-            ?: outboxStatus?.let(OutboxStatus::valueOf).toPresentation()
-    } else {
-        null
-    },
-    retryUncertainKey = if (outboxStatus == OutboxStatus.UNCERTAIN.name) {
-        RetryUncertainKey(
-            accountId = accountId,
-            operationId = requireNotNull(operationId),
-            generation = requireNotNull(outboxGeneration),
-            attempt = requireNotNull(outboxAttempt),
-        )
-    } else {
-        null
-    },
-    thread = threadId?.let {
-        ThreadRef(
-            id = ThreadId.require(it),
-            parentId = parentThreadId?.let(ThreadId::require),
-        )
-    },
-    groupChat = messageKind == MessageKind.GROUPCHAT,
-    attachmentUrl = attachmentUrl,
-    attachmentName = attachmentName,
-    attachmentMime = attachmentMime,
-    attachmentSize = attachmentSize,
-    replyReferenceId = replyReferenceId,
-    replyReferenceIds = replyReferenceIds,
-    replyToId = replyToId,
-    replyToJid = replyToJid,
-    replyFallbackBody = replyFallbackBody,
-    markable = markable,
-    markerTargetId = markerTargetId,
-    edited = edited,
-    correctionReferenceId = operationId,
-    sentAtEpochMs = sentAtEpochMs,
-)
-
-private fun <T> chronological(
-    rows: List<T>,
-    archiveOrdinal: (T) -> Long?,
-    archiveSpine: (T) -> Pair<String, String>,
-    sentAt: (T) -> Long?,
-    sequence: (T) -> Long,
-    id: (T) -> String,
-): List<T> {
-    val archived = rows.filter { archiveOrdinal(it) != null }
-        .groupBy(archiveSpine)
-        .values
-        .map { spine ->
-            ChronologyChain(
-                spine.sortedWith(compareBy({ requireNotNull(archiveOrdinal(it)) }, sequence, id)),
-                archived = true,
-            )
-        }
-    val loose = rows.filter { archiveOrdinal(it) == null }
-        .sortedWith(compareBy({ sentAt(it) ?: Long.MIN_VALUE }, sequence, id))
-    val latestFirst = Comparator<ChronologyChain<T>> { left, right ->
-        compareValues(sentAt(right.current) ?: Long.MIN_VALUE, sentAt(left.current) ?: Long.MIN_VALUE)
-            .takeIf { it != 0 }
-            ?: compareValues(right.archived, left.archived).takeIf { it != 0 }
-            ?: compareValues(sequence(right.current), sequence(left.current)).takeIf { it != 0 }
-            ?: compareValues(id(right.current), id(left.current))
-    }
-    val pending = PriorityQueue(latestFirst)
-    pending.addAll(archived)
-    if (loose.isNotEmpty()) pending += ChronologyChain(loose, archived = false)
-    val reverse = ArrayList<T>(rows.size)
-    while (pending.isNotEmpty()) {
-        val chain = pending.remove()
-        reverse += chain.current
-        if (chain.retreat()) pending += chain
-    }
-    reverse.reverse()
-    return reverse
-}
-
-private class ChronologyChain<T>(private val rows: List<T>, val archived: Boolean) {
-    private var index = rows.lastIndex
-    val current: T
-        get() = rows[index]
-
-    fun retreat(): Boolean = --index >= 0
-}
-
-private fun chronologicalTimelineRows(rows: List<TimelineRow>) = chronological(
-    rows,
-    archiveOrdinal = { it.conversationArchiveOrdinal },
-    archiveSpine = { it.conversationArchiveAuthority to it.conversationArchiveScope },
-    sentAt = { it.sentAtEpochMs },
-    sequence = { it.localSequence },
-    id = { it.localMessageId },
-)
-
 private fun MessageDraftEntity.toStoredDraft() = StoredDraft(
     body = body,
     reply = replyToId?.let {
@@ -1248,21 +1146,3 @@ private fun ChatNavigationEntity.toRoute() = ChatRoute(
         )
     },
 )
-
-private fun OutboxStatus?.toPresentation(): DeliveryPresentation? = when (this) {
-    OutboxStatus.PENDING -> DeliveryPresentation.QUEUED
-    OutboxStatus.IN_FLIGHT -> DeliveryPresentation.SENDING
-    OutboxStatus.ACKNOWLEDGED -> DeliveryPresentation.SENT
-    OutboxStatus.CONFIRMED -> DeliveryPresentation.CONFIRMED
-    OutboxStatus.UNCERTAIN -> DeliveryPresentation.UNCERTAIN
-    OutboxStatus.FAILED -> DeliveryPresentation.FAILED
-    null -> null
-}
-
-private fun org.thanosapollo.nema.xmpp.transport.MessageReceiptStage.toPresentation(): DeliveryPresentation =
-    when (this) {
-        org.thanosapollo.nema.xmpp.transport.MessageReceiptStage.RECEIVED -> DeliveryPresentation.DELIVERED
-        org.thanosapollo.nema.xmpp.transport.MessageReceiptStage.DISPLAYED,
-        org.thanosapollo.nema.xmpp.transport.MessageReceiptStage.ACKNOWLEDGED,
-        -> DeliveryPresentation.READ
-    }
