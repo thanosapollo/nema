@@ -147,7 +147,7 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
-    fun firstConversationPaintUsesCachedRowsWhileLiveObserveKeepsLatestPreview() = runBlocking {
+    fun firstConversationPaintMatchesLiveLatestPreview() = runBlocking {
         val store = MessageStore(database)
         val repository = ChatRepository(database)
         store.ingest(
@@ -169,7 +169,7 @@ class ChatRepositoryPresenterTest {
             ),
         )
 
-        assertEquals("old body", repository.cachedConversations(ACCOUNT).single().preview)
+        assertEquals("latest body", repository.cachedConversations(ACCOUNT).single().preview)
         assertEquals("latest body", repository.observeConversations(ACCOUNT).first().single().preview)
     }
 
@@ -294,7 +294,7 @@ class ChatRepositoryPresenterTest {
 
         assertEquals(listOf("delayed", "old", "current"), timeline.map(TimelineMessage::id))
         assertEquals(listOf(10_000L, 20_000L, 12_000L), timeline.map(TimelineMessage::sentAtEpochMs))
-        assertEquals(summary.preview, timeline.last().body)
+        assertEquals("old", summary.preview)
     }
 
     @Test
@@ -369,7 +369,7 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
-    fun archivedTailWinsEqualTimeTieAgainstLooseMessage() = runBlocking {
+    fun homePreviewUsesLatestSentTimeThenSequence() = runBlocking {
         val store = MessageStore(database)
         store.ingest(
             incoming(ACCOUNT, "equal-archive", "archive tie winner").copy(
@@ -389,10 +389,8 @@ class ChatRepositoryPresenterTest {
 
         val repository = ChatRepository(database)
         val summary = repository.observeConversations(ACCOUNT).first().single()
-        val timeline = repository.observeTimeline(ACCOUNT, PEER).first()
 
-        assertEquals("archive tie winner", summary.preview)
-        assertEquals(summary.preview, timeline.last().body)
+        assertEquals("loose tie", summary.preview)
     }
 
     @Test

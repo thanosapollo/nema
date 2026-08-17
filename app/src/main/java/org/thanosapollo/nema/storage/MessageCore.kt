@@ -655,12 +655,25 @@ abstract class MessageDao {
           ) AS unreadCount
         FROM messages
         INNER JOIN (
-          SELECT peerJid, MAX(localSequence) AS localSequence
+          SELECT messages.peerJid AS peerJid, MAX(messages.localSequence) AS localSequence
           FROM messages
-          WHERE accountId = :accountId
-            AND messageKind IN ('CHAT', 'GROUPCHAT')
-            AND replaceId IS NULL
-          GROUP BY peerJid
+          INNER JOIN (
+            SELECT peerJid, MAX(sentAtEpochMs) AS sentAtEpochMs
+            FROM messages
+            WHERE accountId = :accountId
+              AND messageKind IN ('CHAT', 'GROUPCHAT')
+              AND replaceId IS NULL
+            GROUP BY peerJid
+          ) AS latest_time
+            ON latest_time.peerJid = messages.peerJid
+           AND (
+             (latest_time.sentAtEpochMs IS NOT NULL AND messages.sentAtEpochMs = latest_time.sentAtEpochMs)
+             OR (latest_time.sentAtEpochMs IS NULL AND messages.sentAtEpochMs IS NULL)
+           )
+          WHERE messages.accountId = :accountId
+            AND messages.messageKind IN ('CHAT', 'GROUPCHAT')
+            AND messages.replaceId IS NULL
+          GROUP BY messages.peerJid
         ) AS latest
           ON latest.peerJid = messages.peerJid
          AND latest.localSequence = messages.localSequence
@@ -712,12 +725,25 @@ abstract class MessageDao {
           ) AS unreadCount
         FROM messages
         INNER JOIN (
-          SELECT peerJid, MAX(localSequence) AS localSequence
+          SELECT messages.peerJid AS peerJid, MAX(messages.localSequence) AS localSequence
           FROM messages
-          WHERE accountId = :accountId
-            AND messageKind IN ('CHAT', 'GROUPCHAT')
-            AND replaceId IS NULL
-          GROUP BY peerJid
+          INNER JOIN (
+            SELECT peerJid, MAX(sentAtEpochMs) AS sentAtEpochMs
+            FROM messages
+            WHERE accountId = :accountId
+              AND messageKind IN ('CHAT', 'GROUPCHAT')
+              AND replaceId IS NULL
+            GROUP BY peerJid
+          ) AS latest_time
+            ON latest_time.peerJid = messages.peerJid
+           AND (
+             (latest_time.sentAtEpochMs IS NOT NULL AND messages.sentAtEpochMs = latest_time.sentAtEpochMs)
+             OR (latest_time.sentAtEpochMs IS NULL AND messages.sentAtEpochMs IS NULL)
+           )
+          WHERE messages.accountId = :accountId
+            AND messages.messageKind IN ('CHAT', 'GROUPCHAT')
+            AND messages.replaceId IS NULL
+          GROUP BY messages.peerJid
         ) AS latest
           ON latest.peerJid = messages.peerJid
          AND latest.localSequence = messages.localSequence
