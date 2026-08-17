@@ -25,6 +25,9 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertHeightIsEqualTo
+import androidx.compose.ui.test.hasAnyDescendant
+import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsEnabled
@@ -942,8 +945,14 @@ class DirectChatContentTest {
         composeRule.onAllNodesWithText("Sent").assertCountEquals(2)
         composeRule.onNodeWithText("Delivered").assertDoesNotExist()
         composeRule.onNodeWithText("Read").assertDoesNotExist()
-        composeRule.onNodeWithContentDescription("Delivered").assertIsDisplayed()
-        composeRule.onNodeWithContentDescription("Read").assertIsDisplayed()
+        composeRule.onNode(
+            hasTestTag("message-bubble-delivered") and hasAnyDescendant(hasContentDescription("Delivered")),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+        composeRule.onNode(
+            hasTestTag("message-bubble-read") and hasAnyDescendant(hasContentDescription("Read")),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
     }
 
     @Test

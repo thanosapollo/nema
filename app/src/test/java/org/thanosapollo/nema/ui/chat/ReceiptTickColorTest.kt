@@ -11,7 +11,7 @@ import org.thanosapollo.nema.ui.theme.semanticPalette
 
 class ReceiptTickColorTest {
     @Test
-    fun deliveredAndReadTicksDifferAndMeetContrastOnChatBackground() {
+    fun deliveredAndReadTicksDifferAndMeetContrastOnOutgoingBubble() {
         val palettes = listOf(
             semanticPalette(AppearanceSpec.DEFAULT, dark = false),
             semanticPalette(AppearanceSpec.DEFAULT, dark = true),
@@ -25,7 +25,7 @@ class ReceiptTickColorTest {
             ),
         )
         palettes.forEach { palette ->
-            val background = palette.background
+            val background = palette.outgoingBubble
             val delivered = receiptTickColor(read = false, bubbleArgb = background)
             val read = receiptTickColor(read = true, bubbleArgb = background)
             assertNotEquals("ticks must stay grey vs green on $background", delivered, read)

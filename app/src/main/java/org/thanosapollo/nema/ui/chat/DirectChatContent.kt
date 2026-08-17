@@ -1952,19 +1952,19 @@ fun MessageTimeline(
                                         modifier = Modifier.align(Alignment.End),
                                     )
                                 }
+                                message.delivery?.receiptCheck(bubbleContainerColor.toArgb())?.let { check ->
+                                    Text(
+                                        "\u2713",
+                                        color = check.color,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        modifier = Modifier
+                                            .align(Alignment.End)
+                                            .clearAndSetSemantics {
+                                                contentDescription = check.description
+                                            },
+                                    )
+                                }
                             }
-                        }
-                        message.delivery?.receiptCheck()?.let { check ->
-                            Text(
-                                "\u2713",
-                                color = check.color,
-                                style = MaterialTheme.typography.labelSmall,
-                                modifier = Modifier
-                                    .align(Alignment.End)
-                                    .clearAndSetSemantics {
-                                        contentDescription = check.description
-                                    },
-                            )
                         }
                         DropdownMenu(
                             expanded = messageActionsOpen,
@@ -2210,21 +2210,18 @@ private fun DeliveryPresentation.visibleLabel(): String? = when (this) {
 
 private data class ReceiptCheck(val description: String, val color: Color)
 
-@Composable
-private fun DeliveryPresentation.receiptCheck(): ReceiptCheck? {
-    val background = MaterialTheme.colorScheme.background.toArgb()
-    return when (this) {
+private fun DeliveryPresentation.receiptCheck(bubbleArgb: Int): ReceiptCheck? =
+    when (this) {
         DeliveryPresentation.DELIVERED -> ReceiptCheck(
             "Delivered",
-            Color(receiptTickColor(read = false, bubbleArgb = background)),
+            Color(receiptTickColor(read = false, bubbleArgb = bubbleArgb)),
         )
         DeliveryPresentation.READ -> ReceiptCheck(
             "Read",
-            Color(receiptTickColor(read = true, bubbleArgb = background)),
+            Color(receiptTickColor(read = true, bubbleArgb = bubbleArgb)),
         )
         else -> null
     }
-}
 
 @Composable
 private fun MessageAttachment(
