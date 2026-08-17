@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
@@ -53,6 +54,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import org.thanosapollo.nema.chat.ConversationSummary
 import org.thanosapollo.nema.ui.chat.PeerAvatar
@@ -79,11 +81,22 @@ fun HomeContent(
         conversations.filter { conversationMatches(it, query) }
     }
     val listState = rememberLazyListState()
+    var followNewest by remember { mutableStateOf(true) }
     val newestPeer = visible.firstOrNull()?.peerJid
-    LaunchedEffect(newestPeer) {
-        if (shouldPinHomeToNewest(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)) {
-            listState.scrollToItem(0)
-        }
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }
+            .distinctUntilChanged()
+            .collect { scrolling ->
+                if (!scrolling) {
+                    followNewest = homeFollowsNewestAfterUserScroll(
+                        listState.firstVisibleItemIndex,
+                        listState.firstVisibleItemScrollOffset,
+                    )
+                }
+            }
+    }
+    LaunchedEffect(newestPeer, followNewest) {
+        if (followNewest) listState.scrollToItem(0)
     }
     val status = quietConnectionStatus(connectionStatus)
     Box(modifier.fillMaxSize()) {

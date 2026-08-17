@@ -1736,6 +1736,7 @@ fun MessageTimeline(
     }
     var previousLatestId by remember { mutableStateOf<String?>(null) }
     var newIncoming by remember { mutableIntStateOf(0) }
+    var followLatest by remember { mutableStateOf(true) }
     var viewportRestored by remember { mutableStateOf(initialViewport == null) }
     var visibleMessageIds by remember { mutableStateOf(emptySet<String>()) }
     var reportedMarkerTargets by remember { mutableStateOf(emptySet<String>()) }
@@ -1803,6 +1804,16 @@ fun MessageTimeline(
             }
         }
     }
+    LaunchedEffect(listState, viewportRestored) {
+        if (!viewportRestored) return@LaunchedEffect
+        snapshotFlow { listState.isScrollInProgress }
+            .distinctUntilChanged()
+            .collect { scrolling ->
+                if (!scrolling) {
+                    followLatest = listState.firstVisibleItemIndex <= NEAR_LATEST_ITEM_THRESHOLD
+                }
+            }
+    }
     LaunchedEffect(nearLatest) {
         if (nearLatest) newIncoming = 0
     }
@@ -1816,9 +1827,7 @@ fun MessageTimeline(
         val previous = previousLatestId
         if (previous != null) {
             val appended = appendedMessages(previous, messages)
-            val followedBeforeAppend =
-                listState.firstVisibleItemIndex - appended.size <= NEAR_LATEST_ITEM_THRESHOLD
-            if (followedBeforeAppend) {
+            if (followLatest) {
                 if (appended.isNotEmpty()) listState.scrollToItem(0)
                 newIncoming = 0
             } else {

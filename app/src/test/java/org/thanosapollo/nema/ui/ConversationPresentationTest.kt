@@ -48,10 +48,10 @@ class ConversationPresentationTest {
     }
 
     @Test
-    fun homePinsNewestOnlyWhenAlreadyAtTop() {
-        assertTrue(shouldPinHomeToNewest(firstVisibleIndex = 0, firstVisibleScrollOffset = 0))
-        assertFalse(shouldPinHomeToNewest(firstVisibleIndex = 0, firstVisibleScrollOffset = 12))
-        assertFalse(shouldPinHomeToNewest(firstVisibleIndex = 2, firstVisibleScrollOffset = 0))
+    fun homeFollowsNewestOnlyAfterUserScrollRestsAtTop() {
+        assertTrue(homeFollowsNewestAfterUserScroll(firstVisibleIndex = 0, firstVisibleScrollOffset = 0))
+        assertFalse(homeFollowsNewestAfterUserScroll(firstVisibleIndex = 0, firstVisibleScrollOffset = 12))
+        assertFalse(homeFollowsNewestAfterUserScroll(firstVisibleIndex = 2, firstVisibleScrollOffset = 0))
     }
 
     @Test
