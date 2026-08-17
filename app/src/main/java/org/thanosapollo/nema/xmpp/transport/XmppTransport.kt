@@ -170,6 +170,17 @@ data class IncomingMessageEnvelope(
     }
 }
 
+data class OutgoingChatState(
+    val accountId: AccountId,
+    val generation: ConnectionGeneration,
+    val recipient: String,
+    val activity: ChatActivity,
+) {
+    init {
+        require(recipient.isNotEmpty()) { "Chat state recipient must not be empty" }
+    }
+}
+
 data class OutgoingMessageSignal(
     val accountId: AccountId,
     val generation: ConnectionGeneration,

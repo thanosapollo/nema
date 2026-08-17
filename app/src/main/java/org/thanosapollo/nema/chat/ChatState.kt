@@ -565,6 +565,7 @@ class DirectChatPresenter(
     private val observeRoom: (String) -> Flow<RoomView?> = { flowOf(null) },
     private val observeTyping: (String) -> Flow<List<String>> = { flowOf(emptyList()) },
     private val observeRtt: (String) -> Flow<String?> = { flowOf(null) },
+    private val notifyComposer: (String, Boolean) -> Unit = { _, _ -> },
     private val threadingPolicy: ThreadingPolicy = ThreadingPolicy(),
     private val restoreRouteOnStart: Boolean = false,
 ) {
@@ -911,6 +912,12 @@ class DirectChatPresenter(
                             pending.snapshot.body,
                             pending.snapshot.reply,
                         )
+                        if (!pending.snapshot.groupChat) {
+                            notifyComposer(
+                                pending.snapshot.key.canonicalBarePeer,
+                                pending.snapshot.body.isNotEmpty(),
+                            )
+                        }
                         true
                     }
                 } catch (cancelled: CancellationException) {

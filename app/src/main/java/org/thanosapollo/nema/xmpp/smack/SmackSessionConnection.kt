@@ -91,6 +91,8 @@ import org.thanosapollo.nema.xmpp.markers.RECEIVED_ELEMENT
 import org.thanosapollo.nema.xmpp.markers.addMarkable
 import org.thanosapollo.nema.xmpp.markers.installNemaChatMarkerProviders
 import org.thanosapollo.nema.xmpp.chatstates.CHAT_STATES_NAMESPACE
+import org.thanosapollo.nema.xmpp.chatstates.ChatActivity
+import org.thanosapollo.nema.xmpp.chatstates.addChatState
 import org.thanosapollo.nema.xmpp.chatstates.chatActivityNamed
 import org.thanosapollo.nema.xmpp.chatstates.installNemaChatStateProviders
 import org.thanosapollo.nema.xmpp.reactions.REACTIONS_NAMESPACE
@@ -313,6 +315,16 @@ internal class SmackSessionConnection(
             .build()
         synchronized(entryGate) {
             requireExactAttemptLocked(reaction.accountId, reaction.generation)
+        }
+        connection.sendStanza(stanza)
+    }
+
+    override suspend fun sendChatState(
+        state: org.thanosapollo.nema.xmpp.transport.OutgoingChatState,
+    ) = runInterruptible(Dispatchers.IO) {
+        val stanza = state.toSmackMessage()
+        synchronized(entryGate) {
+            requireExactAttemptLocked(state.accountId, state.generation)
         }
         connection.sendStanza(stanza)
     }
@@ -983,9 +995,17 @@ internal fun OutgoingMessageEnvelope.toSmackMessage(): Message {
         replaceId?.let { builder.addExtension(MessageCorrectExtension(it)) }
         DeliveryReceiptRequest.addTo(builder)
         builder.addMarkable()
+        builder.addChatState(ChatActivity.ACTIVE)
     }
     return builder.build()
 }
+
+internal fun org.thanosapollo.nema.xmpp.transport.OutgoingChatState.toSmackMessage(): Message =
+    StanzaBuilder.buildMessage()
+        .to(JidCreate.entityBareFrom(recipient))
+        .ofType(Message.Type.chat)
+        .addChatState(activity)
+        .build()
 
 internal fun Message.toIncomingSignal(
     attempt: SessionAttemptIdentity,

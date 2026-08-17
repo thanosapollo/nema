@@ -55,10 +55,13 @@ import org.thanosapollo.nema.storage.IncomingReactionApply
 import org.thanosapollo.nema.storage.InsertedInbound
 import org.thanosapollo.nema.xmpp.chatstates.ChatActivity
 import org.thanosapollo.nema.xmpp.chatstates.ChatStateHub
+import org.thanosapollo.nema.xmpp.chatstates.OUTBOUND_COMPOSING_PAUSE_MS
+import org.thanosapollo.nema.xmpp.chatstates.OutboundChatStateHub
 import org.thanosapollo.nema.xmpp.rtt.RealTimeTextHub
 import org.thanosapollo.nema.xmpp.transport.IncomingChatState
 import org.thanosapollo.nema.xmpp.transport.IncomingMessageEnvelope
 import org.thanosapollo.nema.xmpp.transport.IncomingRealTimeText
+import org.thanosapollo.nema.xmpp.transport.OutgoingChatState
 import org.thanosapollo.nema.credentials.CredentialAccess
 import org.thanosapollo.nema.credentials.CredentialVault
 import org.thanosapollo.nema.session.ActiveSessionController
@@ -168,6 +171,8 @@ class SessionRuntime(
     val rooms = RoomStateStore()
     val chatStates = ChatStateHub()
     val realTimeText = RealTimeTextHub()
+    private val outboundChatStates = OutboundChatStateHub()
+    private val pauseJobs = mutableMapOf<String, Job>()
     val state: StateFlow<ConnectionState>
         get() = controller.state
     val archiveState: StateFlow<ArchiveSyncState>
@@ -561,6 +566,10 @@ class SessionRuntime(
             replaceId = snapshot.correction?.referenceId,
             correctionTargetMessageId = snapshot.correction?.localMessageId,
         ) ?: return false
+        if (!snapshot.groupChat) {
+            outboundChatStates.onSent(snapshot.key.canonicalBarePeer, System.currentTimeMillis())
+            synchronized(pauseJobs) { pauseJobs.remove(snapshot.key.canonicalBarePeer)?.cancel() }
+        }
         val observation = controller.lifecycle.value
         val lease = observation.dispatchLease()
         if (lease?.identity?.accountId == account.id) {
@@ -770,6 +779,42 @@ class SessionRuntime(
                 ),
             )
             false
+        }
+    }
+
+    fun reportComposer(peer: String, composingNow: Boolean) {
+        if (peer.isEmpty()) return
+        val next = outboundChatStates.onDraft(peer, composingNow, System.currentTimeMillis())
+        if (next != null) sendOutboundChatState(peer, next)
+        synchronized(pauseJobs) {
+            pauseJobs.remove(peer)?.cancel()
+            if (composingNow) {
+                pauseJobs[peer] = scope.launch {
+                    delay(OUTBOUND_COMPOSING_PAUSE_MS)
+                    outboundChatStates.duePauses(System.currentTimeMillis()).forEach { (pausedPeer, paused) ->
+                        sendOutboundChatState(pausedPeer, paused)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun sendOutboundChatState(peer: String, activity: ChatActivity) {
+        scope.launch {
+            val connected = state.value as? ConnectionState.Connected ?: return@launch
+            try {
+                controller.sendChatState(
+                    OutgoingChatState(
+                        accountId = connected.accountId,
+                        generation = connected.generation,
+                        recipient = peer,
+                        activity = activity,
+                    ),
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+            }
         }
     }
 

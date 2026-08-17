@@ -56,6 +56,7 @@ import org.thanosapollo.nema.xmpp.transport.ArchivePageDirection
 import org.thanosapollo.nema.xmpp.transport.ConnectionGeneration
 import org.thanosapollo.nema.xmpp.transport.MessageReplyEnvelope
 import org.thanosapollo.nema.xmpp.transport.MessageTimeSource
+import org.thanosapollo.nema.xmpp.transport.OutgoingChatState
 import org.thanosapollo.nema.xmpp.transport.OutgoingMessageEnvelope
 import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
 import org.thanosapollo.nema.xmpp.transport.MessageSignalProtocol
@@ -98,6 +99,24 @@ class SmackDirectMessageMapperTest {
         assertEquals(envelope.thread, message.toThreadRef())
         assertTrue(DeliveryReceiptRequest.from(message) != null)
         assertTrue(message.getExtensionElement("markable", "urn:xmpp:chat-markers:0") != null)
+        assertEquals(
+            "active",
+            message.getExtensionElement("active", CHAT_STATES_NAMESPACE)?.elementName,
+        )
+    }
+
+    @Test
+    fun bodylessOutboundChatStateIsTypeChat() {
+        val composing = OutgoingChatState(
+            accountId = AccountId.require("account"),
+            generation = ConnectionGeneration.require(3),
+            recipient = "peer@example.org",
+            activity = ChatActivity.COMPOSING,
+        ).toSmackMessage()
+        assertEquals(Message.Type.chat, composing.type)
+        assertNull(composing.body)
+        assertEquals("composing", composing.getExtensionElement("composing", CHAT_STATES_NAMESPACE)?.elementName)
+        assertNull(composing.getExtensionElement("paused", CHAT_STATES_NAMESPACE))
     }
 
     @Test

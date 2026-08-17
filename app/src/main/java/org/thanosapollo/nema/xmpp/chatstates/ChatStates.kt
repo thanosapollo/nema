@@ -43,3 +43,18 @@ fun typingLabel(composers: List<String>, directName: String? = null): String? = 
     composers.size == 1 -> "${composers.single()} is typing..."
     else -> "${composers.joinToString(", ")} are typing..."
 }
+
+const val OUTBOUND_COMPOSING_PAUSE_MS = 5_000L
+
+fun nextOutboundChatState(
+    last: ChatActivity?,
+    composingNow: Boolean,
+    pauseDue: Boolean = false,
+    sent: Boolean = false,
+): ChatActivity? = when {
+    sent -> ChatActivity.ACTIVE.takeIf { last != ChatActivity.ACTIVE }
+    composingNow && last != ChatActivity.COMPOSING -> ChatActivity.COMPOSING
+    !composingNow && last != null && last != ChatActivity.ACTIVE -> ChatActivity.ACTIVE
+    pauseDue && last == ChatActivity.COMPOSING -> ChatActivity.PAUSED
+    else -> null
+}
