@@ -490,6 +490,16 @@ class SmackDirectMessageMapperTest {
         assertEquals("incoming", envelope.messageId)
         assertEquals("body", envelope.body)
         assertNull(bodyless.toIncomingEnvelope(attempt, "account@example.org"))
+        val encrypted = StanzaBuilder.buildMessage("encrypted")
+            .from(JidCreate.entityFullFrom("peer@example.org/phone"))
+            .ofType(Message.Type.chat)
+            .addExtension(
+                StandardExtensionElement.builder("encrypted", "eu.siacs.conversations.axolotl").build(),
+            )
+            .build()
+        val hidden = requireNotNull(encrypted.toIncomingEnvelope(attempt, "account@example.org"))
+        assertEquals("peer@example.org", hidden.peer)
+        assertEquals("Encrypted message", hidden.body)
     }
 
     @Test

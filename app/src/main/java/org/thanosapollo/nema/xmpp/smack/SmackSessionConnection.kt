@@ -1077,6 +1077,16 @@ internal fun Message.toIncomingChatState(
     }
 }
 
+internal fun Message.encryptedMessagePlaceholder(): String? {
+    val encrypted = extensions.any { extension ->
+        val namespace = extension.namespace.orEmpty()
+        namespace == "eu.siacs.conversations.axolotl" ||
+            namespace == "jabber:x:encrypted" ||
+            namespace.startsWith("urn:xmpp:omemo:")
+    }
+    return "Encrypted message".takeIf { encrypted }
+}
+
 internal fun Message.toIncomingRtt(
     attempt: SessionAttemptIdentity,
     expectedBareJid: String,
@@ -1161,9 +1171,9 @@ internal fun Message.toIncomingEnvelope(
     val reply = replyReference()
     val parsed = if (reply == null) null else parseReplyBody()
     val messageBody = if (parsed == null) {
-        body?.takeIf(String::isNotEmpty) ?: share?.url
+        body?.takeIf(String::isNotEmpty) ?: share?.url ?: encryptedMessagePlaceholder()
     } else {
-        parsed.body.takeIf(String::isNotEmpty) ?: share?.url
+        parsed.body.takeIf(String::isNotEmpty) ?: share?.url ?: encryptedMessagePlaceholder()
     } ?: return null
     val replyEnvelope = reply?.copy(fallbackBody = parsed?.fallbackBody)
     return if (groupChat) {
