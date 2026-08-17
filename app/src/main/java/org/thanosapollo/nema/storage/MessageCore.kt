@@ -1561,6 +1561,12 @@ class MessageStore private constructor(
                 ?: createDirectThreadSession(dao, accountId, peerJid)
         }
 
+    suspend fun markConversationRead(accountId: String, peerJid: String): Boolean = database.withTransaction {
+        val dao = database.messageDao()
+        dao.insertPeer(PeerEntity(accountId, peerJid))
+        dao.updatePeerLastRead(accountId, peerJid) == 1
+    }
+
     suspend fun compose(intent: OutboundIntent): OutboxEntity = database.withTransaction {
         composeInTransaction(intent)
     }

@@ -37,6 +37,7 @@ import org.thanosapollo.nema.storage.MessageStore
 import org.thanosapollo.nema.storage.MessageThreadTitleEntity
 import org.thanosapollo.nema.storage.OutboxStatus
 import org.thanosapollo.nema.storage.PeerEntity
+import org.thanosapollo.nema.storage.PeerIdentityStore
 import org.thanosapollo.nema.storage.RetryUncertainKey
 import org.thanosapollo.nema.storage.TimelineRow
 import org.thanosapollo.nema.storage.TrustedIdentityAliasEntity
@@ -308,6 +309,7 @@ data class DraftSnapshot(
 class ChatRepository(database: NemaDatabase) {
     private val dao = database.messageDao()
     private val messages = MessageStore(database)
+    private val peers = PeerIdentityStore(dao)
 
     fun observeConversations(accountId: String): Flow<List<ConversationSummary>> =
         combine(
@@ -323,10 +325,8 @@ class ChatRepository(database: NemaDatabase) {
             dao.rooms(accountId),
         )
 
-    suspend fun markConversationRead(accountId: String, peerJid: String): Boolean {
-        dao.insertPeer(PeerEntity(accountId, peerJid))
-        return dao.updatePeerLastRead(accountId, peerJid) == 1
-    }
+    suspend fun markConversationRead(accountId: String, peerJid: String): Boolean =
+        messages.markConversationRead(accountId, peerJid)
 
     private fun conversationSummaries(
         rows: List<ConversationListRow>,
@@ -549,7 +549,7 @@ class ChatRepository(database: NemaDatabase) {
         dao.observePeer(accountId, peerJid).map { it?.toIdentityFacts() }
 
     suspend fun markRoom(accountId: String, peerJid: String) {
-        dao.savePeerRoom(accountId, peerJid, true)
+        peers.saveRoom(accountId, peerJid, true)
     }
 }
 

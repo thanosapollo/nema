@@ -31,6 +31,7 @@ import org.thanosapollo.nema.storage.MessageStore
 import org.thanosapollo.nema.storage.OutboundIntent
 import org.thanosapollo.nema.storage.OutboxStatus
 import org.thanosapollo.nema.storage.PeerEntity
+import org.thanosapollo.nema.storage.PeerIdentityStore
 import org.thanosapollo.nema.storage.TrustedIdentityAlias
 import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.thread.ThreadId
@@ -490,6 +491,19 @@ class ChatRepositoryPresenterTest {
         val conversations = ChatRepository(database).observeConversations(ACCOUNT).first()
         assertEquals(listOf("room@conference.example.org"), conversations.map(ConversationSummary::peerJid))
         assertEquals(listOf(true), conversations.map(ConversationSummary::groupChat))
+    }
+
+    @Test
+    fun markConversationReadDoesNotClobberRoomOrNickname() = runBlocking {
+        val repository = ChatRepository(database)
+        repository.markRoom(ACCOUNT, PEER)
+        PeerIdentityStore(database.messageDao()).saveLocalNickname(ACCOUNT, PEER, "Ada")
+
+        assertTrue(repository.markConversationRead(ACCOUNT, PEER))
+
+        val peer = database.messageDao().peer(ACCOUNT, PEER)
+        assertEquals(true, peer?.room)
+        assertEquals("Ada", peer?.localNickname)
     }
 
     @Test
