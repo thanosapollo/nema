@@ -51,6 +51,7 @@ import org.thanosapollo.nema.chat.DirectConversationKey
 import org.thanosapollo.nema.chat.shouldNotifyInsertedInbound
 import org.thanosapollo.nema.storage.ArchiveDirection
 import org.thanosapollo.nema.storage.IngestionResult
+import org.thanosapollo.nema.storage.IncomingReactionApply
 import org.thanosapollo.nema.storage.InsertedInbound
 import org.thanosapollo.nema.xmpp.chatstates.ChatActivity
 import org.thanosapollo.nema.xmpp.chatstates.ChatStateHub
@@ -198,6 +199,19 @@ class SessionRuntime(
                     }
                     is org.thanosapollo.nema.session.SessionEvent.ChatState ->
                         chatStates.apply(event.state)
+                    is org.thanosapollo.nema.session.SessionEvent.Reaction ->
+                        messages.applyIncomingReaction(
+                            IncomingReactionApply(
+                                accountId = event.reaction.accountId.value,
+                                accountBareJid = event.reaction.accountBareJid,
+                                peerJid = event.reaction.peer,
+                                senderBareJid = event.reaction.senderBareJid,
+                                targetId = event.reaction.targetId,
+                                emojis = event.reaction.emojis,
+                                receivedAtMs = System.currentTimeMillis(),
+                                delayedAtMs = event.reaction.delayedAtMs,
+                            ),
+                        )
                     is org.thanosapollo.nema.session.SessionEvent.Signal ->
                         messages.recordReceiptSignal(
                             accountId = event.signal.accountId.value,

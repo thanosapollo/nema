@@ -41,6 +41,8 @@ import org.thanosapollo.nema.xmpp.markers.installNemaChatMarkerProviders
 import org.thanosapollo.nema.xmpp.chatstates.ChatActivity
 import org.thanosapollo.nema.xmpp.chatstates.CHAT_STATES_NAMESPACE
 import org.thanosapollo.nema.xmpp.chatstates.installNemaChatStateProviders
+import org.thanosapollo.nema.xmpp.reactions.REACTIONS_NAMESPACE
+import org.thanosapollo.nema.xmpp.reactions.installNemaReactionProviders
 import org.thanosapollo.nema.xmpp.reply.installNemaReplyProviders
 import org.thanosapollo.nema.xmpp.reply.parseReplyBody
 import org.thanosapollo.nema.xmpp.reply.REPLY_NAMESPACE
@@ -65,6 +67,7 @@ class SmackDirectMessageMapperTest {
         installNemaReplyProviders()
         installNemaChatMarkerProviders()
         installNemaChatStateProviders()
+        installNemaReactionProviders()
     }
 
     @Test
@@ -1406,5 +1409,53 @@ class SmackDirectMessageMapperTest {
         assertEquals("talos@chat.example.org", mapped.peer)
         assertEquals(ChatActivity.COMPOSING, mapped.activity)
         assertFalse(mapped.groupChat)
+    }
+
+    @Test
+    fun liveAndOwnCarbonReactionsMapAndGroupchatIsDropped() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        fun reaction(from: String, to: String) = StanzaBuilder.buildMessage()
+            .from(JidCreate.from(from))
+            .to(JidCreate.from(to))
+            .ofType(Message.Type.chat)
+            .addExtension(
+                StandardExtensionElement.builder("reactions", REACTIONS_NAMESPACE)
+                    .addAttribute("id", "origin-1")
+                    .addElement("reaction", "👍")
+                    .build(),
+            )
+            .build()
+        val inbound = requireNotNull(
+            reaction("peer@example.org/phone", "account@example.org/nema")
+                .toIncomingReaction(attempt, "account@example.org"),
+        )
+        assertEquals("peer@example.org", inbound.peer)
+        assertEquals("peer@example.org", inbound.senderBareJid)
+        assertEquals("origin-1", inbound.targetId)
+        assertEquals(listOf("👍"), inbound.emojis)
+        val own = requireNotNull(
+            reaction("account@example.org/nema", "peer@example.org/phone")
+                .toIncomingReaction(attempt, "account@example.org"),
+        )
+        assertEquals("peer@example.org", own.peer)
+        assertEquals("account@example.org", own.senderBareJid)
+        assertNull(
+            StanzaBuilder.buildMessage()
+                .from(JidCreate.from("room@conference.example.org/nick"))
+                .ofType(Message.Type.groupchat)
+                .addExtension(
+                    StandardExtensionElement.builder("reactions", REACTIONS_NAMESPACE)
+                        .addAttribute("id", "origin-1")
+                        .addElement("reaction", "👍")
+                        .build(),
+                )
+                .build()
+                .toIncomingReaction(attempt, "account@example.org"),
+        )
     }
 }

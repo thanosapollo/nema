@@ -26,6 +26,7 @@ import org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope
 import org.thanosapollo.nema.xmpp.transport.ArchivePageRequest
 import org.thanosapollo.nema.xmpp.transport.ConnectionGeneration
 import org.thanosapollo.nema.xmpp.transport.IncomingChatState
+import org.thanosapollo.nema.xmpp.transport.IncomingReactionEnvelope
 import org.thanosapollo.nema.xmpp.transport.IncomingMessageEnvelope
 import org.thanosapollo.nema.xmpp.transport.IncomingMessageSignal
 import org.thanosapollo.nema.xmpp.transport.OutgoingFailureEnvelope
@@ -103,6 +104,15 @@ sealed interface SessionEvent {
         val attempt: SessionAttemptIdentity,
         val state: IncomingChatState,
     ) : SessionEvent
+    data class Reaction(
+        val attempt: SessionAttemptIdentity,
+        val reaction: IncomingReactionEnvelope,
+    ) : SessionEvent {
+        init {
+            require(reaction.accountId == attempt.accountId)
+            require(reaction.generation == attempt.generation)
+        }
+    }
     data class OutgoingFailure(
         val attempt: SessionAttemptIdentity,
         val failure: OutgoingFailureEnvelope,
@@ -601,6 +611,7 @@ internal class ActiveSessionController(
             is SessionEvent.Incoming -> runBlocking { handleDurableEvent(event.attempt, event) }
             is SessionEvent.Signal -> runBlocking { handleDurableEvent(event.attempt, event) }
             is SessionEvent.ChatState -> runBlocking { handleDurableEvent(event.attempt, event) }
+            is SessionEvent.Reaction -> runBlocking { handleDurableEvent(event.attempt, event) }
             is SessionEvent.OutgoingFailure -> runBlocking { handleDurableEvent(event.attempt, event) }
             is SessionEvent.RoomUpdated -> runBlocking { handleIncomingRoom(event) }
         }

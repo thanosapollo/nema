@@ -93,7 +93,10 @@ import org.thanosapollo.nema.xmpp.markers.installNemaChatMarkerProviders
 import org.thanosapollo.nema.xmpp.chatstates.CHAT_STATES_NAMESPACE
 import org.thanosapollo.nema.xmpp.chatstates.chatActivityNamed
 import org.thanosapollo.nema.xmpp.chatstates.installNemaChatStateProviders
+import org.thanosapollo.nema.xmpp.reactions.installNemaReactionProviders
+import org.thanosapollo.nema.xmpp.reactions.parseReactions
 import org.thanosapollo.nema.xmpp.transport.IncomingChatState
+import org.thanosapollo.nema.xmpp.transport.IncomingReactionEnvelope
 import org.thanosapollo.nema.xmpp.httpupload.LocalUploadRequest
 import org.thanosapollo.nema.xmpp.httpupload.UploadedFile
 import org.thanosapollo.nema.xmpp.oob.OutOfBandShare
@@ -134,6 +137,7 @@ class SmackSessionConnectionFactory : SessionConnectionFactory {
         installNemaReplyProviders()
         installNemaChatMarkerProviders()
         installNemaChatStateProviders()
+        installNemaReactionProviders()
         require(identity.accountId == configuration.id) { "Session account does not match configuration" }
         val connection = XMPPTCPConnection(configurationFor(configuration)).apply {
             setUseStreamManagement(false)
@@ -214,6 +218,10 @@ internal class SmackSessionConnection(
         val room = message.message.from?.asBareJid()?.toString()
         message.message.toIncomingChatState(attempt, expectedBareJid, room?.let(roomNicks::get))?.let {
             event(SessionEvent.ChatState(attempt, it))
+        }
+        message.message.toIncomingReaction(attempt, expectedBareJid)?.let {
+            event(SessionEvent.Reaction(attempt, it))
+            if (message.message.body.isNullOrEmpty()) return@StanzaListener
         }
         stableIdGate.accept(attempt, message).forEach(::deliver)
     }
@@ -1039,6 +1047,31 @@ internal fun Message.toIncomingChatState(
             activity = activity,
         )
     }
+}
+
+internal fun Message.toIncomingReaction(
+    attempt: SessionAttemptIdentity,
+    expectedBareJid: String,
+): IncomingReactionEnvelope? {
+    if (type != Message.Type.chat) return null
+    val parsed = parseReactions() ?: return null
+    val fromBare = from?.asBareJid()?.takeIf { it.isEntityBareJid }?.toString() ?: return null
+    val toBare = to?.asBareJid()?.takeIf { it.isEntityBareJid }?.toString()
+    val peer = when {
+        fromBare == expectedBareJid -> toBare ?: return null
+        toBare == null || toBare == expectedBareJid -> fromBare
+        else -> return null
+    }
+    return IncomingReactionEnvelope(
+        accountId = attempt.accountId,
+        generation = attempt.generation,
+        accountBareJid = expectedBareJid,
+        peer = peer,
+        senderBareJid = fromBare,
+        targetId = parsed.targetId,
+        emojis = parsed.emojis,
+        delayedAtMs = DelayInformation.from(this)?.stamp?.time,
+    )
 }
 
 internal fun Message.toIncomingEnvelope(

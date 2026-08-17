@@ -83,6 +83,24 @@ data class IncomingChatState(
     }
 }
 
+data class IncomingReactionEnvelope(
+    val accountId: AccountId,
+    val generation: ConnectionGeneration,
+    val accountBareJid: String,
+    val peer: String,
+    val senderBareJid: String,
+    val targetId: String,
+    val emojis: List<String>,
+    val delayedAtMs: Long? = null,
+) {
+    init {
+        require(accountBareJid.isNotEmpty()) { "Account JID must not be empty" }
+        require(peer.isNotEmpty()) { "Peer must not be empty" }
+        require(senderBareJid.isNotEmpty()) { "Sender must not be empty" }
+        require(targetId.isNotEmpty()) { "Reaction target must not be empty" }
+    }
+}
+
 data class ConnectionEnvelope(
     val accountId: AccountId,
     val generation: ConnectionGeneration,
