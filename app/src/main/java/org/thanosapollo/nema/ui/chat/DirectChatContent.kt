@@ -1954,24 +1954,32 @@ fun MessageTimeline(
                                 message.delivery?.visibleLabel()?.let { label ->
                                     Text(label, style = MaterialTheme.typography.labelSmall)
                                 }
-                                message.sentAtEpochMs?.let { sentAt ->
-                                    Text(
-                                        formatMessageTime(sentAt),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        modifier = Modifier.align(Alignment.End),
-                                    )
-                                }
-                                message.delivery?.receiptCheck(bubbleContainerColor.toArgb())?.let { check ->
-                                    Text(
-                                        "\u2713",
-                                        color = check.color,
-                                        style = MaterialTheme.typography.labelSmall,
+                                val check = message.delivery?.receiptCheck(bubbleContainerColor.toArgb())
+                                if (message.sentAtEpochMs != null || check != null) {
+                                    Row(
                                         modifier = Modifier
                                             .align(Alignment.End)
-                                            .clearAndSetSemantics {
-                                                contentDescription = check.description
-                                            },
-                                    )
+                                            .testTag("message-status"),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        check?.let { receipt ->
+                                            Text(
+                                                "\u2713",
+                                                color = receipt.color,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                modifier = Modifier.clearAndSetSemantics {
+                                                    contentDescription = receipt.description
+                                                },
+                                            )
+                                        }
+                                        message.sentAtEpochMs?.let { sentAt ->
+                                            Text(
+                                                formatMessageTime(sentAt),
+                                                style = MaterialTheme.typography.labelSmall,
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }

@@ -956,6 +956,35 @@ class DirectChatContentTest {
     }
 
     @Test
+    fun outgoingReceiptCheckSitsOnTheSameRowAsTime() {
+        val sentAt = 1_704_067_500_000L
+        val time = formatMessageTime(sentAt)
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(
+                        message("read", outgoing = true).copy(
+                            delivery = DeliveryPresentation.READ,
+                            sentAtEpochMs = sentAt,
+                        ),
+                    ),
+                )
+            }
+        }
+
+        composeRule.onNode(
+            hasTestTag("message-status") and
+                hasAnyDescendant(hasContentDescription("Read")) and
+                hasAnyDescendant(androidx.compose.ui.test.hasText(time)),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+        composeRule.onNode(
+            hasTestTag("message-bubble-read") and hasAnyDescendant(hasTestTag("message-status")),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+    }
+
+    @Test
     fun correctedMessageExposesAccessibleEditedIndicator() {
         composeRule.setContent {
             MaterialTheme {
@@ -2542,6 +2571,38 @@ class DirectChatContentTest {
         composeRule.onNodeWithText("Thread · 2 replies").performClick()
         composeRule.waitForIdle()
         assertEquals(thread, opened)
+    }
+
+    @Test
+    fun outgoingRootShowsThreadSummaryChip() {
+        val thread = ThreadRef(
+            ThreadId.require("own-thread"),
+            ThreadId.require("parent-thread"),
+        )
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(
+                        message("own send", outgoing = true).copy(
+                            threadSummaries = listOf(
+                                ThreadSummary(
+                                    thread,
+                                    replyCount = 1,
+                                    latestMessageId = "peer-reply",
+                                    latestPreview = "peer answer",
+                                ),
+                            ),
+                        ),
+                    ),
+                )
+            }
+        }
+
+        composeRule.onNode(
+            hasTestTag("message-bubble-own send") and
+                hasAnyDescendant(androidx.compose.ui.test.hasText("Thread · 1 replies")),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
     }
 
     @Test
