@@ -251,6 +251,7 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean, activityRe
                 ensurePeerIdentities = application.sessionRuntime::ensurePeerIdentities,
                 joinMuc = application.sessionRuntime::joinMuc,
                 observeRoom = { peer -> application.sessionRuntime.rooms.observe(account.id.value, peer) },
+                observeTyping = { peer -> application.sessionRuntime.chatStates.observe(peer) },
                 restoreRouteOnStart = restoreChatRouteOnStart,
             )
         }

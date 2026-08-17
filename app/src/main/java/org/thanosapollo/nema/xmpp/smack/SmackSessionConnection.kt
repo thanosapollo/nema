@@ -90,6 +90,10 @@ import org.thanosapollo.nema.xmpp.markers.RECEIPTS_NAMESPACE
 import org.thanosapollo.nema.xmpp.markers.RECEIVED_ELEMENT
 import org.thanosapollo.nema.xmpp.markers.addMarkable
 import org.thanosapollo.nema.xmpp.markers.installNemaChatMarkerProviders
+import org.thanosapollo.nema.xmpp.chatstates.CHAT_STATES_NAMESPACE
+import org.thanosapollo.nema.xmpp.chatstates.chatActivityNamed
+import org.thanosapollo.nema.xmpp.chatstates.installNemaChatStateProviders
+import org.thanosapollo.nema.xmpp.transport.IncomingChatState
 import org.thanosapollo.nema.xmpp.httpupload.LocalUploadRequest
 import org.thanosapollo.nema.xmpp.httpupload.UploadedFile
 import org.thanosapollo.nema.xmpp.oob.OutOfBandShare
@@ -129,6 +133,7 @@ class SmackSessionConnectionFactory : SessionConnectionFactory {
         requireNemaMamResultProvider()
         installNemaReplyProviders()
         installNemaChatMarkerProviders()
+        installNemaChatStateProviders()
         require(identity.accountId == configuration.id) { "Session account does not match configuration" }
         val connection = XMPPTCPConnection(configurationFor(configuration)).apply {
             setUseStreamManagement(false)
@@ -173,6 +178,7 @@ internal fun advertiseNemaFeatures(connection: XMPPConnection) {
         addFeature(REPLY_NAMESPACE)
         addFeature(RECEIPTS_NAMESPACE)
         addFeature(CHAT_MARKERS_NAMESPACE)
+        addFeature(CHAT_STATES_NAMESPACE)
         addFeature(MessageCorrectExtension.NAMESPACE)
     }
 }
@@ -204,6 +210,10 @@ internal class SmackSessionConnection(
         message.message.toIncomingSignal(attempt, expectedBareJid)?.let {
             event(SessionEvent.Signal(attempt, it))
             return@StanzaListener
+        }
+        val room = message.message.from?.asBareJid()?.toString()
+        message.message.toIncomingChatState(attempt, expectedBareJid, room?.let(roomNicks::get))?.let {
+            event(SessionEvent.ChatState(attempt, it))
         }
         stableIdGate.accept(attempt, message).forEach(::deliver)
     }
@@ -976,6 +986,47 @@ internal fun Message.toIncomingSignal(
         stage = stage,
         protocol = protocol,
     )
+}
+
+internal fun Message.toIncomingChatState(
+    attempt: SessionAttemptIdentity,
+    expectedBareJid: String,
+    ownRoomNick: String? = null,
+): IncomingChatState? {
+    if (type != Message.Type.chat && type != Message.Type.groupchat) return null
+    val fromJid = from ?: return null
+    val activities = extensions.mapNotNull { extension ->
+        if (extension.namespace == CHAT_STATES_NAMESPACE && extension is StandardExtensionElement) {
+            chatActivityNamed(extension.elementName)
+        } else {
+            null
+        }
+    }
+    val activity = activities.singleOrNull() ?: return null
+    return if (type == Message.Type.groupchat) {
+        val room = fromJid.asBareJid().takeIf { it.isEntityBareJid }?.toString() ?: return null
+        val nick = fromJid.resourceOrNull?.toString()?.takeIf(String::isNotEmpty) ?: return null
+        if (nick == ownRoomNick) return null
+        IncomingChatState(
+            accountId = attempt.accountId,
+            generation = attempt.generation,
+            peer = room,
+            actor = nick,
+            groupChat = true,
+            activity = activity,
+        )
+    } else {
+        val sender = fromJid.asBareJid().takeIf { it.isEntityBareJid }?.toString() ?: return null
+        if (sender == expectedBareJid) return null
+        IncomingChatState(
+            accountId = attempt.accountId,
+            generation = attempt.generation,
+            peer = sender,
+            actor = sender,
+            groupChat = false,
+            activity = activity,
+        )
+    }
 }
 
 internal fun Message.toIncomingEnvelope(

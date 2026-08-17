@@ -38,6 +38,9 @@ import org.thanosapollo.nema.thread.ThreadId
 import org.thanosapollo.nema.thread.ThreadRef
 import org.thanosapollo.nema.xmpp.oob.oobShare
 import org.thanosapollo.nema.xmpp.markers.installNemaChatMarkerProviders
+import org.thanosapollo.nema.xmpp.chatstates.ChatActivity
+import org.thanosapollo.nema.xmpp.chatstates.CHAT_STATES_NAMESPACE
+import org.thanosapollo.nema.xmpp.chatstates.installNemaChatStateProviders
 import org.thanosapollo.nema.xmpp.reply.installNemaReplyProviders
 import org.thanosapollo.nema.xmpp.reply.parseReplyBody
 import org.thanosapollo.nema.xmpp.reply.REPLY_NAMESPACE
@@ -61,6 +64,7 @@ class SmackDirectMessageMapperTest {
         SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
         installNemaReplyProviders()
         installNemaChatMarkerProviders()
+        installNemaChatStateProviders()
     }
 
     @Test
@@ -1328,5 +1332,56 @@ class SmackDirectMessageMapperTest {
                 firstIndex = 0,
             ),
         )
+    }
+
+    @Test
+    fun `live composing maps and own states are dropped`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        val composing = StanzaBuilder.buildMessage()
+            .from(JidCreate.entityFullFrom("peer@example.org/phone"))
+            .to(JidCreate.entityBareFrom("account@example.org"))
+            .ofType(Message.Type.chat)
+            .addExtension(
+                StandardExtensionElement.builder("composing", CHAT_STATES_NAMESPACE).build(),
+            )
+            .build()
+        val own = StanzaBuilder.buildMessage()
+            .from(JidCreate.entityBareFrom("account@example.org"))
+            .to(JidCreate.entityBareFrom("peer@example.org"))
+            .ofType(Message.Type.chat)
+            .addExtension(
+                StandardExtensionElement.builder("composing", CHAT_STATES_NAMESPACE).build(),
+            )
+            .build()
+        val room = StanzaBuilder.buildMessage()
+            .from(JidCreate.entityFullFrom("room@conference.example.org/debacle"))
+            .ofType(Message.Type.groupchat)
+            .addExtension(
+                StandardExtensionElement.builder("composing", CHAT_STATES_NAMESPACE).build(),
+            )
+            .build()
+        val selfNick = StanzaBuilder.buildMessage()
+            .from(JidCreate.entityFullFrom("room@conference.example.org/me"))
+            .ofType(Message.Type.groupchat)
+            .addExtension(
+                StandardExtensionElement.builder("composing", CHAT_STATES_NAMESPACE).build(),
+            )
+            .build()
+
+        val direct = requireNotNull(composing.toIncomingChatState(attempt, "account@example.org"))
+        assertEquals("peer@example.org", direct.peer)
+        assertEquals(ChatActivity.COMPOSING, direct.activity)
+        assertFalse(direct.groupChat)
+        assertNull(own.toIncomingChatState(attempt, "account@example.org"))
+        val muc = requireNotNull(room.toIncomingChatState(attempt, "account@example.org"))
+        assertEquals("room@conference.example.org", muc.peer)
+        assertEquals("debacle", muc.actor)
+        assertTrue(muc.groupChat)
+        assertNull(selfNick.toIncomingChatState(attempt, "account@example.org", ownRoomNick = "me"))
     }
 }

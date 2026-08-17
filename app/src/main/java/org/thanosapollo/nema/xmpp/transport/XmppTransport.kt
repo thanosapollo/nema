@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.thread.ThreadRef
+import org.thanosapollo.nema.xmpp.chatstates.ChatActivity
 
 const val ACCOUNT_ARCHIVE_SCOPE = "ACCOUNT"
 
@@ -65,6 +66,20 @@ data class IncomingMessageSignal(
         require(peer.isNotEmpty()) { "Peer must not be empty" }
         require(sender.isNotEmpty()) { "Sender must not be empty" }
         require(targetId.isNotEmpty()) { "Receipt target must not be empty" }
+    }
+}
+
+data class IncomingChatState(
+    val accountId: AccountId,
+    val generation: ConnectionGeneration,
+    val peer: String,
+    val actor: String,
+    val groupChat: Boolean,
+    val activity: ChatActivity,
+) {
+    init {
+        require(peer.isNotEmpty()) { "Peer must not be empty" }
+        require(actor.isNotEmpty()) { "Actor must not be empty" }
     }
 }
 

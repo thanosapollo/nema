@@ -956,6 +956,25 @@ class DirectChatContentTest {
     }
 
     @Test
+    fun typingIndicatorShowsEmacsJabberWording() {
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A).copy(typingLabel = "Talos is typing..."),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                )
+            }
+        }
+
+        composeRule.onNode(hasTestTag("typing-indicator"), useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithText("Talos is typing...").assertIsDisplayed()
+    }
+
+    @Test
     fun outgoingReceiptCheckSitsOnTheSameRowAsTime() {
         val sentAt = 1_704_067_500_000L
         val time = formatMessageTime(sentAt)

@@ -48,6 +48,7 @@ import org.thanosapollo.nema.thread.draftKey
 import org.thanosapollo.nema.xmpp.transport.AccountId
 import org.thanosapollo.nema.xmpp.vcard.peerDisplayLabel
 import org.thanosapollo.nema.xmpp.muc.RoomView
+import org.thanosapollo.nema.xmpp.chatstates.typingLabel
 
 data class ConversationSummary(
     val peerJid: String,
@@ -203,6 +204,7 @@ data class DirectChatState(
     val messages: List<TimelineMessage> = emptyList(),
     val draft: String = "",
     val draftReply: DraftReply? = null,
+    val typingLabel: String? = null,
 ) {
     val selectedPeerLabel: String?
         get() = selectedPeer?.let { peerDisplayLabel(it, selectedPeerDisplayName, selectedPeerLocalNickname) }
@@ -226,6 +228,7 @@ data class DirectChatState(
             messages === other.messages &&
             draft == other.draft &&
             draftReply == other.draftReply &&
+            typingLabel == other.typingLabel &&
             selectedPeerPhotoBytes.contentEquals(other.selectedPeerPhotoBytes)
     }
 
@@ -247,6 +250,7 @@ data class DirectChatState(
         result = 31 * result + System.identityHashCode(messages)
         result = 31 * result + draft.hashCode()
         result = 31 * result + (draftReply?.hashCode() ?: 0)
+        result = 31 * result + (typingLabel?.hashCode() ?: 0)
         return result
     }
 }
@@ -541,6 +545,7 @@ class DirectChatPresenter(
     private val ensurePeerIdentities: suspend (AccountId, Collection<String>) -> Unit = { _, _ -> },
     private val joinMuc: suspend (String) -> Boolean = { false },
     private val observeRoom: (String) -> Flow<RoomView?> = { flowOf(null) },
+    private val observeTyping: (String) -> Flow<List<String>> = { flowOf(emptyList()) },
     private val threadingPolicy: ThreadingPolicy = ThreadingPolicy(),
     private val restoreRouteOnStart: Boolean = false,
 ) {
@@ -557,7 +562,14 @@ class DirectChatPresenter(
         val room: RoomView?,
         val currentSession: ThreadRef?,
         val recentThreads: List<RecentThread>,
-    )
+        val composers: List<String> = emptyList(),
+    ) {
+        fun peerLabelForTyping(groupChat: Boolean): String? {
+            if (groupChat) return null
+            val jid = route?.peerJid ?: return null
+            return peerDisplayLabel(jid, peer?.displayName, peer?.localNickname)
+        }
+    }
 
     private val actionLock = Any()
     private val presenterJob = SupervisorJob(scope.coroutineContext[Job])
@@ -600,6 +612,8 @@ class DirectChatPresenter(
                         SelectedConversation(route, messages, draft, peer, room, currentSession, emptyList())
                     }.combine(repository.observeRecentThreads(account.id.value, route.peerJid)) { selected, recent ->
                         selected.copy(recentThreads = recent)
+                    }.combine(observeTyping(route.peerJid)) { selected, composers ->
+                        selected.copy(composers = composers)
                     },
                 )
             }
@@ -633,6 +647,10 @@ class DirectChatPresenter(
             messages = selected.messages,
             draft = selected.draft.body,
             draftReply = selected.draft.reply,
+            typingLabel = typingLabel(
+                composers = selected.composers,
+                directName = selected.peerLabelForTyping(groupChat),
+            ),
         )
     }.stateIn(
         presenterScope,

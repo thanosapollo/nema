@@ -52,6 +52,9 @@ import org.thanosapollo.nema.chat.shouldNotifyInsertedInbound
 import org.thanosapollo.nema.storage.ArchiveDirection
 import org.thanosapollo.nema.storage.IngestionResult
 import org.thanosapollo.nema.storage.InsertedInbound
+import org.thanosapollo.nema.xmpp.chatstates.ChatActivity
+import org.thanosapollo.nema.xmpp.chatstates.ChatStateHub
+import org.thanosapollo.nema.xmpp.transport.IncomingChatState
 import org.thanosapollo.nema.xmpp.transport.IncomingMessageEnvelope
 import org.thanosapollo.nema.credentials.CredentialAccess
 import org.thanosapollo.nema.credentials.CredentialVault
@@ -160,6 +163,7 @@ class SessionRuntime(
     val visiblePeer = AtomicReference<String?>(null)
     @Volatile var onInsertedInbound: ((String, String) -> Unit)? = null
     val rooms = RoomStateStore()
+    val chatStates = ChatStateHub()
     val state: StateFlow<ConnectionState>
         get() = controller.state
     val archiveState: StateFlow<ArchiveSyncState>
@@ -177,7 +181,23 @@ class SessionRuntime(
                         val result = liveMessages.ingest(event.message)
                         emitInsertedLive(event.message, result)
                         acknowledgeReceiptRequest(event.message)
+                        chatStates.apply(
+                            IncomingChatState(
+                                accountId = event.message.accountId,
+                                generation = event.message.generation,
+                                peer = event.message.peer,
+                                actor = if (event.message.kind == org.thanosapollo.nema.thread.MessageKind.GROUPCHAT) {
+                                    event.message.sender.substringAfterLast('/')
+                                } else {
+                                    event.message.peer
+                                }.ifEmpty { event.message.peer },
+                                groupChat = event.message.kind == org.thanosapollo.nema.thread.MessageKind.GROUPCHAT,
+                                activity = ChatActivity.ACTIVE,
+                            ),
+                        )
                     }
+                    is org.thanosapollo.nema.session.SessionEvent.ChatState ->
+                        chatStates.apply(event.state)
                     is org.thanosapollo.nema.session.SessionEvent.Signal ->
                         messages.recordReceiptSignal(
                             accountId = event.signal.accountId.value,
