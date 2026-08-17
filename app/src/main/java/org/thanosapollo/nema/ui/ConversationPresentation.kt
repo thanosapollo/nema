@@ -26,5 +26,8 @@ fun unreadBadgeLabel(count: Int): String? = when {
     else -> count.toString()
 }
 
+fun shouldPinHomeToNewest(firstVisibleIndex: Int, firstVisibleScrollOffset: Int): Boolean =
+    firstVisibleIndex == 0 && firstVisibleScrollOffset == 0
+
 private val PAYLOAD_PREFIX = Regex("^<[A-Za-z!?/]")
 private const val PREVIEW_LIMIT = 80

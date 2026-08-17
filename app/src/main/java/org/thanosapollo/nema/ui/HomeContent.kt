@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
@@ -75,6 +77,13 @@ fun HomeContent(
     var newChatOpen by rememberSaveable { mutableStateOf(false) }
     val visible = remember(conversations, query) {
         conversations.filter { conversationMatches(it, query) }
+    }
+    val listState = rememberLazyListState()
+    val newestPeer = visible.firstOrNull()?.peerJid
+    LaunchedEffect(newestPeer) {
+        if (shouldPinHomeToNewest(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)) {
+            listState.scrollToItem(0)
+        }
     }
     val status = quietConnectionStatus(connectionStatus)
     Box(modifier.fillMaxSize()) {
@@ -149,7 +158,10 @@ fun HomeContent(
                 }
             } else {
                 Box(Modifier.weight(1f).fillMaxSize()) {
-                    LazyColumn(modifier = Modifier.fillMaxSize()) {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize().testTag("home-conversations"),
+                    ) {
                         items(visible, key = ConversationSummary::peerJid) { conversation ->
                             ConversationRow(
                                 conversation = conversation,
@@ -193,6 +205,7 @@ private fun ConversationRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
+            .testTag("conversation-row-${conversation.peerJid}")
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
