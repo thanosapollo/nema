@@ -160,6 +160,105 @@ class MessageStoreTest {
     }
 
     @Test
+    fun ownDisplayedMarkerAdvancesLastReadThroughExactInboundOnly() = runBlocking {
+        val store = MessageStore(database)
+        val firstAlias = TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "first-wire")
+        val laterAlias = TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "later-wire")
+        store.ingest(incoming(localId = "first", aliases = listOf(firstAlias)))
+        store.ingest(incoming(localId = "later", aliases = listOf(laterAlias)))
+        val first = requireNotNull(database.messageDao().message(ACCOUNT, "first"))
+        val later = requireNotNull(database.messageDao().message(ACCOUNT, "later"))
+        val outbound = store.compose(outbound("own-displayed"))
+
+        assertEquals(0L, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+        assertNull(
+            store.recordReceiptSignal(
+                ACCOUNT,
+                PEER,
+                SELF,
+                firstAlias.value,
+                MessageReceiptStage.RECEIVED,
+            ),
+        )
+        assertEquals(0L, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+        assertNull(
+            store.recordReceiptSignal(
+                ACCOUNT,
+                PEER,
+                SELF,
+                firstAlias.value,
+                MessageReceiptStage.DISPLAYED,
+            ),
+        )
+        assertEquals(first.localSequence, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+        assertNull(
+            store.recordReceiptSignal(
+                ACCOUNT,
+                PEER,
+                SELF,
+                "missing-wire",
+                MessageReceiptStage.DISPLAYED,
+            ),
+        )
+        assertNull(
+            store.recordReceiptSignal(
+                ACCOUNT,
+                PEER,
+                SELF,
+                outbound.originId,
+                MessageReceiptStage.DISPLAYED,
+            ),
+        )
+        assertEquals(first.localSequence, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+        assertNull(
+            store.recordReceiptSignal(
+                ACCOUNT,
+                PEER,
+                SELF,
+                laterAlias.value,
+                MessageReceiptStage.DISPLAYED,
+            ),
+        )
+        assertEquals(later.localSequence, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+        assertNull(store.outbox(ACCOUNT, outbound.operationId)?.receiptStage)
+    }
+
+    @Test
+    fun archivedOwnDisplayedAdvancesLastReadWithoutTouchingOutbox() = runBlocking {
+        val store = MessageStore(database)
+        val inboundAlias = TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "archived-inbound")
+        store.ingest(incoming(localId = "archived-in", aliases = listOf(inboundAlias)))
+        val inbound = requireNotNull(database.messageDao().message(ACCOUNT, "archived-in"))
+        val intent = outbound("archived-own-displayed")
+        store.compose(intent)
+
+        val result = store.applyArchivePage(
+            archivePage(
+                key = archiveKey(ACCOUNT),
+                direction = ArchiveDirection.BOOTSTRAP,
+                complete = true,
+                hasEarlier = false,
+                messages = listOf(
+                    ArchivedIncomingMessage(
+                        resultId = "own-displayed-result",
+                        message = null,
+                        signal = ArchivedReceiptSignal(
+                            peerJid = PEER,
+                            senderJid = SELF,
+                            targetId = inboundAlias.value,
+                            stage = MessageReceiptStage.DISPLAYED,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(ArchivePageStatus.APPLIED, result.status)
+        assertEquals(inbound.localSequence, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+        assertEquals(null, store.outbox(ACCOUNT, intent.operationId)?.receiptStage)
+    }
+
+    @Test
     fun directCorrectionsReconcileDeferredIdempotentlyAndPreserveBaseIdentity() = runBlocking {
         var store = MessageStore(database)
         val targetAlias = TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "original-wire-id")

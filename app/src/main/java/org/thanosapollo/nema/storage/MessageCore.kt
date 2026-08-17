@@ -42,6 +42,35 @@ abstract class MessageDao {
     )
     abstract suspend fun updatePeerLastRead(accountId: String, peerJid: String): Int
 
+    @Query(
+        """
+        UPDATE peers SET lastReadLocalSequence = MAX(lastReadLocalSequence, :localSequence)
+        WHERE accountId = :accountId AND jid = :peerJid
+        """,
+    )
+    abstract suspend fun advancePeerLastRead(accountId: String, peerJid: String, localSequence: Long): Int
+
+    @Query(
+        """
+        SELECT messages.* FROM messages
+        INNER JOIN trusted_identity_aliases AS alias
+          ON alias.accountId = messages.accountId
+         AND alias.messageId = messages.localMessageId
+        WHERE messages.accountId = :accountId
+          AND messages.peerJid = :peerJid
+          AND messages.direction = 'INBOUND'
+          AND messages.messageKind = 'CHAT'
+          AND alias.value = :targetId
+          AND alias.status = 'TRUSTED'
+          AND alias.kind IN ('MESSAGE_ID', 'ORIGIN_ID', 'STANZA_ID')
+        """,
+    )
+    abstract suspend fun inboundChatByAliasValue(
+        accountId: String,
+        peerJid: String,
+        targetId: String,
+    ): List<MessageEntity>
+
     @Upsert
     abstract suspend fun upsertPeer(peer: PeerEntity)
 
@@ -1582,6 +1611,18 @@ class MessageStore private constructor(
         targetId: String,
         stage: MessageReceiptStage,
     ): OutboxEntity? {
+        val self = dao.accountBareJid(accountId)
+        if (self != null &&
+            senderJid == self &&
+            peerJid != self &&
+            stage == MessageReceiptStage.DISPLAYED
+        ) {
+            val matches = dao.inboundChatByAliasValue(accountId, peerJid, targetId)
+                .distinctBy(MessageEntity::localMessageId)
+            val target = matches.singleOrNull() ?: return null
+            dao.advancePeerLastRead(accountId, peerJid, target.localSequence)
+            return null
+        }
         if (senderJid != peerJid) return null
         val outbox = dao.outbox(accountId, targetId) ?: return null
         val message = dao.message(accountId, outbox.messageId) ?: return null

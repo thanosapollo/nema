@@ -936,7 +936,9 @@ internal fun Message.toIncomingSignal(
     if (type != Message.Type.chat || body != null) return null
     val sender = from?.asBareJid()?.takeIf { it.isEntityBareJid }?.toString() ?: return null
     val recipient = to?.asBareJid()?.takeIf { it.isEntityBareJid }?.toString() ?: return null
-    if (sender == expectedBareJid || recipient != expectedBareJid) return null
+    val ownDisplayed = sender == expectedBareJid && recipient != expectedBareJid
+    val peerReceipt = sender != expectedBareJid && recipient == expectedBareJid
+    if (!ownDisplayed && !peerReceipt) return null
     val signals = extensions.mapNotNull { extension ->
         when {
             extension.elementName == RECEIVED_ELEMENT && extension.namespace == RECEIPTS_NAMESPACE ->
@@ -960,10 +962,15 @@ internal fun Message.toIncomingSignal(
     if (signals.size != 1) return null
     val (stage, protocol, targetId) = signals.single()
     if (targetId.isNullOrEmpty()) return null
+    if (ownDisplayed &&
+        (stage != MessageReceiptStage.DISPLAYED || protocol != MessageSignalProtocol.CHAT_MARKER)
+    ) {
+        return null
+    }
     return IncomingMessageSignal(
         accountId = attempt.accountId,
         generation = attempt.generation,
-        peer = sender,
+        peer = if (ownDisplayed) recipient else sender,
         sender = sender,
         targetId = targetId,
         stage = stage,

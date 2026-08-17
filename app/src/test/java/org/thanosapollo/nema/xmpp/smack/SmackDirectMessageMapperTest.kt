@@ -344,6 +344,38 @@ class SmackDirectMessageMapperTest {
     }
 
     @Test
+    fun `own displayed marker maps to the peer conversation and ignores own receipts`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        fun own(extension: org.jivesoftware.smack.packet.ExtensionElement) =
+            StanzaBuilder.buildMessage()
+                .from(JidCreate.entityFullFrom("account@example.org/other"))
+                .to(JidCreate.entityFullFrom("peer@example.org/device"))
+                .ofType(Message.Type.chat)
+                .addExtension(extension)
+                .build()
+        val displayed = own(
+            StandardExtensionElement.builder("displayed", "urn:xmpp:chat-markers:0")
+                .addAttribute("id", "inbound-wire")
+                .build(),
+        )
+        val received = own(DeliveryReceipt("inbound-wire"))
+
+        val signal = requireNotNull(displayed.toIncomingSignal(attempt, "account@example.org"))
+        assertEquals("peer@example.org", signal.peer)
+        assertEquals("account@example.org", signal.sender)
+        assertEquals("inbound-wire", signal.targetId)
+        assertEquals(MessageReceiptStage.DISPLAYED, signal.stage)
+        assertEquals(MessageSignalProtocol.CHAT_MARKER, signal.protocol)
+        assertNull(displayed.toIncomingEnvelope(attempt, "account@example.org"))
+        assertNull(received.toIncomingSignal(attempt, "account@example.org"))
+    }
+
+    @Test
     fun `outgoing public groupchat omits direct receipt and marker requests`() {
         val envelope = OutgoingMessageEnvelope(
             accountId = AccountId.require("account"),
