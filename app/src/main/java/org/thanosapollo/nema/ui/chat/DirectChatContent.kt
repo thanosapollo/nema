@@ -12,6 +12,12 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -113,11 +119,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -1742,6 +1751,8 @@ fun MessageTimeline(
 ) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    var reactionPickerMessageId by remember { mutableStateOf<String?>(null) }
+    var reactionPickerShown by remember { mutableStateOf(false) }
     val currentOnViewportChanged by rememberUpdatedState(onViewportChanged)
     val currentOnMessageDisplayed by rememberUpdatedState(onMessageDisplayed)
     val currentTypingPresent by rememberUpdatedState(typingLabel != null)
@@ -1889,7 +1900,6 @@ fun MessageTimeline(
                 contentType = { message -> if (message.outgoing) 1 else 0 },
             ) { message ->
                 var messageActionsOpen by remember(message.id) { mutableStateOf(false) }
-                var reactionPickerOpen by remember(message.id) { mutableStateOf(false) }
                 val (bubbleContainerColor, bubbleContentColor) = messageBubbleColors(message.outgoing)
                 val visibleBody = remember(message.body, message.attachmentUrl) {
                     if (message.attachmentUrl == null) {
@@ -2044,27 +2054,47 @@ fun MessageTimeline(
                                 }
                             }
                         }
-                        if (reactionPickerOpen && !conversationGroupChat && !message.groupChat) {
-                            Surface(
-                                shape = RoundedCornerShape(24.dp),
-                                tonalElevation = 4.dp,
-                                modifier = Modifier
-                                    .padding(top = 4.dp)
-                                    .testTag("reaction-picker"),
+                        if (reactionPickerMessageId == message.id && !conversationGroupChat && !message.groupChat) {
+                            Popup(
+                                onDismissRequest = { reactionPickerShown = false },
+                                properties = PopupProperties(
+                                    focusable = true,
+                                    dismissOnBackPress = true,
+                                    dismissOnClickOutside = true,
+                                ),
                             ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                AnimatedVisibility(
+                                    visible = reactionPickerShown,
+                                    enter = fadeIn(tween(140)) + scaleIn(initialScale = 0.88f, animationSpec = tween(180)),
+                                    exit = fadeOut(tween(110)) + scaleOut(targetScale = 0.88f, animationSpec = tween(150)),
                                 ) {
-                                    org.thanosapollo.nema.xmpp.reactions.DEFAULT_REACTION_CHOICES.forEach { emoji ->
-                                        Text(
-                                            emoji,
-                                            style = MaterialTheme.typography.titleMedium,
-                                            modifier = Modifier.clickable {
-                                                reactionPickerOpen = false
-                                                scope.launch { onReact(message, emoji) }
-                                            },
-                                        )
+                                    Surface(
+                                        shape = RoundedCornerShape(24.dp),
+                                        tonalElevation = 6.dp,
+                                        modifier = Modifier.testTag("reaction-picker"),
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            org.thanosapollo.nema.xmpp.reactions.DEFAULT_REACTION_CHOICES.forEach { emoji ->
+                                                Text(
+                                                    emoji,
+                                                    style = MaterialTheme.typography.titleMedium,
+                                                    modifier = Modifier.clickable {
+                                                        reactionPickerShown = false
+                                                        reactionPickerMessageId = null
+                                                        scope.launch { onReact(message, emoji) }
+                                                    },
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                                LaunchedEffect(reactionPickerShown) {
+                                    if (!reactionPickerShown) {
+                                        delay(160)
+                                        reactionPickerMessageId = null
                                     }
                                 }
                             }
@@ -2112,7 +2142,8 @@ fun MessageTimeline(
                                     text = { Text("Reactions") },
                                     onClick = {
                                         messageActionsOpen = false
-                                        reactionPickerOpen = true
+                                        reactionPickerMessageId = message.id
+                                        reactionPickerShown = true
                                     },
                                 )
                             }
@@ -2120,6 +2151,14 @@ fun MessageTimeline(
                     }
                 }
             }
+        }
+        if (reactionPickerMessageId != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag("reaction-picker-dismiss")
+                    .clickable { reactionPickerShown = false },
+            )
         }
         if (!nearLatest) {
             SmallFloatingActionButton(

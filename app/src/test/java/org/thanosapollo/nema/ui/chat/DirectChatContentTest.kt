@@ -3081,6 +3081,32 @@ class DirectChatContentTest {
         composeRule.onNodeWithTag("reaction-picker").assertDoesNotExist()
     }
 
+    @Test
+    fun clickingOutsideClosesReactionPickerWithoutReacting() {
+        var reacted = emptyList<String>()
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(message("dismiss", outgoing = false)),
+                    onReact = { _, emoji ->
+                        reacted = reacted + emoji
+                        true
+                    },
+                )
+            }
+        }
+        composeRule.onNodeWithTag("message-bubble-dismiss")
+            .performSemanticsAction(SemanticsActions.OnClick)
+        composeRule.onNodeWithText("Reactions").performClick()
+        composeRule.onNodeWithTag("reaction-picker").assertIsDisplayed()
+        composeRule.onNodeWithTag("reaction-picker-dismiss").performClick()
+        composeRule.waitUntil(timeoutMillis = 2_000) {
+            composeRule.onAllNodesWithTag("reaction-picker").fetchSemanticsNodes().isEmpty()
+        }
+        composeRule.onNodeWithTag("reaction-picker").assertDoesNotExist()
+        composeRule.runOnIdle { assertEquals(emptyList<String>(), reacted) }
+    }
+
     private fun state(accountId: String, peer: String, draft: String = "") = DirectChatState(
         accountId = accountId,
         selectedPeer = peer,
