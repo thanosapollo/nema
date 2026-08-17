@@ -382,7 +382,7 @@ class ChatRepository(database: NemaDatabase) {
     fun observeTimeline(key: DirectConversationKey): Flow<List<TimelineMessage>> = combine(
         dao.observeDirectTimeline(key.accountId, key.canonicalBarePeer),
         dao.observeDirectReplyAliases(key.accountId, key.canonicalBarePeer),
-        dao.observePeer(key.accountId, key.canonicalBarePeer),
+        dao.observePeer(key.accountId, key.canonicalBarePeer).map { it?.toIdentityFacts() },
         dao.observeMessageReactions(key.accountId, key.canonicalBarePeer),
     ) { rows, aliases, peer, reactionRows ->
         presentTimeline(rows, aliases, key, peer, reactionRows)
@@ -392,14 +392,14 @@ class ChatRepository(database: NemaDatabase) {
         rows = dao.cachedDirectTimeline(key.accountId, key.canonicalBarePeer),
         aliases = emptyList(),
         key = key,
-        peer = dao.peer(key.accountId, key.canonicalBarePeer),
+        peer = dao.peer(key.accountId, key.canonicalBarePeer)?.toIdentityFacts(),
     )
 
     private fun presentTimeline(
         rows: List<TimelineRow>,
         aliases: List<TrustedIdentityAliasEntity>,
         key: DirectConversationKey,
-        peer: PeerEntity?,
+        peer: PeerIdentityFacts?,
         reactionRows: List<MessageReactionEntity> = emptyList(),
     ): List<TimelineMessage> {
         val aliasesByMessage = aliases
@@ -546,8 +546,8 @@ class ChatRepository(database: NemaDatabase) {
         )
     }
 
-    fun observePeer(accountId: String, peerJid: String): Flow<PeerEntity?> =
-        dao.observePeer(accountId, peerJid)
+    fun observePeer(accountId: String, peerJid: String): Flow<PeerIdentityFacts?> =
+        dao.observePeer(accountId, peerJid).map { it?.toIdentityFacts() }
 
     suspend fun markRoom(accountId: String, peerJid: String) {
         dao.savePeerRoom(accountId, peerJid, true)
@@ -577,7 +577,7 @@ class DirectChatPresenter(
         val route: ChatRoute?,
         val messages: List<TimelineMessage>,
         val draft: StoredDraft,
-        val peer: PeerEntity?,
+        val peer: PeerIdentityFacts?,
         val room: RoomView?,
         val currentSession: ThreadRef?,
         val recentThreads: List<RecentThread>,
@@ -586,7 +586,7 @@ class DirectChatPresenter(
         fun peerLabelForTyping(groupChat: Boolean): String? {
             if (groupChat) return null
             val jid = route?.peerJid ?: return null
-            return peerDisplayLabel(jid, peer?.displayName, peer?.localNickname)
+            return peerDisplayLabel(jid, peer?.remoteProfileName, peer?.localNickname)
         }
     }
 
@@ -653,7 +653,7 @@ class DirectChatPresenter(
             conversations = conversations,
             conversationsReady = true,
             selectedPeer = selected.route?.peerJid,
-            selectedPeerDisplayName = selected.peer?.displayName,
+            selectedPeerDisplayName = selected.peer?.remoteProfileName,
             selectedPeerLocalNickname = selected.peer?.localNickname,
             selectedPeerPhotoBytes = selected.peer?.photoBytes,
             selectedPeerPhotoMime = selected.peer?.photoMime,
