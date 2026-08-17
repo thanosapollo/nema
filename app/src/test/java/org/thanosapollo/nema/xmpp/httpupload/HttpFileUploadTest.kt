@@ -8,7 +8,7 @@ class HttpFileUploadTest {
     @Test
     fun namedAttachmentUsesNameNotUrl() {
         assertEquals(
-            "notes.txt",
+            "notes.txt · text/plain",
             attachmentCaption("notes.txt", "https://example.org/abc", null),
         )
     }
@@ -16,7 +16,7 @@ class HttpFileUploadTest {
     @Test
     fun captionAddsSizeWhenKnown() {
         assertEquals(
-            "notes.txt · 42 B",
+            "notes.txt · text/plain · 42 B",
             attachmentCaption("notes.txt", "https://example.org/abc", 42),
         )
     }
@@ -27,6 +27,20 @@ class HttpFileUploadTest {
         assertEquals(true, isInlineImage(null, "photo.PNG"))
         assertEquals(false, isInlineImage("image/svg+xml", "icon.svg"))
         assertEquals(false, isInlineImage("application/pdf", "doc.pdf"))
+    }
+
+    @Test
+    fun extensionlessUploadKeepsMimeAndSlotName() {
+        assertEquals("image_1603.jpg", slotFilename("image:1603", "image/jpeg"))
+        assertEquals("notes.txt", slotFilename("notes.txt", "text/plain"))
+        assertEquals("image/jpeg", resolvedAttachmentMime(null, null, "https://chat.example/upload/hash/image_1603"))
+        assertEquals("image/png", resolvedAttachmentMime(null, "pic.png", "https://chat.example/upload/hash/KmdayI"))
+        assertEquals("image/jpeg", resolvedAttachmentMime("image/jpeg", "image_1603", "https://chat.example/x"))
+        assertEquals(true, isInlineImage(null, null, "https://chat.example/upload/hash/image_1603"))
+        assertEquals(
+            "image_1603 · image/jpeg",
+            attachmentCaption(null, "https://chat.example/upload/hash/image_1603", null, "image/jpeg"),
+        )
     }
 
     @Test

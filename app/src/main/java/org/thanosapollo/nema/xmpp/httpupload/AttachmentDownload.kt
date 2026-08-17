@@ -125,8 +125,8 @@ fun openCachedAttachment(context: Context, file: File, mime: String?): Boolean {
     return runCatching { context.startActivity(intent) }.isSuccess
 }
 
-fun shouldRenderInlineImage(groupChat: Boolean, mime: String?, name: String?): Boolean =
-    !groupChat && isInlineImage(mime, name)
+fun shouldRenderInlineImage(groupChat: Boolean, mime: String?, name: String?, url: String? = null): Boolean =
+    !groupChat && isInlineImage(mime, name, url)
 
 const val MAX_INLINE_IMAGE_EDGE = 1280
 

@@ -34,17 +34,63 @@ fun attachmentPreview(name: String?, url: String?): String {
     return url?.substringAfterLast('/')?.substringBefore('?').orEmpty().ifEmpty { "File" }
 }
 
-fun attachmentCaption(name: String?, url: String?, size: Long?): String {
+fun attachmentCaption(name: String?, url: String?, size: Long?, mime: String? = null): String {
     val label = attachmentPreview(name, url)
-    return if (size == null || size < 0) label else "$label · $size B"
+    val type = resolvedAttachmentMime(mime, name, url)
+    val withType = if (type.isNullOrEmpty()) label else "$label · $type"
+    return if (size == null || size < 0) withType else "$withType · $size B"
 }
 
-fun isInlineImage(mime: String?, name: String?): Boolean {
-    val type = mime?.substringBefore(';')?.trim()?.lowercase()
+fun isInlineImage(mime: String?, name: String?, url: String? = null): Boolean {
+    val type = resolvedAttachmentMime(mime, name, url)?.substringBefore(';')?.trim()?.lowercase()
     if (type == "image/svg+xml") return false
-    if (type?.startsWith("image/") == true) return true
-    val ext = name?.substringAfterLast('.', missingDelimiterValue = "")?.lowercase()
-    return ext in IMAGE_EXTENSIONS
+    return type?.startsWith("image/") == true
+}
+
+fun resolvedAttachmentMime(mime: String?, name: String?, url: String?): String? {
+    val declared = mime?.substringBefore(';')?.trim()?.takeIf { it.isNotEmpty() && it != "application/octet-stream" }
+    if (declared != null) return declared
+    guessMimeFromExtension(extractRelevantExtension(name))?.let { return it }
+    guessMimeFromExtension(extractRelevantExtension(url))?.let { return it }
+    val stem = attachmentPreview(name, url)
+    return if (IMAGE_STEM.matches(stem)) "image/jpeg" else null
+}
+
+fun slotFilename(name: String, mime: String?): String {
+    val cleaned = name.trim().substringAfterLast('/').replace(':', '_').ifEmpty { "file" }
+    if (guessMimeFromExtension(extractRelevantExtension(cleaned)) != null) return cleaned
+    val ext = guessExtensionFromMime(mime) ?: return cleaned
+    val base = cleaned.substringBeforeLast('.').ifEmpty { "file" }
+    return "$base.$ext"
+}
+
+internal fun extractRelevantExtension(path: String?): String? {
+    val filename = path?.substringAfterLast('/')?.substringBefore('#')?.substringBefore('?').orEmpty()
+    val dot = filename.lastIndexOf('.')
+    if (dot <= 0 || dot == filename.lastIndex) return null
+    return filename.substring(dot + 1).lowercase().takeIf(String::isNotEmpty)
+}
+
+private fun guessMimeFromExtension(extension: String?): String? = when (extension) {
+    "jpg", "jpeg" -> "image/jpeg"
+    "png" -> "image/png"
+    "gif" -> "image/gif"
+    "webp" -> "image/webp"
+    "bmp" -> "image/bmp"
+    "txt" -> "text/plain"
+    "pdf" -> "application/pdf"
+    else -> null
+}
+
+private fun guessExtensionFromMime(mime: String?): String? = when (mime?.substringBefore(';')?.trim()?.lowercase()) {
+    "image/jpeg" -> "jpg"
+    "image/png" -> "png"
+    "image/gif" -> "gif"
+    "image/webp" -> "webp"
+    "image/bmp" -> "bmp"
+    "text/plain" -> "txt"
+    "application/pdf" -> "pdf"
+    else -> null
 }
 
 fun attachmentActionLabel(image: Boolean, downloaded: Boolean, name: String?): String {
@@ -61,4 +107,4 @@ fun attachmentBodyCaption(body: String, attachmentUrl: String?): String? {
     return caption
 }
 
-private val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "gif", "webp", "bmp")
+private val IMAGE_STEM = Regex("image[_-]?\\d+", RegexOption.IGNORE_CASE)

@@ -147,7 +147,9 @@ import org.thanosapollo.nema.xmpp.blocking.PeerBlockingMutationResult
 import org.thanosapollo.nema.xmpp.httpupload.attachmentActionLabel
 import org.thanosapollo.nema.xmpp.httpupload.attachmentBodyCaption
 import org.thanosapollo.nema.xmpp.httpupload.isInlineImage
+import org.thanosapollo.nema.xmpp.httpupload.resolvedAttachmentMime
 import org.thanosapollo.nema.xmpp.httpupload.shouldRenderInlineImage
+import org.thanosapollo.nema.xmpp.httpupload.slotFilename
 import org.thanosapollo.nema.xmpp.muc.roomSubtitle
 
 @Composable
@@ -367,7 +369,7 @@ fun DirectChatContent(
                 val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
                     if (uri == null) return@rememberLauncherForActivityResult
                     scope.launch {
-                        val name = uri.lastPathSegment?.substringAfterLast('/') ?: "file"
+                        val name = slotFilename(uri.lastPathSegment?.substringAfterLast('/') ?: "file", resolver.getType(uri))
                         val mime = resolver.getType(uri)
                         val bytes = withContext(Dispatchers.IO) {
                             resolver.openInputStream(uri)?.use { it.readBytes() }
@@ -1946,14 +1948,19 @@ fun MessageTimeline(
                                     )
                                 }
                                 message.attachmentUrl?.let { url ->
+                                    val resolvedMime = resolvedAttachmentMime(
+                                        message.attachmentMime,
+                                        message.attachmentName,
+                                        url,
+                                    )
                                     MessageAttachment(
                                         url = url,
                                         name = message.attachmentName,
-                                        mime = message.attachmentMime,
+                                        mime = resolvedMime,
                                         groupChat = conversationGroupChat || message.groupChat,
                                         cached = isAttachmentCached(url),
                                         onUse = {
-                                            onUseAttachment(url, message.attachmentName, message.attachmentMime)
+                                            onUseAttachment(url, message.attachmentName, resolvedMime)
                                         },
                                         onLoadInline = { onLoadInlineImage(url) },
                                     )
@@ -2315,10 +2322,10 @@ private fun MessageAttachment(
     onLoadInline: suspend () -> ImageBitmap?,
 ) {
     val scope = rememberCoroutineScope()
-    val image = isInlineImage(mime, name)
+    val image = isInlineImage(mime, name, url)
     var downloaded by remember(url) { mutableStateOf(cached) }
     var preview by remember(url) { mutableStateOf<ImageBitmap?>(null) }
-    val inline = shouldRenderInlineImage(groupChat, mime, name)
+    val inline = shouldRenderInlineImage(groupChat, mime, name, url)
     LaunchedEffect(url, inline) {
         if (!inline) return@LaunchedEffect
         preview = runCatching { onLoadInline() }.getOrNull()
