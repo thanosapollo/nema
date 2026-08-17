@@ -3031,6 +3031,30 @@ class DirectChatContentTest {
         )
     }
 
+    @Test
+    fun reactionChipIsDisplayedOnTimelineMessage() {
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(
+                        message("reacted", outgoing = false).copy(
+                            reactions = listOf(
+                                org.thanosapollo.nema.xmpp.reactions.ReactionDisplay(
+                                    "reacted",
+                                    "👍",
+                                    1,
+                                    false,
+                                    listOf(PEER_A),
+                                ),
+                            ),
+                        ),
+                    ),
+                )
+            }
+        }
+        composeRule.onNodeWithTag("reaction-chip-reacted-👍").assertIsDisplayed()
+    }
+
     private fun state(accountId: String, peer: String, draft: String = "") = DirectChatState(
         accountId = accountId,
         selectedPeer = peer,

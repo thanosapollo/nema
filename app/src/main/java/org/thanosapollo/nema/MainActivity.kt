@@ -408,6 +408,14 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean, activityRe
                                     )
                                 }
                             },
+                            onReact = { message, emoji ->
+                                val peer = chatState.selectedPeer
+                                if (peer == null || message.groupChat) {
+                                    false
+                                } else {
+                                    application.sessionRuntime.reactTo(peer, message.id, emoji)
+                                }
+                            },
                             modifier = Modifier
                                 .padding(contentPadding)
                                 .statusBarsPadding(),

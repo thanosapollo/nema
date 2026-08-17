@@ -33,6 +33,7 @@ import org.thanosapollo.nema.storage.ConversationListRow
 import org.thanosapollo.nema.storage.NemaDatabase
 import org.thanosapollo.nema.storage.MessageDirection
 import org.thanosapollo.nema.storage.MessageDraftEntity
+import org.thanosapollo.nema.storage.MessageReactionEntity
 import org.thanosapollo.nema.storage.MessageStore
 import org.thanosapollo.nema.storage.MessageThreadTitleEntity
 import org.thanosapollo.nema.storage.OutboxStatus
@@ -184,6 +185,7 @@ data class TimelineMessage(
     val correctionReferenceId: String? = null,
     val sentAtEpochMs: Long? = null,
     val threadSummaries: List<ThreadSummary> = emptyList(),
+    val reactions: List<org.thanosapollo.nema.xmpp.reactions.ReactionDisplay> = emptyList(),
 )
 
 data class DirectChatState(
@@ -381,8 +383,9 @@ class ChatRepository(database: NemaDatabase) {
         dao.observeDirectTimeline(key.accountId, key.canonicalBarePeer),
         dao.observeDirectReplyAliases(key.accountId, key.canonicalBarePeer),
         dao.observePeer(key.accountId, key.canonicalBarePeer),
-    ) { rows, aliases, peer ->
-        presentTimeline(rows, aliases, key, peer)
+        dao.observeMessageReactions(key.accountId, key.canonicalBarePeer),
+    ) { rows, aliases, peer, reactionRows ->
+        presentTimeline(rows, aliases, key, peer, reactionRows)
     }.flowOn(Dispatchers.Default)
 
     suspend fun cachedTimeline(key: DirectConversationKey): List<TimelineMessage> = presentTimeline(
@@ -397,14 +400,30 @@ class ChatRepository(database: NemaDatabase) {
         aliases: List<TrustedIdentityAliasEntity>,
         key: DirectConversationKey,
         peer: PeerEntity?,
+        reactionRows: List<MessageReactionEntity> = emptyList(),
     ): List<TimelineMessage> {
         val aliasesByMessage = aliases
             .filter { it.messageId != null }
             .groupBy(TrustedIdentityAliasEntity::messageId, TrustedIdentityAliasEntity::value)
             .mapValues { it.value.toSet() }
+        val reactionsByMessage = reactionRows
+            .mapNotNull { row -> row.localMessageId?.takeIf { row.emojis.isNotEmpty() }?.let { it to row } }
+            .groupBy({ it.first }, { it.second })
         val timeline = chronologicalTimelineRows(rows)
             .map { row -> row.toPresentation(aliasesByMessage[row.localMessageId].orEmpty()) }
             .let { messages -> messages.map { it.withReplyPresentation(messages) } }
+            .map { message ->
+                val group = reactionsByMessage[message.id].orEmpty()
+                message.copy(
+                    reactions = org.thanosapollo.nema.xmpp.reactions.reactionDisplaysFor(
+                        localMessageId = message.id,
+                        senderState = group.map {
+                            it.senderBareJid to org.thanosapollo.nema.xmpp.reactions.decodeReactionEmojis(it.emojis)
+                        },
+                        chosenSender = null,
+                    ),
+                )
+            }
         return if (peer?.room == true || timeline.any(TimelineMessage::groupChat)) {
             timeline.filterByThread(key.thread)
         } else {

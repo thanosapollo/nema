@@ -196,6 +196,7 @@ fun DirectChatContent(
     readReceiptsEnabled: Boolean = false,
     activityResumed: Boolean = false,
     onMessageDisplayed: suspend (TimelineMessage) -> Boolean = { false },
+    onReact: suspend (TimelineMessage, String) -> Boolean = { _, _ -> false },
     modifier: Modifier = Modifier,
 ) {
     key(state.accountId) {
@@ -587,6 +588,7 @@ fun DirectChatContent(
                             activityResumed = activityResumed,
                             typingLabel = state.typingLabel,
                             onMessageDisplayed = onMessageDisplayed,
+                            onReact = onReact,
                             latestFocusRequest = latestFocusRequest,
                             initialViewport = timelineViewports[conversationKey],
                             onViewportChanged = { anchor ->
@@ -1721,6 +1723,7 @@ fun MessageTimeline(
     readReceiptsEnabled: Boolean = false,
     activityResumed: Boolean = false,
     onMessageDisplayed: suspend (TimelineMessage) -> Boolean = { false },
+    onReact: suspend (TimelineMessage, String) -> Boolean = { _, _ -> false },
     latestFocusRequest: Long = 0L,
     initialViewport: TimelineViewportAnchor? = null,
     onViewportChanged: (TimelineViewportAnchor) -> Unit = {},
@@ -2015,6 +2018,24 @@ fun MessageTimeline(
                                 }
                             }
                         }
+                        if (message.reactions.isNotEmpty()) {
+                            Row(
+                                modifier = Modifier
+                                    .padding(top = 4.dp)
+                                    .testTag("reaction-row-${message.id}"),
+                                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                message.reactions.forEach { chip ->
+                                    Text(
+                                        "${chip.emoji} ${chip.count}",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        modifier = Modifier
+                                            .testTag("reaction-chip-${message.id}-${chip.emoji}")
+                                            .clickable { scope.launch { onReact(message, chip.emoji) } },
+                                    )
+                                }
+                            }
+                        }
                         DropdownMenu(
                             expanded = messageActionsOpen,
                             onDismissRequest = { messageActionsOpen = false },
@@ -2053,6 +2074,17 @@ fun MessageTimeline(
                                     onQuote(message)
                                 },
                             )
+                            if (!conversationGroupChat && !message.groupChat) {
+                                org.thanosapollo.nema.xmpp.reactions.DEFAULT_REACTION_CHOICES.forEach { emoji ->
+                                    DropdownMenuItem(
+                                        text = { Text(emoji) },
+                                        onClick = {
+                                            messageActionsOpen = false
+                                            scope.launch { onReact(message, emoji) }
+                                        },
+                                    )
+                                }
+                            }
                         }
                     }
                 }

@@ -133,6 +133,9 @@ interface SessionConnection {
     suspend fun sendSignal(signal: OutgoingMessageSignal) {
         throw UnsupportedOperationException("Message signals are unsupported")
     }
+    suspend fun sendReaction(reaction: org.thanosapollo.nema.xmpp.transport.OutgoingReactionEnvelope) {
+        throw UnsupportedOperationException("Reactions are unsupported")
+    }
     suspend fun discoverCapabilities(
         accountId: AccountId,
         generation: ConnectionGeneration,
@@ -398,6 +401,10 @@ internal class ActiveSessionController(
 
     suspend fun sendSignal(signal: OutgoingMessageSignal) {
         exactConnection(signal.accountId, signal.generation).sendSignal(signal)
+    }
+
+    suspend fun sendReaction(reaction: org.thanosapollo.nema.xmpp.transport.OutgoingReactionEnvelope) {
+        exactConnection(reaction.accountId, reaction.generation).sendReaction(reaction)
     }
 
     suspend fun discoverCapabilities(

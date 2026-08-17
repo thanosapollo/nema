@@ -101,6 +101,14 @@ abstract class MessageDao {
         WHERE accountId = :accountId AND peerJid = :peerJid
         """,
     )
+    abstract fun observeMessageReactions(accountId: String, peerJid: String): kotlinx.coroutines.flow.Flow<List<MessageReactionEntity>>
+
+    @Query(
+        """
+        SELECT * FROM message_reactions
+        WHERE accountId = :accountId AND peerJid = :peerJid
+        """,
+    )
     abstract suspend fun messageReactions(accountId: String, peerJid: String): List<MessageReactionEntity>
 
     @Query(
@@ -1963,6 +1971,23 @@ class MessageStore private constructor(
 
     suspend fun applyIncomingReaction(reaction: IncomingReactionApply): ReactionApplyOutcome =
         database.withTransaction { applyIncomingReactionInTransaction(reaction) }
+
+    suspend fun reactionWireTarget(accountId: String, peerJid: String, localMessageId: String): String? {
+        val aliases = database.messageDao().trustedAliasesForMessage(accountId, localMessageId)
+        return aliases.firstOrNull { it.kind == IdentityAliasKind.ORIGIN_ID }?.value
+            ?: aliases.firstOrNull { it.kind == IdentityAliasKind.MESSAGE_ID }?.value
+    }
+
+    suspend fun ownReactionEmojis(
+        accountId: String,
+        peerJid: String,
+        localMessageId: String,
+        senderBareJid: String,
+    ): List<String> {
+        val row = database.messageDao().messageReactions(accountId, peerJid)
+            .firstOrNull { it.localMessageId == localMessageId && it.senderBareJid == senderBareJid }
+        return row?.let { decodeReactionEmojis(it.emojis) }.orEmpty()
+    }
 
     suspend fun reactionDisplays(
         accountId: String,

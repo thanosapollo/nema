@@ -101,6 +101,19 @@ data class IncomingReactionEnvelope(
     }
 }
 
+data class OutgoingReactionEnvelope(
+    val accountId: AccountId,
+    val generation: ConnectionGeneration,
+    val recipient: String,
+    val targetId: String,
+    val emojis: List<String>,
+) {
+    init {
+        require(recipient.isNotEmpty()) { "Recipient must not be empty" }
+        require(targetId.isNotEmpty()) { "Reaction target must not be empty" }
+    }
+}
+
 data class ConnectionEnvelope(
     val accountId: AccountId,
     val generation: ConnectionGeneration,

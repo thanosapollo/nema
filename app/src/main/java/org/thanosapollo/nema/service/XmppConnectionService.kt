@@ -710,6 +710,53 @@ class SessionRuntime(
 
     suspend fun stop() = accountCommands.withLock { controller.stop() }
 
+    suspend fun reactTo(peerJid: String, localMessageId: String, emoji: String): Boolean {
+        val connected = state.value as? ConnectionState.Connected ?: return false
+        val account = accounts.activeAccount.first() ?: return false
+        if (connected.accountId != account.id) return false
+        val targetId = messages.reactionWireTarget(account.id.value, peerJid, localMessageId) ?: return false
+        val previous = messages.ownReactionEmojis(account.id.value, peerJid, localMessageId, account.bareJid.value)
+        val next = org.thanosapollo.nema.xmpp.reactions.toggleReaction(emoji, previous)
+        messages.applyIncomingReaction(
+            IncomingReactionApply(
+                accountId = account.id.value,
+                accountBareJid = account.bareJid.value,
+                peerJid = peerJid,
+                senderBareJid = account.bareJid.value,
+                targetId = targetId,
+                emojis = next,
+                receivedAtMs = System.currentTimeMillis(),
+            ),
+        )
+        return try {
+            controller.sendReaction(
+                org.thanosapollo.nema.xmpp.transport.OutgoingReactionEnvelope(
+                    accountId = connected.accountId,
+                    generation = connected.generation,
+                    recipient = peerJid,
+                    targetId = targetId,
+                    emojis = next,
+                ),
+            )
+            true
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            messages.applyIncomingReaction(
+                IncomingReactionApply(
+                    accountId = account.id.value,
+                    accountBareJid = account.bareJid.value,
+                    peerJid = peerJid,
+                    senderBareJid = account.bareJid.value,
+                    targetId = targetId,
+                    emojis = previous,
+                    receivedAtMs = System.currentTimeMillis(),
+                ),
+            )
+            false
+        }
+    }
+
     suspend fun markDisplayed(accountId: String, peerJid: String, targetId: String): Boolean {
         if (accountId.isEmpty() || peerJid.isEmpty() || targetId.isEmpty()) return false
         val connected = state.value as? ConnectionState.Connected ?: return false

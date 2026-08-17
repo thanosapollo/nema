@@ -611,6 +611,7 @@ class SmackDirectMessageMapperTest {
             ServiceDiscoveryManager.getInstanceFor(connection)
                 .includesFeature(MessageCorrectExtension.NAMESPACE),
         )
+        assertTrue(ServiceDiscoveryManager.getInstanceFor(connection).includesFeature(REACTIONS_NAMESPACE))
     }
 
     @Test
