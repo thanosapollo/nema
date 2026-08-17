@@ -147,6 +147,33 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
+    fun firstConversationPaintUsesCachedRowsWhileLiveObserveKeepsLatestPreview() = runBlocking {
+        val store = MessageStore(database)
+        val repository = ChatRepository(database)
+        store.ingest(
+            incoming(ACCOUNT, "latest", "latest body").copy(
+                archiveOrdinal = 2,
+                archiveAuthority = SELF,
+                archiveScope = "ACCOUNT",
+                sentAtEpochMs = 2_000,
+                sentTimeSource = MessageTimeSource.MAM,
+            ),
+        )
+        store.ingest(
+            incoming(ACCOUNT, "old", "old body").copy(
+                archiveOrdinal = 1,
+                archiveAuthority = SELF,
+                archiveScope = "ACCOUNT",
+                sentAtEpochMs = 1_000,
+                sentTimeSource = MessageTimeSource.MAM,
+            ),
+        )
+
+        assertEquals("old body", repository.cachedConversations(ACCOUNT).single().preview)
+        assertEquals("latest body", repository.observeConversations(ACCOUNT).first().single().preview)
+    }
+
+    @Test
     fun correctionProjectsOneStableEditedMessageAndUpdatedPreview() = runBlocking {
         val store = MessageStore(database)
         store.ingest(

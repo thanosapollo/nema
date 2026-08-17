@@ -299,7 +299,7 @@ class ChatRepository(database: NemaDatabase) {
 
     suspend fun cachedConversations(accountId: String): List<ConversationSummary> =
         conversationSummaries(
-            dao.observeConversationSummaries(accountId).first(),
+            dao.cachedConversationSummaries(accountId),
             dao.rooms(accountId),
         )
 

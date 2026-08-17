@@ -122,7 +122,7 @@ fun HomeContent(
                 windowInsets = WindowInsets(0, 0, 0, 0),
             )
             if (visible.isEmpty()) {
-                Box(Modifier.weight(1f)) {
+                Box(Modifier.weight(1f).fillMaxSize()) {
                     Text(
                         when {
                             !conversationsReady -> "Loading conversations"
@@ -143,7 +143,7 @@ fun HomeContent(
                     }
                 }
             } else {
-                Box(Modifier.weight(1f)) {
+                Box(Modifier.weight(1f).fillMaxSize()) {
                     LazyColumn(modifier = Modifier.fillMaxSize()) {
                         items(visible, key = ConversationSummary::peerJid) { conversation ->
                             ConversationRow(

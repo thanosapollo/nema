@@ -122,6 +122,8 @@ class HomeContentTest {
         }
 
         composeRule.onNodeWithText("No conversations").assertDoesNotExist()
+        composeRule.onNodeWithText("Loading conversations").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("New chat").assertIsDisplayed()
         composeRule.runOnIdle { show(true) }
         composeRule.onNodeWithText("No conversations").assertIsDisplayed()
     }
@@ -152,6 +154,7 @@ class HomeContentTest {
         composeRule.onNodeWithText("hi").assertIsDisplayed()
         composeRule.onNodeWithText("Loading conversations").assertDoesNotExist()
         composeRule.onNodeWithText("No conversations").assertDoesNotExist()
+        composeRule.onNodeWithContentDescription("New chat").assertIsDisplayed()
     }
 
     @Test
