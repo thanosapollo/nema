@@ -97,8 +97,12 @@ import org.thanosapollo.nema.xmpp.reactions.REACTIONS_NAMESPACE
 import org.thanosapollo.nema.xmpp.reactions.addReactions
 import org.thanosapollo.nema.xmpp.reactions.installNemaReactionProviders
 import org.thanosapollo.nema.xmpp.reactions.parseReactions
+import org.thanosapollo.nema.xmpp.rtt.RTT_NAMESPACE
+import org.thanosapollo.nema.xmpp.rtt.installNemaRttProviders
+import org.thanosapollo.nema.xmpp.rtt.parseRtt
 import org.thanosapollo.nema.xmpp.transport.IncomingChatState
 import org.thanosapollo.nema.xmpp.transport.IncomingReactionEnvelope
+import org.thanosapollo.nema.xmpp.transport.IncomingRealTimeText
 import org.thanosapollo.nema.xmpp.httpupload.LocalUploadRequest
 import org.thanosapollo.nema.xmpp.httpupload.UploadedFile
 import org.thanosapollo.nema.xmpp.oob.OutOfBandShare
@@ -140,6 +144,7 @@ class SmackSessionConnectionFactory : SessionConnectionFactory {
         installNemaChatMarkerProviders()
         installNemaChatStateProviders()
         installNemaReactionProviders()
+        installNemaRttProviders()
         require(identity.accountId == configuration.id) { "Session account does not match configuration" }
         val connection = XMPPTCPConnection(configurationFor(configuration)).apply {
             setUseStreamManagement(false)
@@ -187,6 +192,7 @@ internal fun advertiseNemaFeatures(connection: XMPPConnection) {
         addFeature(CHAT_STATES_NAMESPACE)
         addFeature(MessageCorrectExtension.NAMESPACE)
         addFeature(REACTIONS_NAMESPACE)
+        addFeature(RTT_NAMESPACE)
     }
 }
 
@@ -221,6 +227,11 @@ internal class SmackSessionConnection(
         val room = message.message.from?.asBareJid()?.toString()
         message.message.toIncomingChatState(attempt, expectedBareJid, room?.let(roomNicks::get))?.let {
             event(SessionEvent.ChatState(attempt, it))
+        }
+        if (wrapper.getExtension(MamResultExtension::class.java) == null) {
+            message.message.toIncomingRtt(attempt, expectedBareJid)?.let {
+                event(SessionEvent.RealTimeText(attempt, it))
+            }
         }
         message.message.toIncomingReaction(attempt, expectedBareJid)?.let {
             event(SessionEvent.Reaction(attempt, it))
@@ -1064,6 +1075,25 @@ internal fun Message.toIncomingChatState(
             activity = activity,
         )
     }
+}
+
+internal fun Message.toIncomingRtt(
+    attempt: SessionAttemptIdentity,
+    expectedBareJid: String,
+): IncomingRealTimeText? {
+    if (type != Message.Type.chat && type != Message.Type.normal) return null
+    val parsed = parseRtt()
+    val hasBody = !body.isNullOrEmpty()
+    if (parsed == null && !hasBody) return null
+    val sender = from?.asBareJid()?.takeIf { it.isEntityBareJid }?.toString() ?: return null
+    if (sender == expectedBareJid) return null
+    return IncomingRealTimeText(
+        accountId = attempt.accountId,
+        generation = attempt.generation,
+        peer = sender,
+        element = parsed,
+        hasBody = hasBody,
+    )
 }
 
 internal fun Message.toIncomingReaction(

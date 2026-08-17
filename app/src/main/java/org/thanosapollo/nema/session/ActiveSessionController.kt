@@ -104,6 +104,10 @@ sealed interface SessionEvent {
         val attempt: SessionAttemptIdentity,
         val state: IncomingChatState,
     ) : SessionEvent
+    data class RealTimeText(
+        val attempt: SessionAttemptIdentity,
+        val state: org.thanosapollo.nema.xmpp.transport.IncomingRealTimeText,
+    ) : SessionEvent
     data class Reaction(
         val attempt: SessionAttemptIdentity,
         val reaction: IncomingReactionEnvelope,
@@ -620,6 +624,7 @@ internal class ActiveSessionController(
             is SessionEvent.Incoming -> runBlocking { handleDurableEvent(event.attempt, event) }
             is SessionEvent.Signal -> runBlocking { handleDurableEvent(event.attempt, event) }
             is SessionEvent.ChatState -> runBlocking { handleDurableEvent(event.attempt, event) }
+            is SessionEvent.RealTimeText -> runBlocking { handleDurableEvent(event.attempt, event) }
             is SessionEvent.Reaction -> runBlocking { handleDurableEvent(event.attempt, event) }
             is SessionEvent.OutgoingFailure -> runBlocking { handleDurableEvent(event.attempt, event) }
             is SessionEvent.RoomUpdated -> runBlocking { handleIncomingRoom(event) }

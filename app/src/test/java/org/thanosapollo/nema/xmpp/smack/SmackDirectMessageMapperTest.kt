@@ -43,6 +43,9 @@ import org.thanosapollo.nema.xmpp.chatstates.CHAT_STATES_NAMESPACE
 import org.thanosapollo.nema.xmpp.chatstates.installNemaChatStateProviders
 import org.thanosapollo.nema.xmpp.reactions.REACTIONS_NAMESPACE
 import org.thanosapollo.nema.xmpp.reactions.installNemaReactionProviders
+import org.thanosapollo.nema.xmpp.rtt.RTT_NAMESPACE
+import org.thanosapollo.nema.xmpp.rtt.applyRttActions
+import org.thanosapollo.nema.xmpp.rtt.installNemaRttProviders
 import org.thanosapollo.nema.xmpp.reply.installNemaReplyProviders
 import org.thanosapollo.nema.xmpp.reply.parseReplyBody
 import org.thanosapollo.nema.xmpp.reply.REPLY_NAMESPACE
@@ -68,6 +71,7 @@ class SmackDirectMessageMapperTest {
         installNemaChatMarkerProviders()
         installNemaChatStateProviders()
         installNemaReactionProviders()
+        installNemaRttProviders()
     }
 
     @Test
@@ -612,6 +616,7 @@ class SmackDirectMessageMapperTest {
                 .includesFeature(MessageCorrectExtension.NAMESPACE),
         )
         assertTrue(ServiceDiscoveryManager.getInstanceFor(connection).includesFeature(REACTIONS_NAMESPACE))
+        assertTrue(ServiceDiscoveryManager.getInstanceFor(connection).includesFeature(RTT_NAMESPACE))
     }
 
     @Test
@@ -1446,5 +1451,39 @@ class SmackDirectMessageMapperTest {
                 .build()
                 .toIncomingReaction(attempt, "account@example.org"),
         )
+    }
+
+    @Test
+    fun liveRttPreservesActionOrderAndDropsOwnOrGroupchat() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        fun parse(from: String, type: String, inner: String) = (
+            PacketParserUtils.parseStanza(
+                """<message xmlns='jabber:client' from='$from' to='account@example.org/nema' type='$type'>$inner</message>""",
+            ) as Message
+        ).toIncomingRtt(attempt, "account@example.org")
+        fun text(from: String, inner: String, start: String = "") =
+            applyRttActions(start, requireNotNull(parse(from, "chat", inner)?.element).actions)
+        assertEquals(
+            "Hello there, World",
+            text(
+                "talos@chat.example.org/bot",
+                """<rtt xmlns='urn:xmpp:rtt:0' seq='3' event='new'><t>Helo</t><e/><t>lo...planet</t><e n='6'/><t> World</t><e n='3' p='8'/><t p='5'> there,</t></rtt>""",
+            ),
+        )
+        assertEquals(
+            "ac",
+            text("talos@chat.example.org/bot", """<rtt xmlns='urn:xmpp:rtt:0' seq='1' event='new'><t>ab</t><e/><t>c</t></rtt>"""),
+        )
+        assertEquals(
+            "hello ",
+            text("talos@chat.example.org/bot", """<rtt xmlns='urn:xmpp:rtt:0' seq='4'><t> </t></rtt>""", "hello"),
+        )
+        assertNull(parse("account@example.org/nema", "chat", """<rtt xmlns='urn:xmpp:rtt:0' seq='1' event='new'><t>x</t></rtt>"""))
+        assertNull(parse("room@conference.example.org/nick", "groupchat", """<rtt xmlns='urn:xmpp:rtt:0' seq='1' event='new'><t>x</t></rtt>"""))
     }
 }

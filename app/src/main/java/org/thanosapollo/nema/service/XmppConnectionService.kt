@@ -55,8 +55,10 @@ import org.thanosapollo.nema.storage.IncomingReactionApply
 import org.thanosapollo.nema.storage.InsertedInbound
 import org.thanosapollo.nema.xmpp.chatstates.ChatActivity
 import org.thanosapollo.nema.xmpp.chatstates.ChatStateHub
+import org.thanosapollo.nema.xmpp.rtt.RealTimeTextHub
 import org.thanosapollo.nema.xmpp.transport.IncomingChatState
 import org.thanosapollo.nema.xmpp.transport.IncomingMessageEnvelope
+import org.thanosapollo.nema.xmpp.transport.IncomingRealTimeText
 import org.thanosapollo.nema.credentials.CredentialAccess
 import org.thanosapollo.nema.credentials.CredentialVault
 import org.thanosapollo.nema.session.ActiveSessionController
@@ -165,6 +167,7 @@ class SessionRuntime(
     @Volatile var onInsertedInbound: ((String, String) -> Unit)? = null
     val rooms = RoomStateStore()
     val chatStates = ChatStateHub()
+    val realTimeText = RealTimeTextHub()
     val state: StateFlow<ConnectionState>
         get() = controller.state
     val archiveState: StateFlow<ArchiveSyncState>
@@ -196,9 +199,22 @@ class SessionRuntime(
                                 activity = ChatActivity.ACTIVE,
                             ),
                         )
+                        if (!event.message.outbound) {
+                            realTimeText.apply(
+                                IncomingRealTimeText(
+                                    accountId = event.message.accountId,
+                                    generation = event.message.generation,
+                                    peer = event.message.peer,
+                                    element = null,
+                                    hasBody = true,
+                                ),
+                            )
+                        }
                     }
                     is org.thanosapollo.nema.session.SessionEvent.ChatState ->
                         chatStates.apply(event.state)
+                    is org.thanosapollo.nema.session.SessionEvent.RealTimeText ->
+                        realTimeText.apply(event.state)
                     is org.thanosapollo.nema.session.SessionEvent.Reaction ->
                         messages.applyIncomingReaction(
                             IncomingReactionApply(

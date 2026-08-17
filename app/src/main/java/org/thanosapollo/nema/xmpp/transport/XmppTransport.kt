@@ -83,6 +83,18 @@ data class IncomingChatState(
     }
 }
 
+data class IncomingRealTimeText(
+    val accountId: AccountId,
+    val generation: ConnectionGeneration,
+    val peer: String,
+    val element: org.thanosapollo.nema.xmpp.rtt.RttElement?,
+    val hasBody: Boolean,
+) {
+    init {
+        require(peer.isNotEmpty()) { "Peer must not be empty" }
+    }
+}
+
 data class IncomingReactionEnvelope(
     val accountId: AccountId,
     val generation: ConnectionGeneration,

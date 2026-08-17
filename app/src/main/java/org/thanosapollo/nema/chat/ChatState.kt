@@ -48,7 +48,7 @@ import org.thanosapollo.nema.thread.draftKey
 import org.thanosapollo.nema.xmpp.transport.AccountId
 import org.thanosapollo.nema.xmpp.vcard.peerDisplayLabel
 import org.thanosapollo.nema.xmpp.muc.RoomView
-import org.thanosapollo.nema.xmpp.chatstates.typingLabel
+import org.thanosapollo.nema.xmpp.rtt.liveTypingLabel
 
 data class ConversationSummary(
     val peerJid: String,
@@ -564,6 +564,7 @@ class DirectChatPresenter(
     private val joinMuc: suspend (String) -> Boolean = { false },
     private val observeRoom: (String) -> Flow<RoomView?> = { flowOf(null) },
     private val observeTyping: (String) -> Flow<List<String>> = { flowOf(emptyList()) },
+    private val observeRtt: (String) -> Flow<String?> = { flowOf(null) },
     private val threadingPolicy: ThreadingPolicy = ThreadingPolicy(),
     private val restoreRouteOnStart: Boolean = false,
 ) {
@@ -581,6 +582,7 @@ class DirectChatPresenter(
         val currentSession: ThreadRef?,
         val recentThreads: List<RecentThread>,
         val composers: List<String> = emptyList(),
+        val rttText: String? = null,
     ) {
         fun peerLabelForTyping(groupChat: Boolean): String? {
             if (groupChat) return null
@@ -632,6 +634,8 @@ class DirectChatPresenter(
                         selected.copy(recentThreads = recent)
                     }.combine(observeTyping(route.peerJid)) { selected, composers ->
                         selected.copy(composers = composers)
+                    }.combine(observeRtt(route.peerJid)) { selected, rttText ->
+                        selected.copy(rttText = rttText)
                     },
                 )
             }
@@ -665,9 +669,10 @@ class DirectChatPresenter(
             messages = selected.messages,
             draft = selected.draft.body,
             draftReply = selected.draft.reply,
-            typingLabel = typingLabel(
+            typingLabel = liveTypingLabel(
                 composers = selected.composers,
                 directName = selected.peerLabelForTyping(groupChat),
+                rttText = selected.rttText,
             ),
         )
     }.stateIn(
