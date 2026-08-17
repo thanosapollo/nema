@@ -1889,6 +1889,7 @@ fun MessageTimeline(
                 contentType = { message -> if (message.outgoing) 1 else 0 },
             ) { message ->
                 var messageActionsOpen by remember(message.id) { mutableStateOf(false) }
+                var reactionPickerOpen by remember(message.id) { mutableStateOf(false) }
                 val (bubbleContainerColor, bubbleContentColor) = messageBubbleColors(message.outgoing)
                 val visibleBody = remember(message.body, message.attachmentUrl) {
                     if (message.attachmentUrl == null) {
@@ -2043,6 +2044,31 @@ fun MessageTimeline(
                                 }
                             }
                         }
+                        if (reactionPickerOpen && !conversationGroupChat && !message.groupChat) {
+                            Surface(
+                                shape = RoundedCornerShape(24.dp),
+                                tonalElevation = 4.dp,
+                                modifier = Modifier
+                                    .padding(top = 4.dp)
+                                    .testTag("reaction-picker"),
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    org.thanosapollo.nema.xmpp.reactions.DEFAULT_REACTION_CHOICES.forEach { emoji ->
+                                        Text(
+                                            emoji,
+                                            style = MaterialTheme.typography.titleMedium,
+                                            modifier = Modifier.clickable {
+                                                reactionPickerOpen = false
+                                                scope.launch { onReact(message, emoji) }
+                                            },
+                                        )
+                                    }
+                                }
+                            }
+                        }
                         DropdownMenu(
                             expanded = messageActionsOpen,
                             onDismissRequest = { messageActionsOpen = false },
@@ -2082,15 +2108,13 @@ fun MessageTimeline(
                                 },
                             )
                             if (!conversationGroupChat && !message.groupChat) {
-                                org.thanosapollo.nema.xmpp.reactions.DEFAULT_REACTION_CHOICES.forEach { emoji ->
-                                    DropdownMenuItem(
-                                        text = { Text(emoji) },
-                                        onClick = {
-                                            messageActionsOpen = false
-                                            scope.launch { onReact(message, emoji) }
-                                        },
-                                    )
-                                }
+                                DropdownMenuItem(
+                                    text = { Text("Reactions") },
+                                    onClick = {
+                                        messageActionsOpen = false
+                                        reactionPickerOpen = true
+                                    },
+                                )
                             }
                         }
                     }

@@ -3055,6 +3055,32 @@ class DirectChatContentTest {
         composeRule.onNodeWithTag("reaction-chip-reacted-👍").assertIsDisplayed()
     }
 
+    @Test
+    fun reactionsMenuOpensPickerInsteadOfEmojiRows() {
+        var reacted = emptyList<String>()
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(message("pick", outgoing = false)),
+                    onReact = { _, emoji ->
+                        reacted = reacted + emoji
+                        true
+                    },
+                )
+            }
+        }
+        composeRule.onNodeWithTag("message-bubble-pick")
+            .performSemanticsAction(SemanticsActions.OnClick)
+        composeRule.onNodeWithText("Reactions").assertIsDisplayed()
+        composeRule.onNodeWithTag("reaction-picker").assertDoesNotExist()
+        composeRule.onNodeWithText("Reactions").performClick()
+        composeRule.onNodeWithTag("reaction-picker").assertIsDisplayed()
+        composeRule.onNodeWithText("Quote").assertDoesNotExist()
+        composeRule.onNodeWithText("👍").performClick()
+        composeRule.runOnIdle { assertEquals(listOf("👍"), reacted) }
+        composeRule.onNodeWithTag("reaction-picker").assertDoesNotExist()
+    }
+
     private fun state(accountId: String, peer: String, draft: String = "") = DirectChatState(
         accountId = accountId,
         selectedPeer = peer,
