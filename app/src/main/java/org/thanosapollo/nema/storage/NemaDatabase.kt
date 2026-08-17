@@ -159,7 +159,7 @@ abstract class AccountDao {
         AccountMessageSequenceEntity::class,
         ChatNavigationEntity::class,
     ],
-    version = 15,
+    version = 16,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -194,6 +194,7 @@ abstract class NemaDatabase : RoomDatabase() {
                 MessageSchema.MIGRATION_12_13,
                 MessageSchema.MIGRATION_13_14,
                 MessageSchema.MIGRATION_14_15,
+                MessageSchema.MIGRATION_15_16,
             )
             .addCallback(MessageSchema.REOPEN_CALLBACK)
             .build()

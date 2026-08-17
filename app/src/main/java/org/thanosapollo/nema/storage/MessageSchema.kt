@@ -5,6 +5,27 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 internal object MessageSchema {
+    val MIGRATION_15_16: Migration = object : Migration(15, 16) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                UPDATE peers SET lastReadLocalSequence = MAX(
+                  lastReadLocalSequence,
+                  COALESCE((
+                    SELECT MAX(localSequence) FROM messages
+                    WHERE messages.accountId = peers.accountId
+                      AND messages.peerJid = peers.jid
+                      AND messages.direction = 'OUTBOUND'
+                      AND messages.messageKind = 'CHAT'
+                      AND (messages.sentTimeSource IS NULL OR messages.sentTimeSource != 'MAM')
+                  ), 0)
+                )
+                WHERE room = 0
+                """.trimIndent(),
+            )
+        }
+    }
+
     val MIGRATION_14_15: Migration = object : Migration(14, 15) {
         override fun migrate(db: SupportSQLiteDatabase) {
             db.execSQL(

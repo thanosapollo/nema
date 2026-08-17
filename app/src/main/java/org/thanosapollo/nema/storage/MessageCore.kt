@@ -1825,6 +1825,7 @@ class MessageStore private constructor(
         received: IncomingMessage,
         preserveStoredThreadLineage: Boolean = false,
         allowDirectSessionTransition: Boolean = true,
+        advanceOutboundLastRead: Boolean = true,
     ): IngestionResult {
         val dao = database.messageDao()
         val timed = received.withStoredTime(clock)
@@ -1923,6 +1924,12 @@ class MessageStore private constructor(
             reconcileDirectThreadSession(dao, incoming)
             winner = winner.copy(directSessionTransitionApplied = true)
             dao.updateMessage(winner)
+        }
+        if (advanceOutboundLastRead &&
+            winner.direction == MessageDirection.OUTBOUND &&
+            winner.messageKind == MessageKind.CHAT
+        ) {
+            dao.advancePeerLastRead(winner.accountId, winner.peerJid, winner.localSequence)
         }
         return IngestionResult(winner.localMessageId, mergedRows, identityConflict, inserted)
     }
@@ -2342,6 +2349,7 @@ class MessageStore private constructor(
                 message.withoutArchivePosition().copy(aliases = aliases),
                 preserveStoredThreadLineage = true,
                 allowDirectSessionTransition = false,
+                advanceOutboundLastRead = page.direction != ArchiveDirection.BEFORE,
             )
             attachArchivePosition(
                 result.messageId,

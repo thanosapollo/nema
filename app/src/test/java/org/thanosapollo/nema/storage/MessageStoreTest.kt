@@ -259,6 +259,84 @@ class MessageStoreTest {
     }
 
     @Test
+    fun ownOutboundCarbonAdvancesLastReadThroughPriorInbound() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(incoming(localId = "seen-on-other-client"))
+        val inbound = requireNotNull(database.messageDao().message(ACCOUNT, "seen-on-other-client"))
+        assertEquals(0L, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+
+        store.ingest(
+            incoming(
+                localId = "emacs-reply",
+                sender = SELF,
+                direction = MessageDirection.OUTBOUND,
+                aliases = listOf(
+                    TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, MessageStore.OUTBOUND_ORIGIN_AUTHORITY, "emacs-msg-1"),
+                ),
+            ),
+        )
+        val outbound = requireNotNull(database.messageDao().message(ACCOUNT, "emacs-reply"))
+        assertEquals(outbound.localSequence, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+        assertTrue(outbound.localSequence > inbound.localSequence)
+
+        store.ingest(incoming(localId = "after-reply"))
+        val later = requireNotNull(database.messageDao().message(ACCOUNT, "after-reply"))
+        assertEquals(outbound.localSequence, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+        assertTrue(later.localSequence > outbound.localSequence)
+    }
+
+    @Test
+    fun historicalBeforeOutboundDoesNotAdvanceLastReadPastLaterInbound() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(incoming(localId = "recent-in"))
+        val inbound = requireNotNull(database.messageDao().message(ACCOUNT, "recent-in"))
+        assertEquals(0L, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+
+        val key = archiveKey(ACCOUNT)
+        val bootstrap = store.applyArchivePage(
+            archivePage(
+                key = key,
+                direction = ArchiveDirection.BOOTSTRAP,
+                complete = true,
+                hasEarlier = true,
+                messages = listOf(
+                    archived("recent-result", "recent-in", "body", stanzaAlias("recent-in")),
+                ),
+            ),
+        )
+        assertEquals(ArchivePageStatus.APPLIED, bootstrap.status)
+        assertEquals(0L, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+
+        val older = store.applyArchivePage(
+            archivePage(
+                key = key,
+                direction = ArchiveDirection.BEFORE,
+                boundaryId = "recent-result",
+                complete = true,
+                hasEarlier = false,
+                messages = listOf(
+                    archived(
+                        resultId = "old-out-result",
+                        localId = "old-emacs-send",
+                        body = "old send",
+                        alias = TrustedIdentityAlias(
+                            IdentityAliasKind.ORIGIN_ID,
+                            MessageStore.OUTBOUND_ORIGIN_AUTHORITY,
+                            "emacs-old",
+                        ),
+                        direction = MessageDirection.OUTBOUND,
+                        sender = SELF,
+                    ),
+                ),
+            ),
+        )
+        assertEquals(ArchivePageStatus.APPLIED, older.status)
+        val historical = requireNotNull(database.messageDao().message(ACCOUNT, "old-emacs-send"))
+        assertTrue(historical.localSequence > inbound.localSequence)
+        assertEquals(0L, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+    }
+
+    @Test
     fun directCorrectionsReconcileDeferredIdempotentlyAndPreserveBaseIdentity() = runBlocking {
         var store = MessageStore(database)
         val targetAlias = TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "original-wire-id")
