@@ -71,6 +71,27 @@ abstract class MessageDao {
         targetId: String,
     ): List<MessageEntity>
 
+    @Query(
+        """
+        SELECT messages.* FROM messages
+        INNER JOIN trusted_identity_aliases AS alias
+          ON alias.accountId = messages.accountId
+         AND alias.messageId = messages.localMessageId
+        WHERE messages.accountId = :accountId
+          AND messages.peerJid = :peerJid
+          AND messages.direction = 'OUTBOUND'
+          AND messages.messageKind = 'CHAT'
+          AND alias.value = :targetId
+          AND alias.status = 'TRUSTED'
+          AND alias.kind IN ('MESSAGE_ID', 'ORIGIN_ID', 'STANZA_ID')
+        """,
+    )
+    abstract suspend fun outboundChatByAliasValue(
+        accountId: String,
+        peerJid: String,
+        targetId: String,
+    ): List<MessageEntity>
+
     @Upsert
     abstract suspend fun upsertPeer(peer: PeerEntity)
 
@@ -1243,6 +1264,14 @@ abstract class MessageDao {
     @Query(
         """
         SELECT * FROM message_outbox
+        WHERE accountId = :accountId AND messageId = :messageId
+        """,
+    )
+    abstract suspend fun outboxForMessage(accountId: String, messageId: String): OutboxEntity?
+
+    @Query(
+        """
+        SELECT * FROM message_outbox
         WHERE accountId = :accountId AND originId = :originId
         """,
     )
@@ -1624,7 +1653,10 @@ class MessageStore private constructor(
             return null
         }
         if (senderJid != peerJid) return null
-        val outbox = dao.outbox(accountId, targetId) ?: return null
+        val outbox = dao.outbox(accountId, targetId)
+            ?: dao.outboxByOrigin(accountId, targetId)
+            ?: attachReceiptOutbox(dao, accountId, peerJid, targetId)
+            ?: return null
         val message = dao.message(accountId, outbox.messageId) ?: return null
         if (message.direction != MessageDirection.OUTBOUND ||
             message.messageKind != MessageKind.CHAT ||
@@ -1634,6 +1666,34 @@ class MessageStore private constructor(
         }
         if ((outbox.receiptStage?.ordinal ?: -1) >= stage.ordinal) return outbox
         return outbox.copy(receiptStage = stage).also { dao.updateOutbox(it) }
+    }
+
+    private suspend fun attachReceiptOutbox(
+        dao: MessageDao,
+        accountId: String,
+        peerJid: String,
+        targetId: String,
+    ): OutboxEntity? {
+        val matches = dao.outboundChatByAliasValue(accountId, peerJid, targetId)
+            .distinctBy(MessageEntity::localMessageId)
+        val message = matches.singleOrNull() ?: return null
+        dao.outboxForMessage(accountId, message.localMessageId)?.let { return it }
+        if (dao.outbox(accountId, targetId) != null || dao.outboxByOrigin(accountId, targetId) != null) {
+            return null
+        }
+        dao.insertOutbox(
+            OutboxEntity(
+                accountId = accountId,
+                operationId = targetId,
+                messageId = message.localMessageId,
+                originId = targetId,
+                status = OutboxStatus.CONFIRMED,
+                generation = null,
+                attempt = 1,
+                failureReason = null,
+            ),
+        )
+        return dao.outbox(accountId, targetId)
     }
 
     suspend fun composeDirectDraft(

@@ -286,6 +286,37 @@ class MessageStoreTest {
     }
 
     @Test
+    fun peerDisplayedMarksCarbonOutboundRead() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(
+            incoming(
+                localId = "emacs-reply",
+                sender = SELF,
+                direction = MessageDirection.OUTBOUND,
+                aliases = listOf(
+                    TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, MessageStore.OUTBOUND_ORIGIN_AUTHORITY, "emacs-msg-1"),
+                    TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, SELF, "emacs-msg-1"),
+                ),
+            ),
+        )
+
+        val displayed = requireNotNull(
+            store.recordReceiptSignal(
+                ACCOUNT,
+                PEER,
+                PEER,
+                "emacs-msg-1",
+                MessageReceiptStage.DISPLAYED,
+            ),
+        )
+        assertEquals(MessageReceiptStage.DISPLAYED, displayed.receiptStage)
+        assertEquals(
+            MessageReceiptStage.DISPLAYED,
+            store.outbox(ACCOUNT, "emacs-msg-1")?.receiptStage,
+        )
+    }
+
+    @Test
     fun historicalBeforeOutboundDoesNotAdvanceLastReadPastLaterInbound() = runBlocking {
         val store = MessageStore(database)
         store.ingest(incoming(localId = "recent-in"))
