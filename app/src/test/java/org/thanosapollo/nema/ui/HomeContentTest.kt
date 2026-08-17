@@ -104,6 +104,71 @@ class HomeContentTest {
     }
 
     @Test
+    fun homeGroupPreviewShowsOccupantNotGroupLabel() {
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = DirectChatState(
+                        accountId = "account-a",
+                        conversations = listOf(
+                            ConversationSummary(
+                                peerJid = "jabber-el@conference.hmm.st",
+                                preview = "Thanks! How about emacs-jabber 0.13.1?",
+                                localSequence = 2,
+                                displayName = "jabber.el",
+                                groupChat = true,
+                                previewSender = "debacle",
+                            ),
+                        ),
+                        conversationsReady = true,
+                    ),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("debacle", substring = true, useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithText("Thanks! How about emacs-jabber 0.13.1?", substring = true, useUnmergedTree = true)
+            .assertIsDisplayed()
+        composeRule.onNodeWithText("Group ·", substring = true).assertDoesNotExist()
+    }
+
+    @Test
+    fun homeDirectOutgoingPreviewShowsYou() {
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = DirectChatState(
+                        accountId = "account-a",
+                        conversations = listOf(
+                            ConversationSummary(
+                                peerJid = "alice@example.org",
+                                preview = "on my way",
+                                localSequence = 2,
+                                displayName = "Alice",
+                                previewSender = "You",
+                            ),
+                        ),
+                        conversationsReady = true,
+                    ),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("You", substring = true, useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithText("on my way", substring = true, useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test
     fun homeDoesNotClaimEmptyUntilConversationQueryCompletes() {
         lateinit var show: (Boolean) -> Unit
         composeRule.setContent {

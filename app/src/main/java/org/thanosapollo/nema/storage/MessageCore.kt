@@ -461,6 +461,7 @@ abstract class MessageDao {
           SELECT messages.accountId AS accountId,
             messages.localMessageId AS localMessageId,
             messages.peerJid AS peerJid,
+          messages.senderJid AS senderJid,
             COALESCE(
               (
                 SELECT correction.body
@@ -477,6 +478,7 @@ abstract class MessageDao {
             ) AS preview,
             messages.localSequence AS localSequence,
             messages.messageKind AS messageKind,
+          messages.direction AS direction,
             messages.sentAtEpochMs AS sentAtEpochMs,
             messages.sentTimeSource AS sentTimeSource,
             CASE
@@ -587,9 +589,11 @@ abstract class MessageDao {
         )
         SELECT messages.localMessageId AS localMessageId,
           messages.peerJid AS peerJid,
+          messages.senderJid AS senderJid,
           messages.preview AS preview,
           messages.localSequence AS localSequence,
           messages.messageKind AS messageKind,
+          messages.direction AS direction,
           messages.sentAtEpochMs AS sentAtEpochMs,
           messages.sentTimeSource AS sentTimeSource,
           messages.conversationArchiveOrdinal AS conversationArchiveOrdinal,
@@ -620,6 +624,7 @@ abstract class MessageDao {
         """
         SELECT messages.localMessageId AS localMessageId,
           messages.peerJid AS peerJid,
+          messages.senderJid AS senderJid,
           COALESCE(
             (
               SELECT correction.body
@@ -636,6 +641,7 @@ abstract class MessageDao {
           ) AS preview,
           messages.localSequence AS localSequence,
           messages.messageKind AS messageKind,
+          messages.direction AS direction,
           messages.sentAtEpochMs AS sentAtEpochMs,
           messages.sentTimeSource AS sentTimeSource,
           NULL AS conversationArchiveOrdinal,
@@ -690,6 +696,7 @@ abstract class MessageDao {
         """
         SELECT messages.localMessageId AS localMessageId,
           messages.peerJid AS peerJid,
+          messages.senderJid AS senderJid,
           COALESCE(
             (
               SELECT correction.body
@@ -706,6 +713,7 @@ abstract class MessageDao {
           ) AS preview,
           messages.localSequence AS localSequence,
           messages.messageKind AS messageKind,
+          messages.direction AS direction,
           messages.sentAtEpochMs AS sentAtEpochMs,
           messages.sentTimeSource AS sentTimeSource,
           NULL AS conversationArchiveOrdinal,
@@ -1307,6 +1315,8 @@ data class ConversationListRow(
     val sentTimeSource: MessageTimeSource?,
     val conversationArchiveOrdinal: Long?,
     val unreadCount: Int = 0,
+    val senderJid: String = "",
+    val direction: MessageDirection = MessageDirection.INBOUND,
 ) {
     val groupChat: Boolean
         get() = messageKind == MessageKind.GROUPCHAT || room

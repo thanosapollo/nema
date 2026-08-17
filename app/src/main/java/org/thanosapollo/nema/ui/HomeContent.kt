@@ -40,16 +40,21 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import org.thanosapollo.nema.chat.ConversationSummary
 import org.thanosapollo.nema.ui.chat.PeerAvatar
+import org.thanosapollo.nema.ui.chat.mucNickColor
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -205,12 +210,7 @@ private fun ConversationRow(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                if (conversation.groupChat) {
-                    val preview = conversationPreview(conversation.preview)
-                    if (preview.isEmpty()) "Groupchat" else "Group · $preview"
-                } else {
-                    conversationPreview(conversation.preview)
-                },
+                conversationPreviewText(conversation),
                 style = MaterialTheme.typography.bodySmall,
                 fontWeight = if (conversation.unreadCount > 0) FontWeight.SemiBold else FontWeight.Normal,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -293,4 +293,32 @@ private fun NewChatDialog(
             TextButton(onClick = onDismiss) { Text("Cancel") }
         },
     )
+}
+
+@Composable
+private fun conversationPreviewText(conversation: ConversationSummary) = buildAnnotatedString {
+    val body = conversationPreview(conversation.preview)
+    val sender = conversation.previewSender
+    val unread = conversation.unreadCount > 0
+    if (sender != null) {
+        val occupant = conversation.groupChat && sender != "You"
+        val nickColor = if (occupant) {
+            Color(mucNickColor(sender, MaterialTheme.colorScheme.surface.toArgb()))
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        }
+        withStyle(
+            SpanStyle(
+                color = nickColor,
+                fontWeight = if (unread) FontWeight.SemiBold else FontWeight.Normal,
+            ),
+        ) {
+            append(sender)
+        }
+        if (body.isNotEmpty()) append(": ")
+    }
+    when {
+        body.isNotEmpty() -> append(body)
+        sender == null && conversation.groupChat -> append("Groupchat")
+    }
 }

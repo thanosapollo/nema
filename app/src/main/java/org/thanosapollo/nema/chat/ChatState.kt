@@ -60,6 +60,7 @@ data class ConversationSummary(
     val groupChat: Boolean = false,
     val sentAtEpochMs: Long? = null,
     val unreadCount: Int = 0,
+    val previewSender: String? = null,
 ) {
     val displayLabel: String
         get() = peerDisplayLabel(peerJid, displayName, localNickname)
@@ -76,6 +77,7 @@ data class ConversationSummary(
             groupChat == other.groupChat &&
             sentAtEpochMs == other.sentAtEpochMs &&
             unreadCount == other.unreadCount &&
+            previewSender == other.previewSender &&
             photoBytes.contentEquals(other.photoBytes)
     }
 
@@ -89,6 +91,7 @@ data class ConversationSummary(
         result = 31 * result + groupChat.hashCode()
         result = 31 * result + (sentAtEpochMs?.hashCode() ?: 0)
         result = 31 * result + unreadCount
+        result = 31 * result + (previewSender?.hashCode() ?: 0)
         result = 31 * result + (photoBytes?.contentHashCode() ?: 0)
         return result
     }
@@ -118,6 +121,18 @@ data class ThreadSummary(
 )
 
 fun threadSummaryLabel(replyCount: Int): String = "Thread · $replyCount replies"
+
+fun previewSenderLabel(
+    groupChat: Boolean,
+    outgoing: Boolean,
+    senderJid: String,
+    peerJid: String,
+): String? {
+    if (outgoing) return "You"
+    if (!groupChat) return null
+    val nick = senderJid.substringAfterLast('/', missingDelimiterValue = "")
+    return nick.takeIf(String::isNotEmpty)
+}
 
 data class RecentThread(
     val thread: ThreadRef,
@@ -330,6 +345,12 @@ class ChatRepository(database: NemaDatabase) {
                 groupChat = row.groupChat,
                 sentAtEpochMs = row.sentAtEpochMs,
                 unreadCount = row.unreadCount,
+                previewSender = previewSenderLabel(
+                    groupChat = row.groupChat,
+                    outgoing = row.direction == MessageDirection.OUTBOUND,
+                    senderJid = row.senderJid,
+                    peerJid = row.peerJid,
+                ),
             )
         }
         val emptyRooms = rooms

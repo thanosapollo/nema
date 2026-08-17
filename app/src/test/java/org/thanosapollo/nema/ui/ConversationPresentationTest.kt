@@ -6,6 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.thanosapollo.nema.chat.ConversationSummary
+import org.thanosapollo.nema.chat.previewSenderLabel
 
 class ConversationPresentationTest {
     @Test
@@ -44,5 +45,52 @@ class ConversationPresentationTest {
         assertNull(unreadBadgeLabel(0))
         assertEquals("3", unreadBadgeLabel(3))
         assertEquals("99+", unreadBadgeLabel(100))
+    }
+
+    @Test
+    fun previewSenderUsesOccupantOrYou() {
+        assertEquals(
+            "debacle",
+            previewSenderLabel(
+                groupChat = true,
+                outgoing = false,
+                senderJid = "jabber-el@conference.hmm.st/debacle",
+                peerJid = "jabber-el@conference.hmm.st",
+            ),
+        )
+        assertEquals(
+            "You",
+            previewSenderLabel(
+                groupChat = false,
+                outgoing = true,
+                senderJid = "me@example.org",
+                peerJid = "alice@example.org",
+            ),
+        )
+        assertEquals(
+            "You",
+            previewSenderLabel(
+                groupChat = true,
+                outgoing = true,
+                senderJid = "room@example.org/me",
+                peerJid = "room@example.org",
+            ),
+        )
+        assertNull(
+            previewSenderLabel(
+                groupChat = false,
+                outgoing = false,
+                senderJid = "alice@example.org",
+                peerJid = "alice@example.org",
+            ),
+        )
+        assertNull(
+            previewSenderLabel(
+                groupChat = true,
+                outgoing = false,
+                senderJid = "room@example.org",
+                peerJid = "room@example.org",
+            ),
+        )
     }
 }

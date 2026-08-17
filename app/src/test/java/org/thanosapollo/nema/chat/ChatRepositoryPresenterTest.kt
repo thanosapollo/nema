@@ -258,6 +258,7 @@ class ChatRepositoryPresenterTest {
         val conversation = ChatRepository(database).observeConversations(ACCOUNT).first().single()
 
         assertEquals("latest room body", conversation.preview)
+        assertEquals("alice", conversation.previewSender)
         assertEquals(2_000L, conversation.sentAtEpochMs)
     }
 
