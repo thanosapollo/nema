@@ -200,6 +200,41 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
+    fun roomArchiveBackfillDoesNotReplaceLatestConversationPreview() = runBlocking {
+        val store = MessageStore(database)
+        val room = "jabber@conference.example.org"
+        store.ingest(
+            incoming(ACCOUNT, "latest", "latest room body").copy(
+                peerJid = room,
+                senderJid = "$room/alice",
+                messageKind = MessageKind.GROUPCHAT,
+                archiveOrdinal = 2,
+                archiveAuthority = room,
+                archiveScope = room,
+                sentAtEpochMs = 2_000,
+                sentTimeSource = MessageTimeSource.MAM,
+            ),
+        )
+        store.ingest(
+            incoming(ACCOUNT, "old", "Group Christian: that's great").copy(
+                peerJid = room,
+                senderJid = "$room/christian",
+                messageKind = MessageKind.GROUPCHAT,
+                archiveOrdinal = 1,
+                archiveAuthority = room,
+                archiveScope = room,
+                sentAtEpochMs = 1_000,
+                sentTimeSource = MessageTimeSource.MAM,
+            ),
+        )
+
+        val conversation = ChatRepository(database).observeConversations(ACCOUNT).first().single()
+
+        assertEquals("latest room body", conversation.preview)
+        assertEquals(2_000L, conversation.sentAtEpochMs)
+    }
+
+    @Test
     fun delayedUnarchivedMessageIsPlacedBySentTimeWithoutReorderingArchiveSpine() = runBlocking {
         val store = MessageStore(database)
         store.ingest(

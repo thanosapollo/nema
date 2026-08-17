@@ -291,7 +291,7 @@ class ChatRepository(database: NemaDatabase) {
 
     fun observeConversations(accountId: String): Flow<List<ConversationSummary>> =
         combine(
-            dao.observeCachedConversationSummaries(accountId),
+            dao.observeConversationSummaries(accountId),
             dao.observeRooms(accountId),
         ) { rows, rooms ->
             conversationSummaries(rows, rooms)
@@ -299,7 +299,7 @@ class ChatRepository(database: NemaDatabase) {
 
     suspend fun cachedConversations(accountId: String): List<ConversationSummary> =
         conversationSummaries(
-            dao.cachedConversationSummaries(accountId),
+            dao.observeConversationSummaries(accountId).first(),
             dao.rooms(accountId),
         )
 
