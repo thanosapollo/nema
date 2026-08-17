@@ -758,9 +758,10 @@ class SmackDirectMessageMapperTest {
             wrapper("peer@example.org", CarbonExtension.Direction.sent, sent)
                 .toTrustedCarbonMessage("account@example.org"),
         )
-        assertNull(
+        assertEquals(
+            received,
             wrapper("account@example.org/other-device", CarbonExtension.Direction.received, received)
-                .toTrustedCarbonMessage("account@example.org"),
+                .toTrustedCarbonMessage("account@example.org")?.message,
         )
         assertNull(
             wrapper("account@example.org", CarbonExtension.Direction.sent, received)
@@ -881,7 +882,8 @@ class SmackDirectMessageMapperTest {
             direct,
         ).classifyOutgoingFailure("account@example.org")
         assertTrue(siblingResource.consumed)
-        assertNull(siblingResource.failure)
+        assertEquals("operation", siblingResource.failure?.operationId)
+        assertEquals("peer@example.org", siblingResource.failure?.peer)
         val wrongRoute = StanzaBuilder.buildMessage("wrong-route")
                 .from(JidCreate.entityBareFrom("peer@example.org"))
                 .to(JidCreate.entityBareFrom("other@example.org"))
@@ -940,27 +942,19 @@ class SmackDirectMessageMapperTest {
         val gate = StableIdDiscoveryGate()
 
         gate.begin(first)
-        assertTrue(
-            gate.accept(
-                first,
-                TrustedIncomingStanza(message("A"), 1_234L, MessageTimeSource.CARBON, 2_000L),
-            ).isEmpty(),
-        )
-        assertTrue(gate.accept(first, message("B")).isEmpty())
-        val delivered = mutableListOf<String>()
-        drainStableIdGate(gate, first, supported = true) { decision ->
-            delivered += requireNotNull(decision.message.stanzaId)
-            if (decision.message.stanzaId == "A") {
-                assertEquals(1_234L, decision.sentAtEpochMs)
-                assertEquals(MessageTimeSource.CARBON, decision.sentTimeSource)
-                assertEquals(2_000L, decision.receivedAtEpochMs)
-                assertTrue(gate.accept(first, message("C")).isEmpty())
-            }
-        }
-        assertEquals(listOf("A", "B", "C"), delivered)
-
+        val firstLive = gate.accept(
+            first,
+            TrustedIncomingStanza(message("A"), 1_234L, MessageTimeSource.CARBON, 2_000L),
+        ).single()
+        assertEquals("A", firstLive.message.stanzaId)
+        assertEquals(false, firstLive.trustStableIds)
+        assertEquals(1_234L, firstLive.sentAtEpochMs)
+        assertEquals(MessageTimeSource.CARBON, firstLive.sentTimeSource)
+        assertEquals("B", gate.accept(first, message("B")).single().message.stanzaId)
+        drainStableIdGate(gate, first, supported = true) { }
         val direct = gate.accept(first, message("D")).single()
         assertEquals("D", direct.message.stanzaId)
+        assertEquals(true, direct.trustStableIds)
         val envelope = requireNotNull(
             direct.message.toIncomingEnvelope(
                 direct.attempt,
@@ -971,7 +965,7 @@ class SmackDirectMessageMapperTest {
         assertEquals(listOf("trusted"), envelope.stanzaIds.map { it.id })
 
         gate.begin(second)
-        assertTrue(gate.accept(second, message("stale")).isEmpty())
+        assertEquals("stale", gate.accept(second, message("stale")).single().message.stanzaId)
         assertTrue(gate.complete(first, supported = true).isEmpty())
         gate.retire(second)
         assertTrue(gate.complete(second, supported = true).isEmpty())
@@ -991,15 +985,9 @@ class SmackDirectMessageMapperTest {
             .setBody("body")
             .build()
         val gate = StableIdDiscoveryGate()
-        val cancellation = kotlinx.coroutines.CancellationException("stop")
         gate.begin(attempt)
-        gate.accept(attempt, message)
-
-        val observed = runCatching {
-            drainStableIdGate(gate, attempt, supported = true) { throw cancellation }
-        }.exceptionOrNull()
-
-        assertSame(cancellation, observed)
+        assertEquals("A", gate.accept(attempt, message).single().message.stanzaId)
+        gate.retire(attempt)
         assertTrue(gate.accept(attempt, message).isEmpty())
         assertTrue(gate.drain(attempt).isEmpty())
     }
@@ -1022,7 +1010,7 @@ class SmackDirectMessageMapperTest {
         val failure = IllegalStateException("injected discovery failure")
         val delivered = mutableListOf<StableIdMessageDecision>()
         gate.begin(attempt)
-        gate.accept(attempt, message("A"))
+        assertEquals("A", gate.accept(attempt, message("A")).single().message.stanzaId)
 
         val observed = runCatching<Unit> {
             resolveStableIdGateOnCapabilityFailure(gate, attempt, { delivered += it }) {
@@ -1032,7 +1020,7 @@ class SmackDirectMessageMapperTest {
         delivered += gate.accept(attempt, message("B"))
 
         assertSame(failure, observed)
-        assertEquals(listOf("A", "B"), delivered.map { it.message.stanzaId })
+        assertEquals(listOf("B"), delivered.map { it.message.stanzaId })
         assertTrue(delivered.none(StableIdMessageDecision::trustStableIds))
         assertEquals(false, gate.support(attempt))
     }

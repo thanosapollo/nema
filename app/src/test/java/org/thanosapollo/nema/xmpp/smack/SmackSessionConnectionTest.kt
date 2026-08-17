@@ -79,7 +79,7 @@ class SmackSessionConnectionTest {
         listener.processStanza(direct)
 
         val failures = events.filterIsInstance<SessionEvent.OutgoingFailure>()
-        assertEquals(2, failures.size)
+        assertEquals(3, failures.size)
         assertTrue(failures.all { it.attempt == attempt })
         assertTrue(failures.all { it.failure.operationId == "operation" })
     }

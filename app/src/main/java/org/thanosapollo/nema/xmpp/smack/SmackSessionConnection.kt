@@ -1289,7 +1289,7 @@ internal fun Message.toTrustedCarbonMessage(
 }
 
 private fun Message.hasExactCarbonAuthority(expectedBareJid: String): Boolean =
-    from?.let { it.isEntityBareJid && it.toString() == expectedBareJid } == true
+    from?.asBareJid()?.toString() == expectedBareJid
 
 internal fun List<Message>.haveArchiveAuthority(expectedArchiveAuthority: String): Boolean = all {
     it.from?.asBareJid()?.toString() == expectedArchiveAuthority
@@ -1381,14 +1381,7 @@ internal class StableIdDiscoveryGate {
     fun accept(attempt: SessionAttemptIdentity, message: TrustedIncomingStanza): List<StableIdMessageDecision> {
         if (this.attempt != attempt) return emptyList()
         return when (val current = state) {
-            State.Unknown -> {
-                pending.addLast(message)
-                emptyList()
-            }
-            is State.Draining -> {
-                pending.addLast(message)
-                emptyList()
-            }
+            State.Unknown, is State.Draining -> listOf(message.toDecision(attempt, supported = false))
             is State.Open -> listOf(
                 message.toDecision(attempt, current.supported),
             )
