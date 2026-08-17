@@ -1303,7 +1303,7 @@ data class ConversationListRow(
     val direction: MessageDirection = MessageDirection.INBOUND,
 ) {
     val groupChat: Boolean
-        get() = messageKind == MessageKind.GROUPCHAT || room
+        get() = room
 }
 
 data class TimelineRow(

@@ -423,7 +423,7 @@ class ChatRepository(database: NemaDatabase) {
                     ),
                 )
             }
-        return if (peer?.room == true || timeline.any(TimelineMessage::groupChat)) {
+        return if (peer?.room == true) {
             timeline.filterByThread(key.thread)
         } else {
             timeline.projectThreads(key.thread)
@@ -650,7 +650,7 @@ class DirectChatPresenter(
         },
         selectedConversation,
     ) { conversations, selected ->
-        val groupChat = selected.peer?.room == true || selected.messages.any { it.groupChat }
+        val groupChat = selected.peer?.room == true
         val selectedKind = if (groupChat) MessageKind.GROUPCHAT else MessageKind.CHAT
         DirectChatState(
             accountId = account.id.value,
@@ -740,8 +740,7 @@ class DirectChatPresenter(
 
     suspend fun startNewThread(): Boolean {
         val route = selectedRoute.value ?: return false
-        val groupChat = repository.observePeer(account.id.value, route.peerJid).first()?.room == true ||
-            repository.observeTimeline(account.id.value, route.peerJid).first().any { it.groupChat }
+        val groupChat = repository.observePeer(account.id.value, route.peerJid).first()?.room == true
         val currentSession = if (groupChat) {
             null
         } else {

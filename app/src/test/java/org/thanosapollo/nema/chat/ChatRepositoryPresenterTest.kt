@@ -507,6 +507,32 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
+    fun venueFollowsPeerRoomNotMessageKind() = runBlocking {
+        val store = MessageStore(database)
+        val room = "room@conference.example.org"
+        store.ingest(
+            incoming(ACCOUNT, "room-msg", "room hello").copy(
+                peerJid = room,
+                senderJid = "$room/alice",
+                messageKind = MessageKind.GROUPCHAT,
+            ),
+        )
+        PeerIdentityStore(database.messageDao()).saveRoom(ACCOUNT, room, false)
+        val repository = ChatRepository(database)
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = repository,
+            scope = scope,
+            enqueue = { _, _ -> true },
+        )
+        assertTrue(presenter.selectPeer(room))
+        presenter.state.first { it.selectedPeer == room && it.messages.isNotEmpty() }
+        assertEquals(false, repository.observeConversations(ACCOUNT).first().single().groupChat)
+        assertEquals(false, presenter.state.value.selectedPeerGroupChat)
+        presenter.close()
+    }
+
+    @Test
     fun conversationsAndTimelineStayAccountScoped() = runBlocking {
         val store = MessageStore(database)
         store.ingest(incoming(ACCOUNT, "account-message", "account body"))
