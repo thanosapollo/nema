@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
+// Ephemeral occupant/subject view. WIP-FOUNDATION: persist only when a durable MUC writer exists.
 class RoomStateStore {
     private val views = ConcurrentHashMap<String, MutableStateFlow<RoomView?>>()
 

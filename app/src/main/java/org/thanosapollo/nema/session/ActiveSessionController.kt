@@ -142,6 +142,7 @@ interface SessionConnection {
     ): SessionCapabilities = SessionCapabilities(false, false, false, false)
     suspend fun queryArchive(request: ArchivePageRequest): ArchivePageEnvelope =
         throw UnsupportedOperationException("Archive queries are unsupported")
+    // Call-time probes. Do not promote these into unused SessionCapabilities bits.
     suspend fun loadVCard(
         accountId: AccountId,
         generation: ConnectionGeneration,
@@ -185,6 +186,7 @@ interface SessionConnection {
         generation: ConnectionGeneration,
         bookmark: org.thanosapollo.nema.xmpp.bookmarks.RoomBookmark,
     ): Boolean = false
+    // WIP-FOUNDATION: roster, presence, encryption, and calls have no methods until a writer exists.
     suspend fun disconnect()
 }
 

@@ -24,6 +24,8 @@ import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
 data class PeerEntity(
     val accountId: String,
     val jid: String,
+    // displayName is remote profile/vCard. localNickname is the local alias.
+    // WIP-FOUNDATION: no rosterName column until a roster writer exists.
     val displayName: String? = null,
     val localNickname: String? = null,
     val photoMime: String? = null,

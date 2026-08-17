@@ -209,6 +209,8 @@ data class StanzaIdEnvelope(
     }
 }
 
+// Disco bits actually consumed today. Blocking/upload/bookmarks/MUC/vCard stay call-time probes.
+// WIP-FOUNDATION: roster, presence, encryption, and calls get no fields until a writer exists.
 data class SessionCapabilities(
     val mamV2: Boolean,
     val carbons: Boolean,
