@@ -1,7 +1,18 @@
 package org.thanosapollo.nema.storage
 
 internal const val CHEAP_CONVERSATION_SUMMARIES = """
-        WITH positioned AS (
+        WITH latest_archive_ordinals AS (
+          SELECT peerJid,
+            messageKind,
+            MAX(archiveOrdinal) AS conversationArchiveOrdinal
+          FROM messages
+          WHERE accountId = :accountId
+            AND messageKind IN ('CHAT', 'GROUPCHAT')
+            AND replaceId IS NULL
+            AND archiveOrdinal IS NOT NULL
+          GROUP BY peerJid, messageKind
+        ),
+        latest_archived AS (
           SELECT messages.accountId AS accountId,
             messages.localMessageId AS localMessageId,
             messages.peerJid AS peerJid,
@@ -12,75 +23,61 @@ internal const val CHEAP_CONVERSATION_SUMMARIES = """
             messages.direction AS direction,
             messages.sentAtEpochMs AS sentAtEpochMs,
             messages.sentTimeSource AS sentTimeSource,
-            CASE
-              WHEN messages.messageKind = 'GROUPCHAT' THEN messages.peerJid
-              ELSE accounts.bareJid
-            END AS archiveAuthority,
-            CASE
-              WHEN messages.messageKind = 'GROUPCHAT' THEN messages.peerJid
-              ELSE 'ACCOUNT'
-            END AS archiveScope,
-            position.archiveOrdinal AS conversationArchiveOrdinal
+            messages.archiveOrdinal AS conversationArchiveOrdinal
           FROM messages
-          JOIN accounts ON accounts.id = messages.accountId
-          LEFT JOIN archive_message_positions AS position
-            ON position.accountId = messages.accountId
-           AND position.messageId = messages.localMessageId
-           AND position.archiveAuthority = CASE
-             WHEN messages.messageKind = 'GROUPCHAT' THEN messages.peerJid
-             ELSE accounts.bareJid
-           END
-           AND position.archiveScope = CASE
-             WHEN messages.messageKind = 'GROUPCHAT' THEN messages.peerJid
-             ELSE 'ACCOUNT'
-           END
+          JOIN latest_archive_ordinals AS latest
+            ON latest.peerJid = messages.peerJid
+           AND latest.messageKind = messages.messageKind
+           AND latest.conversationArchiveOrdinal = messages.archiveOrdinal
           WHERE messages.accountId = :accountId
             AND messages.messageKind IN ('CHAT', 'GROUPCHAT')
             AND messages.replaceId IS NULL
-        ),
-        latest_archive_ordinals AS (
-          SELECT peerJid, archiveAuthority, archiveScope,
-            MAX(conversationArchiveOrdinal) AS conversationArchiveOrdinal
-          FROM positioned
-          WHERE conversationArchiveOrdinal IS NOT NULL
-          GROUP BY peerJid, archiveAuthority, archiveScope
-        ),
-        latest_archived AS (
-          SELECT positioned.*
-          FROM positioned
-          JOIN latest_archive_ordinals AS latest
-            ON latest.peerJid = positioned.peerJid
-           AND latest.archiveAuthority = positioned.archiveAuthority
-           AND latest.archiveScope = positioned.archiveScope
-           AND latest.conversationArchiveOrdinal = positioned.conversationArchiveOrdinal
         ),
         latest_loose_times AS (
           SELECT peerJid,
             MAX(sentAtEpochMs IS NOT NULL) AS hasSentTime,
             MAX(sentAtEpochMs) AS sentAtEpochMs
-          FROM positioned
-          WHERE conversationArchiveOrdinal IS NULL
+          FROM messages
+          WHERE accountId = :accountId
+            AND messageKind IN ('CHAT', 'GROUPCHAT')
+            AND replaceId IS NULL
+            AND archiveOrdinal IS NULL
           GROUP BY peerJid
         ),
         latest_loose_sequences AS (
-          SELECT positioned.peerJid AS peerJid,
-            MAX(positioned.localSequence) AS localSequence
-          FROM positioned AS positioned
+          SELECT messages.peerJid AS peerJid,
+            MAX(messages.localSequence) AS localSequence
+          FROM messages
           JOIN latest_loose_times AS latest
-            ON latest.peerJid = positioned.peerJid
+            ON latest.peerJid = messages.peerJid
            AND (
-             (latest.hasSentTime = 0 AND positioned.sentAtEpochMs IS NULL)
-             OR (latest.hasSentTime = 1 AND positioned.sentAtEpochMs = latest.sentAtEpochMs)
+             (latest.hasSentTime = 0 AND messages.sentAtEpochMs IS NULL)
+             OR (latest.hasSentTime = 1 AND messages.sentAtEpochMs = latest.sentAtEpochMs)
            )
-          WHERE positioned.conversationArchiveOrdinal IS NULL
-          GROUP BY positioned.peerJid
+          WHERE messages.accountId = :accountId
+            AND messages.messageKind IN ('CHAT', 'GROUPCHAT')
+            AND messages.replaceId IS NULL
+            AND messages.archiveOrdinal IS NULL
+          GROUP BY messages.peerJid
         ),
         latest_loose AS (
-          SELECT positioned.*
-          FROM positioned
+          SELECT messages.accountId AS accountId,
+            messages.localMessageId AS localMessageId,
+            messages.peerJid AS peerJid,
+            messages.senderJid AS senderJid,
+            messages.body AS body,
+            messages.localSequence AS localSequence,
+            messages.messageKind AS messageKind,
+            messages.direction AS direction,
+            messages.sentAtEpochMs AS sentAtEpochMs,
+            messages.sentTimeSource AS sentTimeSource,
+            messages.archiveOrdinal AS conversationArchiveOrdinal
+          FROM messages
           JOIN latest_loose_sequences AS latest
-            ON latest.peerJid = positioned.peerJid
-           AND latest.localSequence = positioned.localSequence
+            ON latest.peerJid = messages.peerJid
+           AND latest.localSequence = messages.localSequence
+          WHERE messages.accountId = :accountId
+            AND messages.replaceId IS NULL
         ),
         candidates AS (
           SELECT * FROM latest_archived
