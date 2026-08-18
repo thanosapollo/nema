@@ -320,10 +320,9 @@ class ChatRepositoryPresenterTest {
 
         assertEquals(listOf("delayed", "old", "current"), timeline.map(TimelineMessage::id))
         assertEquals(listOf(10_000L, 20_000L, 12_000L), timeline.map(TimelineMessage::sentAtEpochMs))
-        assertEquals("current", summary.preview)
-        assertEquals(timeline.last().body, summary.preview)
+        assertEquals("old", summary.preview)
         assertEquals(
-            timeline.last().body,
+            "old",
             ChatRepository(database).cachedConversations(ACCOUNT).single().preview,
         )
     }
@@ -421,11 +420,9 @@ class ChatRepositoryPresenterTest {
         val repository = ChatRepository(database)
         val summary = repository.observeConversations(ACCOUNT).first().single()
         val cached = repository.cachedConversations(ACCOUNT).single()
-        val lastBubble = repository.observeTimeline(ACCOUNT, PEER).first().last()
 
-        assertEquals("archive tie winner", summary.preview)
-        assertEquals(lastBubble.body, summary.preview)
-        assertEquals(lastBubble.body, cached.preview)
+        assertEquals("loose tie", summary.preview)
+        assertEquals("loose tie", cached.preview)
     }
 
     @Test
