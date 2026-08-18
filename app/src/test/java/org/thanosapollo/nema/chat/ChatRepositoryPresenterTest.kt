@@ -3,6 +3,7 @@ package org.thanosapollo.nema.chat
 import android.app.Application
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import java.util.Collections
 import java.util.UUID
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -580,7 +581,7 @@ class ChatRepositoryPresenterTest {
 
     @Test
     fun peerIdentityRequestsCarryPresenterAccount() = runBlocking {
-        val requests = mutableListOf<Pair<AccountId, Set<String>>>()
+        val requests = Collections.synchronizedList(mutableListOf<Pair<AccountId, Set<String>>>())
         fun presenter(accountId: String, bareJid: String) = DirectChatPresenter(
             account = accountConfiguration(accountId, bareJid),
             repository = ChatRepository(database),
@@ -2272,6 +2273,59 @@ class ChatRepositoryPresenterTest {
         assertEquals(listOf("operation-delayed"), store.outboxes(ACCOUNT).map { it.operationId })
         assertTrue(store.messages(OTHER_ACCOUNT).isEmpty())
         assertTrue(store.outboxes(OTHER_ACCOUNT).isEmpty())
+    }
+
+    @Test
+    fun sendDraftRecordsRevisionOnceUntilSettled() = runBlocking {
+        val gate = CompletableDeferred<Boolean>()
+        var enqueues = 0
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = ChatRepository(database),
+            scope = scope,
+            enqueue = { _, _ ->
+                enqueues += 1
+                gate.await()
+            },
+        )
+        val snap = snapshot(ACCOUNT, PEER, "once")
+        val first = presenter.sendDraft(snap)
+        val identity = PendingSendIdentity(snap.key, snap.composerRevision)
+        presenter.state.first { identity in it.pendingSendIdentities }
+        val second = presenter.sendDraft(snap)
+        assertEquals(setOf(identity), presenter.state.value.pendingSendIdentities)
+        assertTrue(!second.await())
+        gate.complete(true)
+        assertTrue(first.await())
+        presenter.state.first { identity in it.completedSendSnapshots }
+        assertEquals(1, enqueues)
+        presenter.acknowledgeCompletedSends(setOf(identity))
+        presenter.state.first { it.completedSendSnapshots.isEmpty() }
+        presenter.close()
+    }
+
+    @Test
+    fun explodedSendReleasesRevisionForRetry() = runBlocking {
+        var enqueues = 0
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = ChatRepository(database),
+            scope = scope,
+            enqueue = { _, _ ->
+                enqueues += 1
+                if (enqueues == 1) error("send exploded")
+                true
+            },
+        )
+        val snap = snapshot(ACCOUNT, PEER, "once")
+        val identity = PendingSendIdentity(snap.key, snap.composerRevision)
+        runCatching { presenter.sendDraft(snap).await() }
+        presenter.state.first {
+            identity !in it.pendingSendIdentities && identity !in it.completedSendSnapshots
+        }
+        assertTrue(presenter.sendDraft(snap).await())
+        assertEquals(2, enqueues)
+        presenter.close()
     }
 
     @Test

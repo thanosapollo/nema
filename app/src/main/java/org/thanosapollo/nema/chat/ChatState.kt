@@ -207,6 +207,8 @@ data class DirectChatState(
     val draft: String = "",
     val draftReply: DraftReply? = null,
     val typingLabel: String? = null,
+    val pendingSendIdentities: Set<PendingSendIdentity> = emptySet(),
+    val completedSendSnapshots: Map<PendingSendIdentity, DraftSnapshot> = emptyMap(),
 ) {
     val selectedPeerLabel: String?
         get() = selectedPeer?.let { peerDisplayLabel(it, selectedPeerDisplayName, selectedPeerLocalNickname) }
@@ -231,6 +233,8 @@ data class DirectChatState(
             draft == other.draft &&
             draftReply == other.draftReply &&
             typingLabel == other.typingLabel &&
+            pendingSendIdentities == other.pendingSendIdentities &&
+            completedSendSnapshots == other.completedSendSnapshots &&
             selectedPeerPhotoBytes.contentEquals(other.selectedPeerPhotoBytes)
     }
 
@@ -253,6 +257,8 @@ data class DirectChatState(
         result = 31 * result + draft.hashCode()
         result = 31 * result + (draftReply?.hashCode() ?: 0)
         result = 31 * result + (typingLabel?.hashCode() ?: 0)
+        result = 31 * result + pendingSendIdentities.hashCode()
+        result = 31 * result + completedSendSnapshots.hashCode()
         return result
     }
 }
@@ -261,6 +267,11 @@ data class DirectConversationKey(
     val accountId: String,
     val canonicalBarePeer: String,
     val thread: ThreadRef? = null,
+)
+
+data class PendingSendIdentity(
+    val key: DirectConversationKey,
+    val composerRevision: Long,
 )
 
 data class ChatRoute(
@@ -603,6 +614,11 @@ class DirectChatPresenter(
     private val routeGeneration = AtomicInteger(0)
     private val joinedRooms = mutableSetOf<String>()
     private val selectedRoute = MutableStateFlow<ChatRoute?>(null)
+    private val sendGuard = MutableStateFlow(SendGuard())
+    private data class SendGuard(
+        val pending: Set<PendingSendIdentity> = emptySet(),
+        val completed: Map<PendingSendIdentity, DraftSnapshot> = emptyMap(),
+    )
     private val selectedConversation = selectedRoute.flatMapLatest { route ->
         if (route == null) {
             flowOf(SelectedConversation(null, emptyList(), StoredDraft(), null, null, null, emptyList()))
@@ -649,7 +665,8 @@ class DirectChatPresenter(
             emitAll(repository.observeConversations(account.id.value))
         },
         selectedConversation,
-    ) { conversations, selected ->
+        sendGuard,
+    ) { conversations, selected, guard ->
         val groupChat = selected.peer?.room == true
         val selectedKind = if (groupChat) MessageKind.GROUPCHAT else MessageKind.CHAT
         DirectChatState(
@@ -675,6 +692,8 @@ class DirectChatPresenter(
                 directName = selected.peerLabelForTyping(groupChat),
                 rttText = selected.rttText,
             ),
+            pendingSendIdentities = guard.pending,
+            completedSendSnapshots = guard.completed,
         )
     }.stateIn(
         presenterScope,
@@ -834,38 +853,89 @@ class DirectChatPresenter(
         return result
     }
 
-    fun sendDraft(snapshot: DraftSnapshot): Deferred<Boolean> = submitAction {
-        owns(snapshot.key) &&
-            snapshot.outboundThread == null &&
-            snapshot.body.isNotBlank() &&
-            enqueue(account, snapshot)
+    fun sendDraft(snapshot: DraftSnapshot): Deferred<Boolean> {
+        val identity = PendingSendIdentity(snapshot.key, snapshot.composerRevision)
+        if (!claimSend(identity)) return CompletableDeferred(false)
+        return submitAction {
+            val sent = owns(snapshot.key) &&
+                snapshot.outboundThread == null &&
+                snapshot.body.isNotBlank() &&
+                enqueue(account, snapshot)
+            settleSend(identity, snapshot, sent)
+            sent
+        }.also { job ->
+            job.invokeOnCompletion { cause ->
+                if (cause != null) settleSend(identity, snapshot, false)
+            }
+        }
     }
 
-    fun sendDraftAsNewThread(snapshot: DraftSnapshot): Deferred<Boolean> = submitAction {
-        if (!owns(snapshot.key) ||
-            snapshot.key.thread != null ||
-            snapshot.outboundThread != null ||
-            snapshot.body.isBlank()
-        ) {
-            return@submitAction false
+    fun sendDraftAsNewThread(snapshot: DraftSnapshot): Deferred<Boolean> {
+        val identity = PendingSendIdentity(snapshot.key, snapshot.composerRevision)
+        if (!claimSend(identity)) return CompletableDeferred(false)
+        return submitAction {
+            if (!owns(snapshot.key) ||
+                snapshot.key.thread != null ||
+                snapshot.outboundThread != null ||
+                snapshot.body.isBlank()
+            ) {
+                settleSend(identity, snapshot, false)
+                return@submitAction false
+            }
+            val currentSession = if (snapshot.groupChat) {
+                null
+            } else {
+                repository.observeCurrentSession(
+                    snapshot.key.accountId,
+                    snapshot.key.canonicalBarePeer,
+                ).first() ?: repository.ensureCurrentSession(
+                    snapshot.key.accountId,
+                    snapshot.key.canonicalBarePeer,
+                )
+            }
+            val thread = newTopic(currentSession)
+            val sent = enqueue(account, snapshot.copy(outboundThread = thread))
+            if (sent) {
+                selectRoute(ChatRoute(snapshot.key.canonicalBarePeer, thread))
+            }
+            settleSend(identity, snapshot, sent)
+            sent
+        }.also { job ->
+            job.invokeOnCompletion { cause ->
+                if (cause != null) settleSend(identity, snapshot, false)
+            }
         }
-        val currentSession = if (snapshot.groupChat) {
-            null
-        } else {
-            repository.observeCurrentSession(
-                snapshot.key.accountId,
-                snapshot.key.canonicalBarePeer,
-            ).first() ?: repository.ensureCurrentSession(
-                snapshot.key.accountId,
-                snapshot.key.canonicalBarePeer,
+    }
+
+    fun isSending(identity: PendingSendIdentity): Boolean {
+        val guard = sendGuard.value
+        return identity in guard.pending || identity in guard.completed
+    }
+
+    fun acknowledgeCompletedSends(ids: Set<PendingSendIdentity>) {
+        if (ids.isEmpty()) return
+        synchronized(actionLock) {
+            val guard = sendGuard.value
+            sendGuard.value = guard.copy(completed = guard.completed - ids)
+        }
+    }
+
+    private fun claimSend(identity: PendingSendIdentity): Boolean = synchronized(actionLock) {
+        val guard = sendGuard.value
+        if (identity in guard.pending || identity in guard.completed) return false
+        sendGuard.value = guard.copy(pending = guard.pending + identity)
+        true
+    }
+
+    private fun settleSend(identity: PendingSendIdentity, snapshot: DraftSnapshot, sent: Boolean) {
+        synchronized(actionLock) {
+            val guard = sendGuard.value
+            if (identity !in guard.pending) return
+            sendGuard.value = guard.copy(
+                pending = guard.pending - identity,
+                completed = if (sent) guard.completed + (identity to snapshot) else guard.completed,
             )
         }
-        val thread = newTopic(currentSession)
-        val sent = enqueue(account, snapshot.copy(outboundThread = thread))
-        if (sent) {
-            selectRoute(ChatRoute(snapshot.key.canonicalBarePeer, thread))
-        }
-        sent
     }
 
     suspend fun renameThread(recent: RecentThread, title: String): Boolean {
@@ -944,7 +1014,7 @@ class DirectChatPresenter(
     private fun submitAction(action: suspend () -> Boolean): Deferred<Boolean> = synchronized(actionLock) {
         val predecessor = actionTail
         presenterScope.async(start = CoroutineStart.LAZY) {
-            predecessor?.join()
+            predecessor?.let { runCatching { it.join() } }
             action()
         }.also {
             actionTail = it

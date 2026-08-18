@@ -137,6 +137,7 @@ import org.thanosapollo.nema.chat.DirectConversationKey
 import org.thanosapollo.nema.chat.DraftCorrection
 import org.thanosapollo.nema.chat.DraftReply
 import org.thanosapollo.nema.chat.DraftSnapshot
+import org.thanosapollo.nema.chat.PendingSendIdentity
 import org.thanosapollo.nema.chat.RecentThread
 import org.thanosapollo.nema.chat.ThreadSummary
 import org.thanosapollo.nema.chat.TimelineMessage
@@ -180,6 +181,7 @@ fun DirectChatContent(
     onDraftChange: (DraftSnapshot) -> Deferred<Boolean>,
     onSend: (DraftSnapshot) -> Deferred<Boolean>,
     onSendAsNewThread: (DraftSnapshot) -> Deferred<Boolean> = { CompletableDeferred(false) },
+    onAcknowledgeCompletedSends: (Set<PendingSendIdentity>) -> Unit = {},
     onStartNewThread: suspend () -> Boolean = { false },
     onContinueThread: suspend (ThreadRef) -> Boolean = { false },
     onStartChildThread: suspend () -> Boolean = { false },
@@ -223,6 +225,10 @@ fun DirectChatContent(
         }
         var composerStates by remember(state.accountId) {
             mutableStateOf(emptyMap<DirectConversationKey, ComposerState>())
+        }
+        LaunchedEffect(state.pendingSendIdentities, state.completedSendSnapshots) {
+            pendingSendIdentities = pendingSendIdentities + state.pendingSendIdentities
+            completedSendSnapshots = completedSendSnapshots + state.completedSendSnapshots
         }
         val timelineViewports = remember(state.accountId) {
             TimelineViewportStore()
@@ -372,6 +378,7 @@ fun DirectChatContent(
                     setComposer(completions.values.fold(composer, ComposerState::clearAfterSend))
                     completedSendSnapshots = completedSendSnapshots - completions.keys
                     pendingSendIdentities = pendingSendIdentities - completions.keys
+                    onAcknowledgeCompletedSends(completions.keys)
                 }
                 val keyboard = LocalSoftwareKeyboardController.current
                 val resolver = LocalContext.current.contentResolver
@@ -1407,11 +1414,6 @@ private const val MAX_BACKGROUND_EDGE = 2048
 private const val NEAR_LATEST_ITEM_THRESHOLD = 1
 
 private const val COMPOSER_STATE_VERSION = 4
-
-private data class PendingSendIdentity(
-    val key: DirectConversationKey,
-    val composerRevision: Long,
-)
 
 internal data class ComposerState(
     val key: DirectConversationKey,

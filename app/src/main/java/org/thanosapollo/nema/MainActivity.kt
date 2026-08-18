@@ -333,6 +333,7 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean, activityRe
                             onDraftChange = presenter::updateDraft,
                             onSend = presenter::sendDraft,
                             onSendAsNewThread = presenter::sendDraftAsNewThread,
+                            onAcknowledgeCompletedSends = presenter::acknowledgeCompletedSends,
                             onStartNewThread = presenter::startNewThread,
                             onContinueThread = presenter::continueThread,
                             onStartChildThread = presenter::startChildThread,
