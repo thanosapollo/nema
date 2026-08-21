@@ -8,11 +8,15 @@ import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -1791,18 +1795,30 @@ class ChatRepositoryPresenterTest {
         cold.close()
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
     @Test
     fun conversationsAreNotAuthoritativelyEmptyBeforeFirstQueryEmission() = runBlocking {
+        val controlledScope = TestScope()
         val presenter = DirectChatPresenter(
             account = accountConfiguration(ACCOUNT, SELF),
             repository = ChatRepository(database),
-            scope = scope,
+            scope = controlledScope,
             enqueue = { _, _ -> true },
         )
 
-        assertEquals(false, presenter.state.value.conversationsReady)
-        assertTrue(presenter.state.first { it.conversationsReady }.conversations.isEmpty())
-        presenter.close()
+        try {
+            assertEquals(false, presenter.state.value.conversationsReady)
+            withTimeout(5_000) {
+                while (!presenter.state.value.conversationsReady) {
+                    controlledScope.runCurrent()
+                    yield()
+                }
+            }
+            assertTrue(presenter.state.value.conversations.isEmpty())
+        } finally {
+            presenter.close()
+            controlledScope.cancel()
+        }
     }
 
     @Test
