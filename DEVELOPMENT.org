@@ -1,0 +1,169 @@
+#+TITLE: Nema Android development
+
+* Enter the pinned environment
+
+Constantine needs working KVM access. The project flake supplies JDK 17,
+Android API 36, build-tools 36.0.0, platform tools, the emulator, one AOSP
+x86_64 image, SQLite, and the Nix-compatible =aapt2= override.
+
+#+begin_src sh
+  nix develop
+  java -version
+  ./gradlew --version
+  printf '%s\n' "$ANDROID_HOME" "$NEMA_AAPT2"
+#+end_src
+
+Run project checks from a committed reviewed tree:
+
+#+begin_src sh
+  test -z "$(git status --porcelain --untracked-files=all)"
+  ./gradlew testDebugUnitTest assembleDebug lintDebug
+#+end_src
+
+* Initialize every lab shell
+
+The persistent AVD contains account data. At the start of every terminal used
+for emulator, install, or evidence operations, enter =nix develop= and run this
+block. It rejects symlinks, foreign ownership, and permissive directories.
+
+#+begin_src sh
+  export NEMA_LAB_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/nema/android-lab"
+  export ANDROID_USER_HOME="$NEMA_LAB_ROOT/android-user"
+  export ANDROID_AVD_HOME="$NEMA_LAB_ROOT/avd"
+  export NEMA_AVD=nema-api36-aosp-x86_64
+  export ANDROID_SERIAL=emulator-5580
+  umask 077
+
+  private_dir() {
+      if test -e "$1"; then
+          test ! -L "$1"
+          test -d "$1"
+          test "$(stat -c %u "$1")" = "$UID"
+          test "$(stat -c %a "$1")" = 700
+      else
+          install -d -m 700 "$1"
+      fi
+  }
+  private_dir "$NEMA_LAB_ROOT"
+  private_dir "$ANDROID_USER_HOME"
+  private_dir "$ANDROID_AVD_HOME"
+#+end_src
+
+* Create the private AVD
+
+Run the initialization block above first, then create the AVD once:
+
+#+begin_src sh
+  test -z "$(ss -H -ltn '( sport = :5580 or sport = :5581 )')"
+  ! adb devices | grep -q '^emulator-5580[[:space:]]'
+  avdmanager create avd \
+      --name "$NEMA_AVD" \
+      --package 'system-images;android-36;default;x86_64' \
+      --path "$ANDROID_AVD_HOME/$NEMA_AVD.avd"
+  private_dir "$ANDROID_AVD_HOME/$NEMA_AVD.avd"
+#+end_src
+
+* Run and identify the emulator
+
+Run the emulator in the foreground. The terminal process owns its lifetime;
+use =Ctrl-C= to stop it. Do not use =adb kill-server=, =pkill=, or unqualified
+ADB mutations.
+
+#+begin_src sh
+  emulator -avd "$NEMA_AVD" -port 5580 -no-boot-anim -no-snapshot-save
+#+end_src
+
+In another =nix develop= shell, rerun the initialization block, then prove the
+target before every mutation:
+
+#+begin_src sh
+  test "$(adb -s "$ANDROID_SERIAL" get-state)" = device
+  test "$(adb -s "$ANDROID_SERIAL" shell getprop ro.kernel.qemu | tr -d '\r')" = 1
+  test "$(adb -s "$ANDROID_SERIAL" emu avd name | tr -d '\r' | sed -n '1p')" \
+      = nema-api36-aosp-x86_64
+  test "$(adb -s "$ANDROID_SERIAL" shell am get-current-user | tr -d '\r')" = 0
+  adb -s "$ANDROID_SERIAL" shell getprop ro.build.version.sdk
+  adb -s "$ANDROID_SERIAL" shell getprop ro.product.cpu.abi
+#+end_src
+
+* Install an exact reviewed Nema APK
+
+Build only after the candidate is reviewed and committed. Record source and
+artifact evidence before installation.
+
+#+begin_src sh
+  git status --short --branch
+  git rev-parse HEAD HEAD^{tree}
+  APK=app/build/outputs/apk/debug/app-debug.apk
+  sha256sum "$APK"
+  stat -c '%s bytes' "$APK"
+  apkanalyzer manifest application-id "$APK"
+  apkanalyzer manifest version-code "$APK"
+  apkanalyzer manifest version-name "$APK"
+  apksigner verify --print-certs "$APK"
+
+  adb -s "$ANDROID_SERIAL" install -r "$APK"
+  installed=$(adb -s "$ANDROID_SERIAL" shell pm path org.thanosapollo.nema \
+      | tr -d '\r' | sed -n 's/^package://p')
+  adb -s "$ANDROID_SERIAL" pull "$installed" "$NEMA_LAB_ROOT/installed-base.apk"
+  cmp "$APK" "$NEMA_LAB_ROOT/installed-base.apk"
+  rm -f "$NEMA_LAB_ROOT/installed-base.apk"
+#+end_src
+
+Credentials are entered by the user directly in the emulator GUI from a
+user-controlled password-manager surface. Do not pass credentials through
+ADB, environment variables, command arguments, the clipboard, or project
+scripts.
+
+* Capture Nema database evidence
+
+Nema's debug package supports =run-as=; root is unnecessary. Keep raw data
+private and short-lived. Force-stop first so the database and WAL cannot
+change while copied.
+
+#+begin_src sh
+  umask 077
+  EVIDENCE="$NEMA_LAB_ROOT/evidence-$(date +%s)"
+  install -d -m 700 "$EVIDENCE/raw"
+  PKG=org.thanosapollo.nema
+  adb -s "$ANDROID_SERIAL" shell am force-stop "$PKG"
+  test -z "$(adb -s "$ANDROID_SERIAL" shell pidof "$PKG" | tr -d '\r')"
+
+  db_manifest() {
+      adb -s "$ANDROID_SERIAL" exec-out run-as "$PKG" sh -c '
+        cd databases || exit
+        for f in nema.db nema.db-wal nema.db-shm; do
+          test ! -f "$f" || sha256sum "$f"
+        done'
+  }
+  before=$(db_manifest)
+  adb -s "$ANDROID_SERIAL" exec-out run-as "$PKG" sh -c '
+    cd databases || exit
+    tar -cf - nema.db $(test ! -f nema.db-wal || printf nema.db-wal) \
+      $(test ! -f nema.db-shm || printf nema.db-shm)' > "$EVIDENCE/raw/db.tar"
+  after=$(db_manifest)
+  test "$before" = "$after"
+
+  tar -xf "$EVIDENCE/raw/db.tar" -C "$EVIDENCE/raw"
+  sqlite3 "$EVIDENCE/raw/nema.db" ".backup '$EVIDENCE/nema.db'"
+  sqlite3 -readonly "$EVIDENCE/nema.db" \
+      'PRAGMA quick_check; PRAGMA integrity_check; PRAGMA foreign_key_check;'
+#+end_src
+
+Summarize only aggregate protocol/storage facts. Never publish raw message
+bodies, account JIDs, peer JIDs, IDs, credentials, or databases. Delete raw
+and consolidated evidence after use, then relaunch normally:
+
+#+begin_src sh
+  rm -rf "$EVIDENCE"
+  adb -s "$ANDROID_SERIAL" shell am start \
+      -n org.thanosapollo.nema/.MainActivity
+#+end_src
+
+* Pixel boundary
+
+The emulator workflow never targets the Pixel. Pixel work must use an exact
+private serial, verify the live model and package, require Android Owner user
+=0=, and fail otherwise. Never create, delete, or switch Android profiles.
+Build and install only committed, independently reviewed APKs while preserving
+existing app data.
