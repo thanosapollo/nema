@@ -3,8 +3,8 @@ package org.thanosapollo.nema.chat
 import android.app.Application
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
-import java.util.Collections
 import java.util.UUID
+import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -578,7 +578,7 @@ class ChatRepositoryPresenterTest {
 
     @Test
     fun peerIdentityRequestsCarryPresenterAccount() = runBlocking {
-        val requests = Collections.synchronizedList(mutableListOf<Pair<AccountId, Set<String>>>())
+        val requests = CopyOnWriteArrayList<Pair<AccountId, Set<String>>>()
         fun presenter(accountId: String, bareJid: String) = DirectChatPresenter(
             account = accountConfiguration(accountId, bareJid),
             repository = ChatRepository(database),
