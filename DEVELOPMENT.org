@@ -130,17 +130,17 @@ change while copied.
   test -z "$(adb -s "$ANDROID_SERIAL" shell pidof "$PKG" | tr -d '\r')"
 
   db_manifest() {
-      adb -s "$ANDROID_SERIAL" exec-out run-as "$PKG" sh -c '
+      adb -s "$ANDROID_SERIAL" exec-out "run-as $PKG sh -c '
         cd databases || exit
         for f in nema.db nema.db-wal nema.db-shm; do
-          test ! -f "$f" || sha256sum "$f"
-        done'
+          test ! -f \"\$f\" || sha256sum \"\$f\"
+        done'"
   }
   before=$(db_manifest)
-  adb -s "$ANDROID_SERIAL" exec-out run-as "$PKG" sh -c '
+  adb -s "$ANDROID_SERIAL" exec-out "run-as $PKG sh -c '
     cd databases || exit
-    tar -cf - nema.db $(test ! -f nema.db-wal || printf nema.db-wal) \
-      $(test ! -f nema.db-shm || printf nema.db-shm)' > "$EVIDENCE/raw/db.tar"
+    tar -cf - nema.db \$(test ! -f nema.db-wal || printf nema.db-wal) \
+      \$(test ! -f nema.db-shm || printf nema.db-shm)'" > "$EVIDENCE/raw/db.tar"
   after=$(db_manifest)
   test "$before" = "$after"
 
