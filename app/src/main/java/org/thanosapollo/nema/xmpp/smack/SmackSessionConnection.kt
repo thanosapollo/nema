@@ -962,7 +962,7 @@ internal fun shouldResetSmackTransport(
 
 internal fun OutgoingMessageSignal.toSmackMessage(): Message {
     val builder = StanzaBuilder.buildMessage()
-        .to(JidCreate.entityBareFrom(recipient))
+        .to(JidCreate.from(recipient))
         .ofType(Message.Type.chat)
     val extension = when (protocol) {
         MessageSignalProtocol.DELIVERY_RECEIPT -> DeliveryReceipt(targetId)
@@ -1255,6 +1255,7 @@ internal fun Message.toIncomingEnvelope(
             sentAtEpochMs = sentAtEpochMs,
             sentTimeSource = sentTimeSource,
             receiptRequested = receiptRequested,
+            receiptRecipient = fromJid.toString().takeIf { receiptRequested },
             markable = markable,
             replaceId = replaceId,
         )
@@ -1346,8 +1347,8 @@ internal fun Message.toTrustedCarbonMessage(
     val delay = carbon.forwarded.delayInformation
     return TrustedIncomingStanza(
         message = trusted,
-        sentAtEpochMs = delay?.stamp?.time,
-        sentTimeSource = delay?.let { MessageTimeSource.CARBON },
+        sentAtEpochMs = delay?.stamp?.time ?: receivedAtEpochMs,
+        sentTimeSource = MessageTimeSource.CARBON,
         receivedAtEpochMs = receivedAtEpochMs,
     )
 }

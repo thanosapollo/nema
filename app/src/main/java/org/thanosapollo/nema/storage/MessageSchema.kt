@@ -5,6 +5,14 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 internal object MessageSchema {
+    val MIGRATION_18_19: Migration = object : Migration(18, 19) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "ALTER TABLE messages ADD COLUMN liveDeliveryObserved INTEGER NOT NULL DEFAULT 0",
+            )
+        }
+    }
+
     val MIGRATION_17_18: Migration = object : Migration(17, 18) {
         override fun migrate(db: SupportSQLiteDatabase) {
             db.execSQL(

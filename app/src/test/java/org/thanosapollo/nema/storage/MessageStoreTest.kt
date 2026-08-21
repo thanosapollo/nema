@@ -1679,6 +1679,47 @@ class MessageStoreTest {
     }
 
     @Test
+    fun mergedLiveDeliveryAuthorityPreventsDuplicateReceipt() = runBlocking {
+        val archiveAlias = TrustedIdentityAlias(
+            IdentityAliasKind.ORIGIN_ID,
+            MessageStore.OUTBOUND_ORIGIN_AUTHORITY,
+            "receipt-origin",
+        )
+        val liveAlias = TrustedIdentityAlias(
+            IdentityAliasKind.STANZA_ID,
+            SELF,
+            "receipt-stanza",
+        )
+        fun message(
+            localId: String,
+            source: MessageTimeSource,
+            aliases: List<TrustedIdentityAlias>,
+        ) = incoming(
+            localId = localId,
+            body = "receipt body",
+            sentAtEpochMs = 1_000L,
+            sentTimeSource = source,
+            aliases = aliases,
+        )
+        val store = MessageStore(database)
+
+        assertFalse(store.ingest(message("archive", MessageTimeSource.MAM, listOf(archiveAlias))).firstLiveDelivery)
+        assertTrue(store.ingest(message("live", MessageTimeSource.LOCAL, listOf(liveAlias))).firstLiveDelivery)
+        assertEquals(
+            1,
+            store.ingest(
+                message("bridge", MessageTimeSource.MAM, listOf(archiveAlias, liveAlias)),
+            ).mergedRows,
+        )
+
+        assertFalse(
+            store.ingest(
+                message("replay", MessageTimeSource.LOCAL, listOf(archiveAlias)),
+            ).firstLiveDelivery,
+        )
+    }
+
+    @Test
     fun sparseBridgeDoesNotMergeConflictingAttachmentMetadata() = runBlocking {
         val firstAlias = TrustedIdentityAlias(
             IdentityAliasKind.ORIGIN_ID,
@@ -4157,6 +4198,8 @@ class MessageStoreTest {
         archiveOrdinal: Long? = null,
         archiveAuthority: String? = archiveOrdinal?.let { SELF },
         archiveScope: String? = archiveOrdinal?.let { "ACCOUNT" },
+        sentAtEpochMs: Long? = null,
+        sentTimeSource: MessageTimeSource? = null,
         aliases: List<TrustedIdentityAlias> = emptyList(),
         threadId: String? = null,
         parentThreadId: String? = null,
@@ -4177,6 +4220,8 @@ class MessageStoreTest {
         archiveOrdinal = archiveOrdinal,
         archiveAuthority = archiveAuthority,
         archiveScope = archiveScope,
+        sentAtEpochMs = sentAtEpochMs,
+        sentTimeSource = sentTimeSource,
         aliases = aliases,
         replyToId = replyToId,
         replyToJid = replyToJid,

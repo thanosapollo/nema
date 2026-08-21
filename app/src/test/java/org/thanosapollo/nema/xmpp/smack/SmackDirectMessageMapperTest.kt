@@ -290,14 +290,42 @@ class SmackDirectMessageMapperTest {
         val receipt = OutgoingMessageSignal(
             accountId = attempt.accountId,
             generation = attempt.generation,
-            recipient = envelope.peer,
+            recipient = requireNotNull(envelope.receiptRecipient),
             targetId = requireNotNull(envelope.messageId),
             stage = MessageReceiptStage.RECEIVED,
             protocol = MessageSignalProtocol.DELIVERY_RECEIPT,
         ).toSmackMessage()
         assertEquals("peer-message", DeliveryReceipt.from(receipt)?.id)
         assertEquals(Message.Type.chat, receipt.type)
-        assertEquals("peer@example.org", receipt.to.toString())
+        assertEquals("peer@example.org/device", receipt.to.toString())
+    }
+
+    @Test
+    fun `raw incoming receipt request maps as requested`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        val incoming = PacketParserUtils.parseStanza(
+            """
+            <message xmlns='jabber:client'
+                from='test@example.org/probe'
+                to='account@example.org/device'
+                type='chat'
+                id='peer-message'>
+              <body>hello</body>
+              <request xmlns='urn:xmpp:receipts'/>
+            </message>
+            """.trimIndent(),
+        ) as Message
+
+        val envelope = requireNotNull(incoming.toIncomingEnvelope(attempt, "account@example.org"))
+
+        assertTrue(envelope.receiptRequested)
+        assertEquals("peer-message", envelope.messageId)
+        assertEquals("test@example.org/probe", envelope.receiptRecipient)
     }
 
     @Test
@@ -801,8 +829,10 @@ class SmackDirectMessageMapperTest {
         )
         val receivedCarbon = requireNotNull(
             wrapper("account@example.org", CarbonExtension.Direction.received, received)
-                .toTrustedCarbonMessage("account@example.org"),
+                .toTrustedCarbonMessage("account@example.org", receivedAtEpochMs = 1_234L),
         )
+        assertEquals(1_234L, receivedCarbon.sentAtEpochMs)
+        assertEquals(MessageTimeSource.CARBON, receivedCarbon.sentTimeSource)
         val attempt = SessionAttemptIdentity(
             AccountId.require("account"),
             ConnectionGeneration.require(4),

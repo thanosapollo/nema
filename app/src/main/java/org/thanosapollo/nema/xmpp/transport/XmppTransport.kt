@@ -152,12 +152,22 @@ data class IncomingMessageEnvelope(
     val sentAtEpochMs: Long? = null,
     val sentTimeSource: MessageTimeSource? = null,
     val receiptRequested: Boolean = false,
+    val receiptRecipient: String? = null,
     val markable: Boolean = false,
     val replaceId: String? = null,
 ) {
     init {
         require(peer.isNotEmpty()) { "Peer must not be empty" }
         require(sender.isNotEmpty()) { "Sender must not be empty" }
+        require(receiptRecipient == null || receiptRecipient.isNotEmpty()) {
+            "Receipt recipient must not be empty"
+        }
+        require(!receiptRequested || receiptRecipient != null) {
+            "Receipt requests require an exact response recipient"
+        }
+        require(receiptRequested || receiptRecipient == null) {
+            "Receipt recipient requires a receipt request"
+        }
         require(originId == null || originId.isNotEmpty()) { "Origin ID must not be empty" }
         require(replaceId == null || replaceId.isNotEmpty()) { "Correction target must not be empty" }
         // WIP-FOUNDATION: crypto/protection later. Empty body is legal only with an attachment.

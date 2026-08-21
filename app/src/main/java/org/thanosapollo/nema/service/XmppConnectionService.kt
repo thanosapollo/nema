@@ -189,7 +189,7 @@ class SessionRuntime(
                     is org.thanosapollo.nema.session.SessionEvent.Incoming -> {
                         val result = liveMessages.ingest(event.message)
                         emitInsertedLive(event.message, result)
-                        acknowledgeReceiptRequest(event.message)
+                        acknowledgeReceiptRequest(event.message, result)
                         chatStates.apply(
                             IncomingChatState(
                                 accountId = event.message.accountId,
@@ -845,15 +845,21 @@ class SessionRuntime(
 
     private suspend fun acknowledgeReceiptRequest(
         message: org.thanosapollo.nema.xmpp.transport.IncomingMessageEnvelope,
+        result: IngestionResult,
     ) {
         val targetId = message.messageId?.takeIf(String::isNotEmpty) ?: return
-        if (message.outbound || message.kind != MessageKind.CHAT || !message.receiptRequested) return
+        val recipient = message.receiptRecipient ?: return
+        if (message.outbound ||
+            message.kind != MessageKind.CHAT ||
+            !message.receiptRequested ||
+            !result.firstLiveDelivery
+        ) return
         try {
             controller.sendSignal(
                 org.thanosapollo.nema.xmpp.transport.OutgoingMessageSignal(
                     accountId = message.accountId,
                     generation = message.generation,
-                    recipient = message.peer,
+                    recipient = recipient,
                     targetId = targetId,
                     stage = org.thanosapollo.nema.xmpp.transport.MessageReceiptStage.RECEIVED,
                     protocol = org.thanosapollo.nema.xmpp.transport.MessageSignalProtocol.DELIVERY_RECEIPT,

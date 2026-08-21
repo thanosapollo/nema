@@ -1509,6 +1509,7 @@ data class IngestionResult(
     val mergedRows: Int,
     val identityConflict: Boolean,
     val inserted: Boolean,
+    val firstLiveDelivery: Boolean = false,
 )
 
 class OutboxClaim internal constructor(
@@ -1954,6 +1955,9 @@ class MessageStore private constructor(
         writeBoundary(MessageWriteBoundary.AFTER_ALIAS)
 
         winner = reconcileCorrections(dao, incoming, winner)
+        val liveDelivery = incoming.sentTimeSource != MessageTimeSource.CARBON &&
+            incoming.sentTimeSource != MessageTimeSource.MAM
+        val firstLiveDelivery = liveDelivery && !winner.liveDeliveryObserved
         val reconciled = winner
             .withPreferredTime(incoming.sentAtEpochMs, incoming.sentTimeSource)
             .withAttachmentMetadata(
@@ -1962,6 +1966,7 @@ class MessageStore private constructor(
                 incoming.attachmentSize,
             )
             .withMarkerMetadata(incoming)
+            .withLiveDeliveryObserved(liveDelivery)
         if (reconciled != winner) {
             dao.updateMessage(reconciled)
             winner = reconciled
@@ -1985,7 +1990,13 @@ class MessageStore private constructor(
             dao.advancePeerLastRead(winner.accountId, winner.peerJid, winner.localSequence)
         }
         attachPendingReactions(dao, winner)
-        return IngestionResult(winner.localMessageId, mergedRows, identityConflict, inserted)
+        return IngestionResult(
+            messageId = winner.localMessageId,
+            mergedRows = mergedRows,
+            identityConflict = identityConflict,
+            inserted = inserted,
+            firstLiveDelivery = firstLiveDelivery,
+        )
     }
 
     private suspend fun applyIncomingReactionInTransaction(
@@ -2747,6 +2758,7 @@ class MessageStore private constructor(
             withArchive
         }
         val reconciled = withTransition
+            .withLiveDeliveryObserved(loser.liveDeliveryObserved)
             .withPreferredTime(loser.sentAtEpochMs, loser.sentTimeSource)
             .withAttachmentMetadata(loser.attachmentName, loser.attachmentMime, loser.attachmentSize)
         if (reconciled != winner) dao.updateMessage(reconciled)
@@ -3184,6 +3196,9 @@ private fun MessageEntity.withPreferredTime(
         sentTimeSource = candidateSource,
     ) else this
 }
+
+private fun MessageEntity.withLiveDeliveryObserved(observed: Boolean): MessageEntity =
+    if (observed && !liveDeliveryObserved) copy(liveDeliveryObserved = true) else this
 
 private fun MessageEntity.withMarkerMetadata(incoming: IncomingMessage): MessageEntity =
     if (!markable && incoming.markable) {

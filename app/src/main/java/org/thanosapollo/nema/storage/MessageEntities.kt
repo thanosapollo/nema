@@ -209,6 +209,7 @@ data class MessageEntity(
     val replaceId: String? = null,
     val correctionTargetMessageId: String? = null,
     val directSessionTransitionApplied: Boolean = false,
+    val liveDeliveryObserved: Boolean = false,
 )
 
 @Entity(

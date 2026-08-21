@@ -40,8 +40,10 @@ import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmark
 import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmarkSnapshot
 import org.thanosapollo.nema.xmpp.transport.AccountId
+import org.thanosapollo.nema.xmpp.transport.IncomingMessageEnvelope
 import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
 import org.thanosapollo.nema.xmpp.transport.MessageSignalProtocol
+import org.thanosapollo.nema.xmpp.transport.MessageTimeSource
 import org.thanosapollo.nema.xmpp.transport.OutgoingFailureEnvelope
 import org.thanosapollo.nema.xmpp.transport.OutgoingMessageEnvelope
 import org.thanosapollo.nema.xmpp.transport.OutgoingMessageSignal
@@ -477,6 +479,85 @@ class SessionRuntimeTest {
     }
 
     @Test
+    fun `live receipt request acknowledges full requester while replays stay silent`() = runTest {
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val connections = RecordingConnectionFactory()
+        val runtime = SessionRuntime(
+            accounts = accounts,
+            credentials = credentials,
+            messages = MessageStore(database),
+            peerIdentities = PeerIdentityStore(database.messageDao()),
+            runtimeScope = backgroundScope,
+            connectionFactory = connections,
+        )
+        val active = account("active")
+        assertTrue(
+            runtime.prepareActivation(
+                token = runtime.beginPendingActivation(),
+                configuration = active,
+                credential = "secret".toCharArray(),
+                emitActivation = {},
+            ),
+        )
+        accounts.activate(active.id)
+        assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
+        val connection = connections.created.single()
+        val requester = "peer@example.org/device"
+        fun incoming(id: String, source: MessageTimeSource?) = IncomingMessageEnvelope(
+            accountId = active.id,
+            generation = connection.attemptIdentity.generation,
+            peer = "peer@example.org",
+            sender = "peer@example.org",
+            outbound = false,
+            originId = null,
+            body = id,
+            thread = null,
+            messageId = id,
+            sentAtEpochMs = source?.let { 1L },
+            sentTimeSource = source,
+            receiptRequested = true,
+            receiptRecipient = requester,
+        )
+
+        val live = incoming("wire-live", null)
+        connection.emitIncoming(live)
+        runCurrent()
+        connection.emitIncoming(live)
+        runCurrent()
+        listOf(MessageTimeSource.CARBON, MessageTimeSource.MAM).forEach { source ->
+            connection.emitIncoming(incoming("wire-${source.name.lowercase()}", source))
+            runCurrent()
+        }
+        connection.emitIncoming(incoming("wire-mam-first", MessageTimeSource.MAM))
+        runCurrent()
+        connection.emitIncoming(incoming("wire-mam-first", null))
+        runCurrent()
+
+        assertEquals(
+            listOf(
+                OutgoingMessageSignal(
+                    accountId = active.id,
+                    generation = connection.attemptIdentity.generation,
+                    recipient = requester,
+                    targetId = "wire-live",
+                    stage = MessageReceiptStage.RECEIVED,
+                    protocol = MessageSignalProtocol.DELIVERY_RECEIPT,
+                ),
+                OutgoingMessageSignal(
+                    accountId = active.id,
+                    generation = connection.attemptIdentity.generation,
+                    recipient = requester,
+                    targetId = "wire-mam-first",
+                    stage = MessageReceiptStage.RECEIVED,
+                    protocol = MessageSignalProtocol.DELIVERY_RECEIPT,
+                ),
+            ),
+            connection.sentSignals,
+        )
+    }
+
+    @Test
     fun `displayed marker uses only the current connected account and exact target`() = runTest {
         val accounts = AccountRepository(database.accountDao())
         val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
@@ -636,6 +717,10 @@ class SessionRuntimeTest {
         override suspend fun disconnect() {
             disconnectCalls++
             isUsable = false
+        }
+
+        fun emitIncoming(message: IncomingMessageEnvelope) {
+            event(SessionEvent.Incoming(attemptIdentity, message))
         }
 
         fun emitFailure(operationId: String, peer: String) {

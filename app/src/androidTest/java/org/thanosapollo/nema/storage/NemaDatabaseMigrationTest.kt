@@ -559,6 +559,47 @@ class NemaDatabaseMigrationTest {
     }
 
     @Test
+    fun migration18To19StartsExistingMessagesWithoutLiveReceiptDelivery() {
+        helper.createDatabase(DATABASE_NAME, 18).apply {
+            execSQL(
+                "INSERT INTO accounts (id, bareJid, authenticationId, serviceDomain) " +
+                    "VALUES ('account-a', 'self@example.org', 'self', 'example.org')",
+            )
+            execSQL(
+                "INSERT INTO peers (accountId, jid, room) " +
+                    "VALUES ('account-a', 'peer@example.org', 0)",
+            )
+            execSQL(
+                """
+                INSERT INTO messages (
+                    accountId, localMessageId, peerJid, senderJid, direction,
+                    messageKind, body, localSequence, markable, directSessionTransitionApplied
+                ) VALUES (
+                    'account-a', 'old-message', 'peer@example.org', 'peer@example.org',
+                    'INBOUND', 'CHAT', 'old', 1, 0, 0
+                )
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_NAME,
+            19,
+            true,
+            MessageSchema.MIGRATION_18_19,
+        ).use { database ->
+            database.query(
+                "SELECT liveDeliveryObserved FROM messages WHERE localMessageId = 'old-message'",
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(0, cursor.getInt(0))
+            }
+            assertForeignKeysClean(database)
+        }
+    }
+
+    @Test
     fun migration17To18QuarantinesOnlyPersistedRoomStanzaIds() {
         helper.createDatabase(DATABASE_NAME, 17).apply {
             execSQL(
