@@ -1355,7 +1355,7 @@ internal fun Message.toTrustedCarbonMessage(
 }
 
 private fun Message.hasExactCarbonAuthority(expectedBareJid: String): Boolean =
-    from?.asBareJid()?.toString() == expectedBareJid
+    from?.takeIf { it.isEntityBareJid }?.toString() == expectedBareJid
 
 internal fun List<Message>.haveArchiveAuthority(expectedArchiveAuthority: String): Boolean = all {
     it.from?.asBareJid()?.toString() == expectedArchiveAuthority

@@ -819,10 +819,9 @@ class SmackDirectMessageMapperTest {
             wrapper("peer@example.org", CarbonExtension.Direction.sent, sent)
                 .toTrustedCarbonMessage("account@example.org"),
         )
-        assertEquals(
-            received,
+        assertNull(
             wrapper("account@example.org/other-device", CarbonExtension.Direction.received, received)
-                .toTrustedCarbonMessage("account@example.org")?.message,
+                .toTrustedCarbonMessage("account@example.org"),
         )
         assertNull(
             wrapper("account@example.org", CarbonExtension.Direction.sent, received)
@@ -943,8 +942,7 @@ class SmackDirectMessageMapperTest {
             direct,
         ).classifyOutgoingFailure("account@example.org")
         assertTrue(siblingResource.consumed)
-        assertEquals("operation", siblingResource.failure?.operationId)
-        assertEquals("peer@example.org", siblingResource.failure?.peer)
+        assertNull(siblingResource.failure)
         val wrongRoute = StanzaBuilder.buildMessage("wrong-route")
                 .from(JidCreate.entityBareFrom("peer@example.org"))
                 .to(JidCreate.entityBareFrom("other@example.org"))
