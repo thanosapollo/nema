@@ -509,16 +509,43 @@ class SmackDirectMessageMapperTest {
         assertEquals("incoming", envelope.messageId)
         assertEquals("body", envelope.body)
         assertNull(bodyless.toIncomingEnvelope(attempt, "account@example.org"))
-        val encrypted = StanzaBuilder.buildMessage("encrypted")
-            .from(JidCreate.entityFullFrom("peer@example.org/phone"))
-            .ofType(Message.Type.chat)
-            .addExtension(
-                StandardExtensionElement.builder("encrypted", "eu.siacs.conversations.axolotl").build(),
+    }
+
+    @Test
+    fun `encrypted fallback requires exact user content`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        fun parse(extension: String) = PacketParserUtils.parseStanza(
+            """<message xmlns='jabber:client' from='peer@example.org/device' type='chat'>$extension</message>""",
+        ) as Message
+
+        listOf("eu.siacs.conversations.axolotl", "urn:xmpp:omemo:2").forEach { namespace ->
+            val control = parse("<encrypted xmlns='$namespace'><header sid='1'/></encrypted>")
+            val content = parse(
+                "<encrypted xmlns='$namespace'><header sid='1'/><payload>AA==</payload></encrypted>",
             )
-            .build()
-        val hidden = requireNotNull(encrypted.toIncomingEnvelope(attempt, "account@example.org"))
-        assertEquals("peer@example.org", hidden.peer)
-        assertEquals("Encrypted message", hidden.body)
+            assertNull(control.toIncomingEnvelope(attempt, "account@example.org"))
+            assertEquals(
+                "Encrypted message",
+                requireNotNull(content.toIncomingEnvelope(attempt, "account@example.org")).body,
+            )
+        }
+
+        val wrongElement = parse(
+            "<devices xmlns='urn:xmpp:omemo:2'><payload>AA==</payload></devices>",
+        )
+        val emptyXep27 = parse("<x xmlns='jabber:x:encrypted'/>")
+        val contentXep27 = parse("<x xmlns='jabber:x:encrypted'>ciphertext</x>")
+        assertNull(wrongElement.toIncomingEnvelope(attempt, "account@example.org"))
+        assertNull(emptyXep27.toIncomingEnvelope(attempt, "account@example.org"))
+        assertEquals(
+            "Encrypted message",
+            requireNotNull(contentXep27.toIncomingEnvelope(attempt, "account@example.org")).body,
+        )
     }
 
     @Test

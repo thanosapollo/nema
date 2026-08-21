@@ -1099,10 +1099,16 @@ internal fun Message.toIncomingChatState(
 
 internal fun Message.encryptedMessagePlaceholder(): String? {
     val encrypted = extensions.any { extension ->
-        val namespace = extension.namespace.orEmpty()
-        namespace == "eu.siacs.conversations.axolotl" ||
-            namespace == "jabber:x:encrypted" ||
-            namespace.startsWith("urn:xmpp:omemo:")
+        val element = extension as? StandardExtensionElement ?: return@any false
+        val namespace = element.namespace.orEmpty()
+        when {
+            element.elementName == "encrypted" &&
+                (namespace == "eu.siacs.conversations.axolotl" || namespace.startsWith("urn:xmpp:omemo:")) ->
+                !element.getFirstElement("payload", namespace)?.text.isNullOrEmpty()
+            element.elementName == "x" && namespace == "jabber:x:encrypted" ->
+                !element.text.isNullOrEmpty()
+            else -> false
+        }
     }
     return "Encrypted message".takeIf { encrypted }
 }
