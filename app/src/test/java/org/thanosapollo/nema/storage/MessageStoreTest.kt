@@ -1545,6 +1545,179 @@ class MessageStoreTest {
     }
 
     @Test
+    fun attachmentMetadataEnrichesCompatibleCopiesInEitherOrder() = runBlocking {
+        val store = MessageStore(database)
+        listOf(false, true).forEachIndexed { index, richFirst ->
+            val suffix = if (richFirst) "rich-first" else "sparse-first"
+            val url = "https://example.org/$suffix.jpg"
+            val identity = TrustedIdentityAlias(
+                IdentityAliasKind.ORIGIN_ID,
+                MessageStore.OUTBOUND_ORIGIN_AUTHORITY,
+                "origin-$suffix",
+            )
+            fun attachment(localId: String, rich: Boolean) = incoming(
+                localId = localId,
+                sender = SELF,
+                direction = MessageDirection.OUTBOUND,
+                body = "attachment-$suffix",
+                aliases = listOf(identity),
+            ).copy(
+                attachmentUrl = url,
+                attachmentName = if (rich) "$suffix.jpg" else null,
+                attachmentMime = if (rich) "image/jpeg" else null,
+                attachmentSize = if (rich) 1_024L + index else null,
+            )
+            val sparse = attachment("sparse-$suffix", false)
+            val rich = attachment("rich-$suffix", true)
+            val first = if (richFirst) rich else sparse
+            val second = if (richFirst) sparse else rich
+
+            store.ingest(first)
+            val result = store.ingest(second)
+
+            assertFalse(result.identityConflict)
+            val saved = store.messages(ACCOUNT).single { it.attachmentUrl == url }
+            assertEquals("$suffix.jpg", saved.attachmentName)
+            assertEquals("image/jpeg", saved.attachmentMime)
+            assertEquals(1_024L + index, saved.attachmentSize)
+        }
+        assertTrue(store.conflicts(ACCOUNT).isEmpty())
+    }
+
+    @Test
+    fun conflictingAttachmentMetadataAndUrlsQuarantineIdentity() = runBlocking {
+        data class Variant(
+            val name: String,
+            val change: (IncomingMessage) -> IncomingMessage,
+        )
+        val variants = listOf(
+            Variant("url") { it.copy(attachmentUrl = "https://example.org/other.jpg") },
+            Variant("name") { it.copy(attachmentName = "other.jpg") },
+            Variant("mime") { it.copy(attachmentMime = "image/png") },
+            Variant("size") { it.copy(attachmentSize = 2_048L) },
+        )
+        val store = MessageStore(database)
+        variants.forEach { variant ->
+            val identity = TrustedIdentityAlias(
+                IdentityAliasKind.ORIGIN_ID,
+                MessageStore.OUTBOUND_ORIGIN_AUTHORITY,
+                "origin-${variant.name}",
+            )
+            val first = incoming(
+                localId = "first-${variant.name}",
+                sender = SELF,
+                direction = MessageDirection.OUTBOUND,
+                body = "attachment-${variant.name}",
+                aliases = listOf(identity),
+            ).copy(
+                attachmentUrl = "https://example.org/original.jpg",
+                attachmentName = "original.jpg",
+                attachmentMime = "image/jpeg",
+                attachmentSize = 1_024L,
+            )
+            val second = variant.change(first.copy(localMessageId = "second-${variant.name}"))
+
+            store.ingest(first)
+            val result = store.ingest(second)
+
+            assertTrue(result.identityConflict)
+            assertEquals(
+                setOf("first-${variant.name}", "second-${variant.name}"),
+                store.messages(ACCOUNT)
+                    .filter { it.body == "attachment-${variant.name}" }
+                    .map(MessageEntity::localMessageId)
+                    .toSet(),
+            )
+            val quarantined = store.aliases(ACCOUNT).single { it.value == identity.value }
+            assertEquals(IdentityAliasStatus.QUARANTINED, quarantined.status)
+            assertNull(quarantined.messageId)
+        }
+        assertEquals(variants.size, store.conflicts(ACCOUNT).size)
+    }
+
+    @Test
+    fun sparseBridgePreservesAttachmentMetadataFromRichLoser() = runBlocking {
+        val firstAlias = TrustedIdentityAlias(
+            IdentityAliasKind.ORIGIN_ID,
+            MessageStore.OUTBOUND_ORIGIN_AUTHORITY,
+            "origin-sparse",
+        )
+        val secondAlias = TrustedIdentityAlias(
+            IdentityAliasKind.STANZA_ID,
+            SELF,
+            "stanza-rich",
+        )
+        fun attachment(
+            localId: String,
+            aliases: List<TrustedIdentityAlias>,
+            rich: Boolean,
+        ) = incoming(
+            localId = localId,
+            sender = SELF,
+            direction = MessageDirection.OUTBOUND,
+            body = "bridged attachment",
+            aliases = aliases,
+        ).copy(
+            attachmentUrl = "https://example.org/bridged.jpg",
+            attachmentName = if (rich) "bridged.jpg" else null,
+            attachmentMime = if (rich) "image/jpeg" else null,
+            attachmentSize = if (rich) 1_024L else null,
+        )
+        val store = MessageStore(database)
+        store.ingest(attachment("sparse", listOf(firstAlias), false))
+        store.ingest(attachment("rich", listOf(secondAlias), true))
+
+        val result = store.ingest(attachment("bridge", listOf(firstAlias, secondAlias), false))
+
+        assertEquals("sparse", result.messageId)
+        assertEquals(1, result.mergedRows)
+        assertFalse(result.identityConflict)
+        val saved = store.messages(ACCOUNT).single()
+        assertEquals("bridged.jpg", saved.attachmentName)
+        assertEquals("image/jpeg", saved.attachmentMime)
+        assertEquals(1_024L, saved.attachmentSize)
+    }
+
+    @Test
+    fun sparseBridgeDoesNotMergeConflictingAttachmentMetadata() = runBlocking {
+        val firstAlias = TrustedIdentityAlias(
+            IdentityAliasKind.ORIGIN_ID,
+            MessageStore.OUTBOUND_ORIGIN_AUTHORITY,
+            "origin-first",
+        )
+        val secondAlias = TrustedIdentityAlias(
+            IdentityAliasKind.STANZA_ID,
+            SELF,
+            "stanza-second",
+        )
+        fun attachment(
+            localId: String,
+            aliases: List<TrustedIdentityAlias>,
+            name: String?,
+        ) = incoming(
+            localId = localId,
+            sender = SELF,
+            direction = MessageDirection.OUTBOUND,
+            body = "bridged attachment",
+            aliases = aliases,
+        ).copy(
+            attachmentUrl = "https://example.org/bridged.jpg",
+            attachmentName = name,
+        )
+        val store = MessageStore(database)
+        store.ingest(attachment("first", listOf(firstAlias), "first.jpg"))
+        store.ingest(attachment("second", listOf(secondAlias), "second.jpg"))
+
+        val result = store.ingest(attachment("bridge", listOf(firstAlias, secondAlias), null))
+
+        assertTrue(result.identityConflict)
+        assertEquals(setOf("first", "second"), store.messages(ACCOUNT).map { it.localMessageId }.toSet())
+        val quarantined = store.aliases(ACCOUNT).single { it.value == secondAlias.value }
+        assertEquals(IdentityAliasStatus.QUARANTINED, quarantined.status)
+        assertNull(quarantined.messageId)
+    }
+
+    @Test
     fun dependentReparentFaultRollsBackWholeMerge() = runBlocking {
         val firstAlias = alias("first")
         val secondAlias = alias("second")

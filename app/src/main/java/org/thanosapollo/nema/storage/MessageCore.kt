@@ -1956,6 +1956,11 @@ class MessageStore private constructor(
         winner = reconcileCorrections(dao, incoming, winner)
         val reconciled = winner
             .withPreferredTime(incoming.sentAtEpochMs, incoming.sentTimeSource)
+            .withAttachmentMetadata(
+                incoming.attachmentName,
+                incoming.attachmentMime,
+                incoming.attachmentSize,
+            )
             .withMarkerMetadata(incoming)
         if (reconciled != winner) {
             dao.updateMessage(reconciled)
@@ -2698,6 +2703,11 @@ class MessageStore private constructor(
         incoming: IncomingMessage,
     ): Boolean {
         if (!first.isCompatibleWith(incoming) || !second.isCompatibleWith(incoming)) return false
+        if (first.attachmentUrl != second.attachmentUrl ||
+            !optionalMetadataMatches(first.attachmentName, second.attachmentName) ||
+            !optionalMetadataMatches(first.attachmentMime, second.attachmentMime) ||
+            !optionalMetadataMatches(first.attachmentSize, second.attachmentSize)
+        ) return false
         val archivePositions = (
             database.messageDao().archivePositions(first.accountId, first.localMessageId) +
                 database.messageDao().archivePositions(second.accountId, second.localMessageId)
@@ -2736,7 +2746,9 @@ class MessageStore private constructor(
         } else {
             withArchive
         }
-        val reconciled = withTransition.withPreferredTime(loser.sentAtEpochMs, loser.sentTimeSource)
+        val reconciled = withTransition
+            .withPreferredTime(loser.sentAtEpochMs, loser.sentTimeSource)
+            .withAttachmentMetadata(loser.attachmentName, loser.attachmentMime, loser.attachmentSize)
         if (reconciled != winner) dao.updateMessage(reconciled)
         return reconciled
     }
@@ -3070,6 +3082,9 @@ private fun MessageEntity.matches(intent: OutboundIntent): Boolean =
         replaceId == intent.replaceId &&
         correctionTargetMessageId == intent.correctionTargetMessageId
 
+private fun <T> optionalMetadataMatches(first: T?, second: T?): Boolean =
+    first == null || second == null || first == second
+
 private fun MessageEntity.isCompatibleWith(incoming: IncomingMessage): Boolean =
     accountId == incoming.accountId &&
         peerJid == incoming.peerJid &&
@@ -3083,9 +3098,9 @@ private fun MessageEntity.isCompatibleWith(incoming: IncomingMessage): Boolean =
         parentThreadId == incoming.parentThreadId &&
         body == incoming.body &&
         attachmentUrl == incoming.attachmentUrl &&
-        attachmentName == incoming.attachmentName &&
-        attachmentMime == incoming.attachmentMime &&
-        attachmentSize == incoming.attachmentSize &&
+        optionalMetadataMatches(attachmentName, incoming.attachmentName) &&
+        optionalMetadataMatches(attachmentMime, incoming.attachmentMime) &&
+        optionalMetadataMatches(attachmentSize, incoming.attachmentSize) &&
         replyToId == incoming.replyToId &&
         replyToJid == incoming.replyToJid &&
         replaceId == incoming.replaceId
@@ -3135,6 +3150,16 @@ private fun IncomingMessage.withStoredTime(clock: () -> Long): IncomingMessage =
         sentAtEpochMs = clock(),
         sentTimeSource = MessageTimeSource.LOCAL,
     )
+
+private fun MessageEntity.withAttachmentMetadata(
+    name: String?,
+    mime: String?,
+    size: Long?,
+): MessageEntity = copy(
+    attachmentName = attachmentName ?: name,
+    attachmentMime = attachmentMime ?: mime,
+    attachmentSize = attachmentSize ?: size,
+)
 
 private fun MessageEntity.withPreferredTime(
     candidateTime: Long?,
