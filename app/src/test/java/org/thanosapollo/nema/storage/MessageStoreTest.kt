@@ -3417,7 +3417,7 @@ class MessageStoreTest {
     }
 
     @Test
-    fun roomMamResultIdsNeverBecomeReplyTargetsWithoutRoomStanzaId() = runBlocking {
+    fun roomMamResultAndPersistedStanzaIdsNeverBecomeReplyTargetsWithoutRoomAuthority() = runBlocking {
         val room = "room@conference.example.org"
         val key = ArchiveCursorKey(ACCOUNT, room, room)
         fun roomMessage(localId: String, body: String, aliases: List<TrustedIdentityAlias>) =
@@ -3455,7 +3455,7 @@ class MessageStoreTest {
         )
 
         val timeline = database.messageDao().observeDirectTimeline(ACCOUNT, room).first()
-        assertEquals(listOf(null, "room-stanza-id"), timeline.map { it.replyReferenceId })
+        assertEquals(listOf(null, null), timeline.map { it.replyReferenceId })
         assertEquals(
             setOf(IdentityAliasKind.MAM_RESULT),
             database.messageDao().trustedAliases(ACCOUNT)

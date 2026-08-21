@@ -1215,9 +1215,7 @@ internal fun Message.toIncomingEnvelope(
             originId = getExtension(OriginIdElement::class.java)?.id,
             body = messageBody,
             thread = toThreadRef(),
-            stanzaIds = getExtensions(StanzaIdElement::class.java)
-                .filter { it.by == room }
-                .map { StanzaIdEnvelope(it.id, it.by) },
+            stanzaIds = emptyList(),
             kind = MessageKind.GROUPCHAT,
             attachmentUrl = share?.url,
             attachmentName = share?.description,

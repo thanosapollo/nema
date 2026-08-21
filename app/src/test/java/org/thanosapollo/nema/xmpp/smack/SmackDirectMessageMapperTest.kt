@@ -676,7 +676,7 @@ class SmackDirectMessageMapperTest {
     }
 
     @Test
-    fun `groupchat trusts only room issued stanza ID for reply references`() {
+    fun `groupchat ignores stanza IDs without room capability authority`() {
         val attempt = SessionAttemptIdentity(
             AccountId.require("account"),
             ConnectionGeneration.require(4),
@@ -691,10 +691,15 @@ class SmackDirectMessageMapperTest {
             .addExtension(StanzaIdElement("foreign", "archive.example.org"))
             .build()
 
-        val envelope = requireNotNull(message.toIncomingEnvelope(attempt, "account@example.org"))
+        val envelope = requireNotNull(
+            message.toIncomingEnvelope(
+                attempt,
+                "account@example.org",
+                trustedStableIdAuthority = true,
+            ),
+        )
 
-        assertEquals(listOf("room-issued"), envelope.stanzaIds.map { it.id })
-        assertEquals(listOf("room@conference.example.org"), envelope.stanzaIds.map { it.by })
+        assertTrue(envelope.stanzaIds.isEmpty())
     }
 
     @Test

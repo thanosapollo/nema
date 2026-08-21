@@ -766,14 +766,8 @@ abstract class MessageDao {
             WHERE alias.accountId = messages.accountId
               AND alias.messageId = messages.localMessageId
               AND alias.status = 'TRUSTED'
-              AND (
-                (messages.messageKind = 'GROUPCHAT'
-                  AND alias.kind = 'STANZA_ID'
-                  AND alias.authority = messages.peerJid)
-                OR
-                (messages.messageKind != 'GROUPCHAT'
-                  AND alias.kind IN ('ORIGIN_ID', 'MESSAGE_ID'))
-              )
+              AND messages.messageKind != 'GROUPCHAT'
+              AND alias.kind IN ('ORIGIN_ID', 'MESSAGE_ID')
             ORDER BY CASE alias.kind WHEN 'ORIGIN_ID' THEN 0 ELSE 1 END, alias.value
             LIMIT 1
           ) AS replyReferenceId,

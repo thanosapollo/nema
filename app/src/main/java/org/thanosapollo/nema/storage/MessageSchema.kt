@@ -5,6 +5,25 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 internal object MessageSchema {
+    val MIGRATION_17_18: Migration = object : Migration(17, 18) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                """
+                UPDATE trusted_identity_aliases
+                SET status = 'QUARANTINED', messageId = NULL
+                WHERE kind = 'STANZA_ID'
+                  AND status = 'TRUSTED'
+                  AND EXISTS (
+                    SELECT 1 FROM messages
+                    WHERE messages.accountId = trusted_identity_aliases.accountId
+                      AND messages.localMessageId = trusted_identity_aliases.messageId
+                      AND messages.messageKind = 'GROUPCHAT'
+                  )
+                """.trimIndent(),
+            )
+        }
+    }
+
     val MIGRATION_16_17: Migration = object : Migration(16, 17) {
         override fun migrate(db: SupportSQLiteDatabase) {
             db.execSQL(

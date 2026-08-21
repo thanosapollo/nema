@@ -558,6 +558,82 @@ class NemaDatabaseMigrationTest {
         }
     }
 
+    @Test
+    fun migration17To18QuarantinesOnlyPersistedRoomStanzaIds() {
+        helper.createDatabase(DATABASE_NAME, 17).apply {
+            execSQL(
+                "INSERT INTO accounts (id, bareJid, authenticationId, serviceDomain) " +
+                    "VALUES ('account-a', 'self@example.org', 'self', 'example.org')",
+            )
+            execSQL(
+                """
+                INSERT INTO peers (accountId, jid, room)
+                VALUES
+                    ('account-a', 'peer@example.org', 0),
+                    ('account-a', 'room@conference.example.org', 1)
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO messages (
+                    accountId, localMessageId, peerJid, senderJid, direction,
+                    messageKind, body, localSequence, markable, directSessionTransitionApplied
+                ) VALUES
+                    ('account-a', 'direct-message', 'peer@example.org', 'peer@example.org',
+                        'INBOUND', 'CHAT', 'direct', 1, 0, 0),
+                    ('account-a', 'room-message', 'room@conference.example.org',
+                        'room@conference.example.org/alice', 'INBOUND', 'GROUPCHAT', 'room', 2, 0, 0)
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO trusted_identity_aliases (
+                    accountId, kind, authority, value, messageId, status
+                ) VALUES
+                    ('account-a', 'STANZA_ID', 'self@example.org', 'direct-stanza',
+                        'direct-message', 'TRUSTED'),
+                    ('account-a', 'ORIGIN_ID', 'room@conference.example.org', 'room-origin',
+                        'room-message', 'TRUSTED'),
+                    ('account-a', 'STANZA_ID', 'room@conference.example.org', 'room-stanza',
+                        'room-message', 'TRUSTED')
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_NAME,
+            18,
+            true,
+            MessageSchema.MIGRATION_17_18,
+        ).use { database ->
+            database.query(
+                """
+                SELECT value, status, messageId
+                FROM trusted_identity_aliases
+                ORDER BY value
+                """.trimIndent(),
+            ).use { cursor ->
+                assertTrue(cursor.moveToNext())
+                assertEquals("direct-stanza", cursor.getString(0))
+                assertEquals("TRUSTED", cursor.getString(1))
+                assertEquals("direct-message", cursor.getString(2))
+
+                assertTrue(cursor.moveToNext())
+                assertEquals("room-origin", cursor.getString(0))
+                assertEquals("TRUSTED", cursor.getString(1))
+                assertEquals("room-message", cursor.getString(2))
+
+                assertTrue(cursor.moveToNext())
+                assertEquals("room-stanza", cursor.getString(0))
+                assertEquals("QUARANTINED", cursor.getString(1))
+                assertTrue(cursor.isNull(2))
+                assertTrue(!cursor.moveToNext())
+            }
+            assertForeignKeysClean(database)
+        }
+    }
+
     private fun assertTableEmpty(database: androidx.sqlite.db.SupportSQLiteDatabase, table: String) {
         database.query("SELECT COUNT(*) FROM $table").use { cursor ->
             assertTrue(cursor.moveToFirst())
