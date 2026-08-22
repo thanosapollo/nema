@@ -15,6 +15,7 @@ import org.thanosapollo.nema.ui.theme.AppearanceRepository
 import org.thanosapollo.nema.ui.MessagingPreferencesRepository
 import org.thanosapollo.nema.xmpp.smack.SmackAndroid
 import org.thanosapollo.nema.xmpp.smack.installNemaMamResultProvider
+import org.thanosapollo.nema.xmpp.smack.installNemaMucUserProvider
 
 class NemaApplication : Application() {
     val processToken: String = UUID.randomUUID().toString()
@@ -33,6 +34,7 @@ class NemaApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         SmackAndroid.initialize(applicationContext)
+        installNemaMucUserProvider()
         installNemaMamResultProvider()
         database = NemaDatabase.create(applicationContext)
         val accounts = AccountRepository(database.accountDao())

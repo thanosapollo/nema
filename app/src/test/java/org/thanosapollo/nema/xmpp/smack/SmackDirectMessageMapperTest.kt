@@ -68,6 +68,7 @@ class SmackDirectMessageMapperTest {
     @Before
     fun initializeSmack() {
         SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
+        installNemaMucUserProvider()
         installNemaReplyProviders()
         installNemaChatMarkerProviders()
         installNemaChatStateProviders()
@@ -758,6 +759,89 @@ class SmackDirectMessageMapperTest {
                 ),
             ).outbound,
         )
+    }
+
+    @Test
+    fun `groupchat archive actor authority fails closed on ambiguous raw MUC items`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        fun archivedMuc(mucXml: String): Message = requireNotNull(
+            NemaMamResultProvider.parse(
+                PacketParserUtils.getParserFor(
+                    """
+                    <result xmlns='urn:xmpp:mam:2' queryid='query' id='uid'>
+                      <forwarded xmlns='urn:xmpp:forward:0'>
+                        <delay xmlns='urn:xmpp:delay' stamp='2026-08-10T10:00:00Z'/>
+                        <message xmlns='jabber:client'
+                            from='room@conference.example.org/OldNick'
+                            type='groupchat'>
+                          <body>body</body>
+                          $mucXml
+                        </message>
+                      </forwarded>
+                    </result>
+                    """.trimIndent(),
+                ),
+            ).actualMessage,
+        )
+        fun archived(vararg actorJids: String): Message {
+            val items = actorJids.joinToString("") { "<item affiliation='member' jid='$it'/>" }
+            return archivedMuc("<x xmlns='http://jabber.org/protocol/muc#user'>$items</x>")
+        }
+        fun outbound(message: Message, source: MessageTimeSource = MessageTimeSource.MAM) =
+            requireNotNull(
+                message.toIncomingEnvelope(
+                    attempt,
+                    "account@example.org",
+                    ownRoomNick = "CurrentNick",
+                    suppliedSentAtEpochMs = 1_000,
+                    suppliedSentTimeSource = source,
+                ),
+            ).outbound
+
+        assertTrue(outbound(archived("account@example.org")))
+        assertFalse(outbound(archived("other@example.org", "account@example.org")))
+        assertFalse(outbound(archived("example.org")))
+        assertFalse(outbound(archived("other@example.org")))
+        assertFalse(
+            outbound(
+                archivedMuc(
+                    """
+                    <x xmlns='http://jabber.org/protocol/muc#user'>
+                      <item xmlns='urn:example:foreign' affiliation='member' jid='account@example.org'/>
+                    </x>
+                    """.trimIndent(),
+                ),
+            ),
+        )
+        assertFalse(outbound(archived("account@example.org"), MessageTimeSource.DELAYED))
+        assertFalse(
+            outbound(
+                archivedMuc(
+                    """
+                    <x xmlns='http://jabber.org/protocol/muc#user'>
+                      <unknown><item affiliation='member' jid='account@example.org'/></unknown>
+                    </x>
+                    """.trimIndent(),
+                ),
+            ),
+        )
+
+        val duplicateOuter = archivedMuc(
+            """
+            <x xmlns='http://jabber.org/protocol/muc#user'>
+              <item affiliation='member' jid='account@example.org'/>
+            </x>
+            <x xmlns='http://jabber.org/protocol/muc#user'>
+              <item affiliation='member' jid='account@example.org'/>
+            </x>
+            """.trimIndent(),
+        )
+        assertFalse(outbound(duplicateOuter))
     }
 
     @Test

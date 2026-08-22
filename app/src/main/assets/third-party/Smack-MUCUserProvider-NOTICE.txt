@@ -1,0 +1,10 @@
+Smack MUCUserProvider
+
+Copyright 2003-2007 Jive Software.
+Original author: Gaston Dombiak.
+Source: Smack 4.4.8, smack-extensions MUCUserProvider.java.
+License: Apache License, Version 2.0; see Apache-2.0.txt in this directory.
+
+The provider was modified by Nema in 2026 and rewritten in Kotlin to preserve
+MUC user item cardinality and enforce direct-child namespace/depth checks for
+fail-closed archived-message attribution.

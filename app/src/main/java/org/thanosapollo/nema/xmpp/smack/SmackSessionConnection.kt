@@ -141,6 +141,7 @@ class SmackSessionConnectionFactory : SessionConnectionFactory {
         identity: SessionIdentity,
         event: (SessionEvent) -> Unit,
     ): SessionConnection {
+        requireNemaMucUserProvider()
         requireNemaMamResultProvider()
         installNemaReplyProviders()
         installNemaChatMarkerProviders()
@@ -1157,6 +1158,16 @@ internal fun Message.toIncomingReaction(
     )
 }
 
+private fun Message.mucActorBareJid(): String? = extensions
+    .filterIsInstance<NemaMucUser>()
+    .singleOrNull()
+    ?.takeIf { it.itemCount == 1 }
+    ?.item
+    ?.jid
+    ?.asBareJid()
+    ?.takeIf { it.isEntityBareJid }
+    ?.toString()
+
 internal fun Message.toIncomingEnvelope(
     attempt: SessionAttemptIdentity,
     expectedBareJid: String,
@@ -1211,7 +1222,8 @@ internal fun Message.toIncomingEnvelope(
             generation = attempt.generation,
             peer = room,
             sender = occupant,
-            outbound = occupantNick != null && occupantNick == ownRoomNick,
+            outbound = (occupantNick != null && occupantNick == ownRoomNick) ||
+                (sentTimeSource == MessageTimeSource.MAM && mucActorBareJid() == expectedBareJid),
             originId = getExtension(OriginIdElement::class.java)?.id,
             body = messageBody,
             thread = toThreadRef(),

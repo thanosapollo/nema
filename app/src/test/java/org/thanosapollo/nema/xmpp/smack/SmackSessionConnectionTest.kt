@@ -160,6 +160,7 @@ class SmackSessionConnectionTest {
     @Test
     fun `revoked connection rejects connect before network entry`() = runBlocking {
         SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
+        installNemaMucUserProvider()
         installNemaMamResultProvider()
         val accountId = AccountId.require("account")
         val identity = SessionIdentity(accountId, ConnectionGeneration.require(1))
@@ -195,6 +196,7 @@ class SmackSessionConnectionTest {
     @Test
     fun `production disables stream management and registers only blocking message listener`() {
         SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
+        installNemaMucUserProvider()
         installNemaMamResultProvider()
         val accountId = AccountId.require("account")
         val session = SmackSessionConnectionFactory().create(
