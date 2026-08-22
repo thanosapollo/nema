@@ -486,6 +486,15 @@ abstract class MessageDao {
         """
         SELECT * FROM archive_message_positions
         WHERE accountId = :accountId
+        ORDER BY messageId, archiveAuthority, archiveScope, archiveOrdinal
+        """,
+    )
+    abstract suspend fun archivePositions(accountId: String): List<ArchiveMessagePositionEntity>
+
+    @Query(
+        """
+        SELECT * FROM archive_message_positions
+        WHERE accountId = :accountId
           AND archiveAuthority = :archiveAuthority
           AND archiveScope = :archiveScope
         ORDER BY archiveOrdinal, messageId
@@ -2733,6 +2742,50 @@ class MessageStore private constructor(
         val mam = dao.message(closure.key.accountId, pair.mamMessageId) ?: return
         mergePair(live, mam)
     }
+
+    suspend fun repairIdentitylessDuplicates(accountId: String): AccountReconciliationStateEntity? =
+        database.withTransaction {
+            val accountDao = database.accountDao()
+            val state = accountDao.reconciliationState(accountId) ?: return@withTransaction null
+            if (state.status == ReconciliationRepairStatus.COMPLETE) return@withTransaction state
+            val dao = database.messageDao()
+            val messages = dao.messages(accountId)
+            val aliases = dao.trustedAliases(accountId)
+                .filter { it.status == IdentityAliasStatus.TRUSTED && it.messageId != null }
+                .groupBy(TrustedIdentityAliasEntity::messageId)
+            val positions = dao.archivePositions(accountId).groupBy(ArchiveMessagePositionEntity::messageId)
+            val outboxIds = dao.outboxes(accountId).mapTo(mutableSetOf(), OutboxEntity::messageId)
+            val conflictIds = dao.conflicts(accountId)
+                .flatMapTo(mutableSetOf()) { listOf(it.firstMessageId, it.secondMessageId) }
+            val candidates = messages.map { message ->
+                IdentitylessReconciliationCandidate(
+                    message,
+                    aliases[message.localMessageId].orEmpty(),
+                    positions[message.localMessageId].orEmpty(),
+                    message.localMessageId in outboxIds,
+                    message.localMessageId in conflictIds,
+                )
+            }
+            val plan = requireNotNull(identitylessRepairPlan(candidates)) {
+                "Identityless repair candidate IDs are not unique"
+            }
+            plan.pairs.forEach { pair ->
+                val live = requireNotNull(dao.message(accountId, pair.liveMessageId))
+                val mam = requireNotNull(dao.message(accountId, pair.mamMessageId))
+                mergePair(live, mam)
+            }
+            val afterCount = dao.messages(accountId).size.toLong()
+            check(
+                accountDao.completeReconciliationState(
+                    accountId,
+                    messages.size.toLong(),
+                    afterCount,
+                    plan.pairs.size.toLong(),
+                    plan.skippedComponents.toLong(),
+                ) == 1,
+            ) { "Identityless repair state changed during repair" }
+            requireNotNull(accountDao.reconciliationState(accountId))
+        }
 
     suspend fun claim(accountId: String, operationId: String, generation: Long): OutboxClaim? {
         require(generation > 0) { "Connection generation must be positive" }
