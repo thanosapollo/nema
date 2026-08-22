@@ -49,7 +49,7 @@ class IdentitylessRepairTest {
         store.ingest(incoming("ambiguous-live", "ambiguous", MessageTimeSource.LOCAL))
         store.applyArchivePage(
             page(
-                archived("unique-result", "unique-mam", "unique"),
+                archived("unique-result", "unique-mam", "unique", 1_500),
                 archived("ambiguous-result-1", "ambiguous-mam-1", "ambiguous"),
                 archived("ambiguous-result-2", "ambiguous-mam-2", "ambiguous"),
             ),
@@ -64,6 +64,7 @@ class IdentitylessRepairTest {
                 IdentityAliasStatus.QUARANTINED,
             ),
         )
+        val cursorBefore = requireNotNull(store.archiveCursor(ArchiveCursorKey(ACCOUNT, "account@example.org", "ACCOUNT")))
 
         val state = requireNotNull(store.repairIdentitylessDuplicates(ACCOUNT))
 
@@ -76,7 +77,109 @@ class IdentitylessRepairTest {
             setOf("unique-live", "ambiguous-live", "ambiguous-mam-1", "ambiguous-mam-2"),
             store.messages(ACCOUNT).map(MessageEntity::localMessageId).toSet(),
         )
+        val winner = requireNotNull(database.messageDao().message(ACCOUNT, "unique-live"))
+        assertEquals(1L, winner.localSequence)
+        assertEquals(1_500L, winner.sentAtEpochMs)
+        assertEquals(MessageTimeSource.MAM, winner.sentTimeSource)
+        assertTrue(winner.liveDeliveryObserved)
+        assertEquals(
+            listOf(0L),
+            store.archivePositions(ACCOUNT, "unique-live").map(ArchiveMessagePositionEntity::archiveOrdinal),
+        )
+        assertEquals(
+            "unique-live",
+            store.aliases(ACCOUNT).single {
+                it.kind == IdentityAliasKind.MAM_RESULT &&
+                    it.authority == ArchiveCursorKey(ACCOUNT, "account@example.org", "ACCOUNT").aliasAuthority() &&
+                    it.value == "unique-result" &&
+                    it.status == IdentityAliasStatus.TRUSTED
+            }.messageId,
+        )
+        assertEquals(
+            cursorBefore,
+            store.archiveCursor(ArchiveCursorKey(ACCOUNT, "account@example.org", "ACCOUNT")),
+        )
+        database.openHelper.writableDatabase.query("PRAGMA foreign_key_check").use {
+            assertTrue(!it.moveToFirst())
+        }
+        database.openHelper.writableDatabase.query("PRAGMA integrity_check").use {
+            assertTrue(it.moveToFirst())
+            assertEquals("ok", it.getString(0))
+        }
         assertEquals(state, store.repairIdentitylessDuplicates(ACCOUNT))
+    }
+
+    @Test
+    fun repairReparentsCorrectionsAndReactions() = runBlocking {
+        val store = MessageStore(database, clock = { 1_000 })
+        store.ingest(incoming("live", "same", MessageTimeSource.LOCAL))
+        store.applyArchivePage(page(archived("result", "mam", "same")))
+        store.ingest(incoming("correction", "edited", MessageTimeSource.LOCAL))
+        val dao = database.messageDao()
+        val correction = requireNotNull(dao.message(ACCOUNT, "correction"))
+        dao.updateMessage(correction.copy(correctionTargetMessageId = "mam"))
+        dao.upsertMessageReaction(
+            MessageReactionEntity(
+                ACCOUNT,
+                PEER,
+                PEER,
+                reactionTargetKey("mam", "wire"),
+                "mam",
+                "wire",
+                "😀",
+                2_000,
+            ),
+        )
+
+        store.repairIdentitylessDuplicates(ACCOUNT)
+
+        assertEquals("live", dao.message(ACCOUNT, "correction")?.correctionTargetMessageId)
+        assertEquals("live", dao.messageReactions(ACCOUNT, PEER).single().localMessageId)
+    }
+
+    @Test
+    fun outboxAndConflictCandidatesRemainUntouched() = runBlocking {
+        val store = MessageStore(database, clock = { 1_000 })
+        store.ingest(incoming("outbox-live", "outbox", MessageTimeSource.LOCAL))
+        store.ingest(incoming("conflict-live", "conflict", MessageTimeSource.LOCAL))
+        store.applyArchivePage(
+            page(
+                archived("outbox-result", "outbox-mam", "outbox"),
+                archived("conflict-result", "conflict-mam", "conflict"),
+            ),
+        )
+        val dao = database.messageDao()
+        dao.insertOutbox(
+            OutboxEntity(
+                ACCOUNT,
+                "operation",
+                "outbox-live",
+                "origin",
+                OutboxStatus.PENDING,
+                null,
+                0,
+                null,
+            ),
+        )
+        dao.insertConflict(
+            IdentityConflictEntity(
+                ACCOUNT,
+                IdentityAliasKind.MAM_RESULT,
+                "authority",
+                "conflict",
+                "conflict-live",
+                "conflict-mam",
+                4,
+            ),
+        )
+
+        val state = requireNotNull(store.repairIdentitylessDuplicates(ACCOUNT))
+
+        assertEquals(4, store.messages(ACCOUNT).size)
+        assertEquals(0L, state.matchedCount)
+        assertEquals(0L, state.skippedCount)
+        assertEquals("outbox-live", dao.outbox(ACCOUNT, "operation")?.messageId)
+        assertEquals(1, dao.conflicts(ACCOUNT).size)
     }
 
     @Test
@@ -116,7 +219,12 @@ class IdentitylessRepairTest {
         )
     }
 
-    private fun incoming(id: String, body: String, source: MessageTimeSource) = IncomingMessage(
+    private fun incoming(
+        id: String,
+        body: String,
+        source: MessageTimeSource,
+        sentAtMs: Long = 1_000,
+    ) = IncomingMessage(
         accountId = ACCOUNT,
         localMessageId = id,
         peerJid = PEER,
@@ -128,13 +236,18 @@ class IdentitylessRepairTest {
         body = body,
         archiveOrdinal = null,
         aliases = emptyList(),
-        sentAtEpochMs = 1_000,
+        sentAtEpochMs = sentAtMs,
         sentTimeSource = source,
     )
 
-    private fun archived(resultId: String, id: String, body: String) = ArchivedIncomingMessage(
+    private fun archived(
+        resultId: String,
+        id: String,
+        body: String,
+        sentAtMs: Long = 1_000,
+    ) = ArchivedIncomingMessage(
         resultId,
-        incoming(id, body, MessageTimeSource.MAM),
+        incoming(id, body, MessageTimeSource.MAM, sentAtMs),
     )
 
     private fun page(vararg messages: ArchivedIncomingMessage) = ArchivePage(
