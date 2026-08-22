@@ -709,6 +709,7 @@ abstract class MessageDao {
               AND unread.peerJid = messages.peerJid
               AND unread.direction = 'INBOUND'
               AND unread.replaceId IS NULL
+              AND unread.unreadEligible = 1
               AND unread.localSequence > COALESCE(peers.lastReadLocalSequence, 0)
           ) AS unreadCount
         FROM latest_messages AS messages
@@ -1424,6 +1425,7 @@ data class IncomingMessage(
     val markable: Boolean = false,
     val markerTargetId: String? = null,
     val replaceId: String? = null,
+    val unreadEligible: Boolean = true,
 ) {
     init {
         require(accountId.isNotEmpty()) { "Account ID must not be empty" }
@@ -1967,6 +1969,7 @@ class MessageStore private constructor(
             )
             .withMarkerMetadata(incoming)
             .withLiveDeliveryObserved(liveDelivery)
+            .withUnreadEligible(incoming.unreadEligible)
         if (reconciled != winner) {
             dao.updateMessage(reconciled)
             winner = reconciled
@@ -2510,7 +2513,11 @@ class MessageStore private constructor(
             )
             val aliases = (message.aliases + archiveAlias).distinct()
             val result = ingestInTransaction(
-                message.withoutArchivePosition().copy(aliases = aliases),
+                message.withoutArchivePosition().copy(
+                    aliases = aliases,
+                    unreadEligible = page.direction == ArchiveDirection.AFTER &&
+                        archived.resultId != page.boundaryId,
+                ),
                 preserveStoredThreadLineage = true,
                 allowDirectSessionTransition = false,
                 advanceOutboundLastRead = page.direction != ArchiveDirection.BEFORE,
@@ -2759,6 +2766,7 @@ class MessageStore private constructor(
         }
         val reconciled = withTransition
             .withLiveDeliveryObserved(loser.liveDeliveryObserved)
+            .withUnreadEligible(loser.unreadEligible)
             .withPreferredTime(loser.sentAtEpochMs, loser.sentTimeSource)
             .withAttachmentMetadata(loser.attachmentName, loser.attachmentMime, loser.attachmentSize)
         if (reconciled != winner) dao.updateMessage(reconciled)
@@ -3069,6 +3077,7 @@ private fun IncomingMessage.toEntity(localSequence: Long) = MessageEntity(
     markable = markable,
     markerTargetId = markerTargetId,
     replaceId = replaceId,
+    unreadEligible = unreadEligible,
 )
 
 private fun TrustedIdentityAlias.toEntity(accountId: String, messageId: String) =
@@ -3199,6 +3208,9 @@ private fun MessageEntity.withPreferredTime(
 
 private fun MessageEntity.withLiveDeliveryObserved(observed: Boolean): MessageEntity =
     if (observed && !liveDeliveryObserved) copy(liveDeliveryObserved = true) else this
+
+private fun MessageEntity.withUnreadEligible(eligible: Boolean): MessageEntity =
+    if (eligible && !unreadEligible) copy(unreadEligible = true) else this
 
 private fun MessageEntity.withMarkerMetadata(incoming: IncomingMessage): MessageEntity =
     if (!markable && incoming.markable) {

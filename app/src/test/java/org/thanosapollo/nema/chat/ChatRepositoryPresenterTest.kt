@@ -114,6 +114,17 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
+    fun historicalMamRowsStayReadInCachedAndObservedConversations() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(incoming(ACCOUNT, "history", "history").copy(unreadEligible = false))
+        store.ingest(incoming(ACCOUNT, "live", "live"))
+        val repository = ChatRepository(database)
+
+        assertEquals(1, repository.cachedConversations(ACCOUNT).single().unreadCount)
+        assertEquals(1, repository.observeConversations(ACCOUNT).first().single().unreadCount)
+    }
+
+    @Test
     fun openingChatClearsUnreadAndSelectedPeerDoesNotAutoReadLaterInbound() = runBlocking {
         val store = MessageStore(database)
         store.ingest(incoming(ACCOUNT, "first", "first body"))

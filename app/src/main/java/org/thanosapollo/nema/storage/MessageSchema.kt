@@ -5,6 +5,33 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 internal object MessageSchema {
+    val MIGRATION_19_20: Migration = object : Migration(19, 20) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL(
+                "ALTER TABLE messages ADD COLUMN unreadEligible INTEGER NOT NULL DEFAULT 1",
+            )
+            db.execSQL(
+                """
+                UPDATE messages SET unreadEligible = 0
+                WHERE direction = 'INBOUND'
+                  AND (
+                    (sentTimeSource = 'MAM' AND liveDeliveryObserved = 0)
+                    OR (
+                      (sentTimeSource IS NULL OR sentTimeSource != 'MAM')
+                      AND EXISTS (
+                        SELECT 1 FROM trusted_identity_aliases AS alias
+                        WHERE alias.accountId = messages.accountId
+                          AND alias.messageId = messages.localMessageId
+                          AND alias.kind = 'MAM_RESULT'
+                          AND alias.status = 'TRUSTED'
+                      )
+                    )
+                  )
+                """.trimIndent(),
+            )
+        }
+    }
+
     val MIGRATION_18_19: Migration = object : Migration(18, 19) {
         override fun migrate(db: SupportSQLiteDatabase) {
             db.execSQL(

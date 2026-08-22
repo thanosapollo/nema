@@ -210,6 +210,8 @@ data class MessageEntity(
     val correctionTargetMessageId: String? = null,
     val directSessionTransitionApplied: Boolean = false,
     val liveDeliveryObserved: Boolean = false,
+    @ColumnInfo(defaultValue = "1")
+    val unreadEligible: Boolean = true,
 )
 
 @Entity(

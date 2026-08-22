@@ -368,6 +368,56 @@ class MessageStoreTest {
     }
 
     @Test
+    fun onlyLiveAndForwardCatchUpInboundMessagesCountAsUnread() = runBlocking {
+        val store = MessageStore(database)
+        val liveAlias = stanzaAlias("live")
+        store.ingest(incoming(localId = "live", body = "live", aliases = listOf(liveAlias)))
+        val key = archiveKey(ACCOUNT)
+
+        store.applyArchivePage(
+            archivePage(
+                key = key,
+                direction = ArchiveDirection.BOOTSTRAP,
+                complete = true,
+                hasEarlier = true,
+                messages = listOf(
+                    archived("r1", "history", "history", stanzaAlias("history")),
+                    archived("r2", "live-copy", "live", liveAlias),
+                    archived("r3", "boundary", "boundary", stanzaAlias("boundary")),
+                ),
+            ),
+        )
+        assertEquals(1, database.messageDao().observeConversationSummaries(ACCOUNT).first().single().unreadCount)
+
+        store.applyArchivePage(
+            archivePage(
+                key = key,
+                direction = ArchiveDirection.AFTER,
+                boundaryId = "r3",
+                complete = true,
+                hasEarlier = true,
+                messages = listOf(
+                    archived("r3", "boundary-replay", "boundary", stanzaAlias("boundary")),
+                    archived("r4", "catch-up", "catch-up", stanzaAlias("catch-up")),
+                ),
+            ),
+        )
+        assertEquals(2, database.messageDao().observeConversationSummaries(ACCOUNT).first().single().unreadCount)
+
+        store.applyArchivePage(
+            archivePage(
+                key = key,
+                direction = ArchiveDirection.BEFORE,
+                boundaryId = "r1",
+                complete = true,
+                hasEarlier = false,
+                messages = listOf(archived("r0", "older", "older", stanzaAlias("older"))),
+            ),
+        )
+        assertEquals(2, database.messageDao().observeConversationSummaries(ACCOUNT).first().single().unreadCount)
+    }
+
+    @Test
     fun directCorrectionsReconcileDeferredIdempotentlyAndPreserveBaseIdentity() = runBlocking {
         var store = MessageStore(database)
         val targetAlias = TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "original-wire-id")

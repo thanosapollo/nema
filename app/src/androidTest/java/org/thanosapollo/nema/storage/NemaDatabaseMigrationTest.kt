@@ -534,9 +534,10 @@ class NemaDatabaseMigrationTest {
                 """
                 INSERT INTO messages (
                     accountId, localMessageId, peerJid, senderJid, direction,
-                    messageKind, threadId, parentThreadId, body, localSequence, markable
+                    messageKind, threadId, parentThreadId, body, localSequence, markable,
+                    directSessionTransitionApplied
                 ) VALUES ('account-a', 'legacy', 'peer@example.org', 'peer@example.org',
-                    'INBOUND', 'CHAT', 'session-a', NULL, 'legacy', 7, 0)
+                    'INBOUND', 'CHAT', 'session-a', NULL, 'legacy', 7, 0, 0)
                 """.trimIndent(),
             )
             close()
@@ -594,6 +595,74 @@ class NemaDatabaseMigrationTest {
             ).use { cursor ->
                 assertTrue(cursor.moveToFirst())
                 assertEquals(0, cursor.getInt(0))
+            }
+            assertForeignKeysClean(database)
+        }
+    }
+
+    @Test
+    fun migration19To20MarksOnlyMamOnlyInboundHistoryRead() {
+        helper.createDatabase(DATABASE_NAME, 19).apply {
+            execSQL(
+                "INSERT INTO accounts (id, bareJid, authenticationId, serviceDomain) " +
+                    "VALUES ('account-a', 'self@example.org', 'self', 'example.org')",
+            )
+            execSQL(
+                "INSERT INTO peers (accountId, jid, room) " +
+                    "VALUES ('account-a', 'peer@example.org', 0)",
+            )
+            execSQL(
+                """
+                INSERT INTO messages (
+                    accountId, localMessageId, peerJid, senderJid, direction,
+                    messageKind, body, localSequence, sentAtEpochMs, sentTimeSource,
+                    markable, directSessionTransitionApplied, liveDeliveryObserved
+                ) VALUES
+                    ('account-a', 'history', 'peer@example.org', 'peer@example.org',
+                        'INBOUND', 'CHAT', 'history', 1, 1000, 'MAM', 0, 0, 0),
+                    ('account-a', 'live-before-mam', 'peer@example.org', 'peer@example.org',
+                        'INBOUND', 'CHAT', 'live', 2, 2000, 'MAM', 0, 0, 1),
+                    ('account-a', 'local', 'peer@example.org', 'peer@example.org',
+                        'INBOUND', 'CHAT', 'local', 3, 3000, 'LOCAL', 0, 0, 0),
+                    ('account-a', 'outbound-history', 'peer@example.org', 'self@example.org',
+                        'OUTBOUND', 'CHAT', 'outbound', 4, 4000, 'MAM', 0, 0, 0),
+                    ('account-a', 'mam-without-delay', 'peer@example.org', 'peer@example.org',
+                        'INBOUND', 'CHAT', 'delayless', 5, 5000, 'LOCAL', 0, 0, 1)
+                """.trimIndent(),
+            )
+            execSQL(
+                """
+                INSERT INTO trusted_identity_aliases (
+                    accountId, kind, authority, value, messageId, status
+                ) VALUES ('account-a', 'MAM_RESULT', 'archive', 'delayless-result',
+                    'mam-without-delay', 'TRUSTED')
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_NAME,
+            20,
+            true,
+            MessageSchema.MIGRATION_19_20,
+        ).use { database ->
+            database.query(
+                "SELECT localMessageId, unreadEligible FROM messages ORDER BY localSequence",
+            ).use { cursor ->
+                val eligibility = buildList {
+                    while (cursor.moveToNext()) add(cursor.getString(0) to cursor.getInt(1))
+                }
+                assertEquals(
+                    listOf(
+                        "history" to 0,
+                        "live-before-mam" to 1,
+                        "local" to 1,
+                        "outbound-history" to 1,
+                        "mam-without-delay" to 0,
+                    ),
+                    eligibility,
+                )
             }
             assertForeignKeysClean(database)
         }
