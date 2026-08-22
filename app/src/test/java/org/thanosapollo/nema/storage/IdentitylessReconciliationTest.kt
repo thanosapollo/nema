@@ -96,6 +96,121 @@ class IdentitylessReconciliationTest {
         assertNull(closedIdentitylessPair("mam", listOf(live, live2, mam, mam2), closure(null, complete = true), 31_001))
     }
 
+    @Test
+    fun fingerprintFieldsAreExactWhileExcludedFieldsDoNotBlock() {
+        val base = mam()
+        val changedMessages = listOf(
+            base.message.copy(peerJid = "other@example.org"),
+            base.message.copy(senderJid = "other@example.org"),
+            base.message.copy(messageKind = MessageKind.GROUPCHAT),
+            base.message.copy(threadId = "other-thread"),
+            base.message.copy(parentThreadId = "other-parent"),
+            base.message.copy(body = "other"),
+            base.message.copy(attachmentUrl = null),
+            base.message.copy(attachmentName = null),
+            base.message.copy(attachmentMime = null),
+            base.message.copy(attachmentSize = null),
+            base.message.copy(replyToId = null),
+            base.message.copy(replyToJid = null),
+            base.message.copy(replyFallbackBody = null),
+            base.message.copy(markable = false),
+            base.message.copy(markerTargetId = null),
+            base.message.copy(replaceId = null),
+            base.message.copy(correctionTargetMessageId = null),
+        )
+        changedMessages.forEach { changed ->
+            assertNull(
+                closedIdentitylessPair(
+                    "mam",
+                    listOf(live(), base.copy(message = changed)),
+                    closure(null, complete = true),
+                    31_001,
+                ),
+            )
+        }
+        val otherAccountLive = live().let { it.copy(message = it.message.copy(accountId = "other")) }
+        assertNull(closedIdentitylessPair("mam", listOf(otherAccountLive, base), closure(null, true), 31_001))
+        val nullLive = live().let { it.copy(message = it.message.copy(attachmentName = null)) }
+        val emptyMam = base.let { it.copy(message = it.message.copy(attachmentName = "")) }
+        assertNull(closedIdentitylessPair("mam", listOf(nullLive, emptyMam), closure(null, true), 31_001))
+
+        val excludedLive = live().let {
+            it.copy(message = it.message.copy(localSequence = Long.MAX_VALUE, unreadEligible = false))
+        }
+        val excludedMam = base.let {
+            it.copy(message = it.message.copy(localSequence = 0, unreadEligible = true))
+        }
+        assertEquals(
+            IdentitylessReconciliationPair("live", "mam"),
+            closedIdentitylessPair("mam", listOf(excludedLive, excludedMam), closure(null, true), 31_001),
+        )
+    }
+
+    @Test
+    fun metadataSeedAndTransitiveComponentsFailClosed() {
+        val live = live()
+        val mam = mam()
+        val alias = mam.aliases.single()
+        val position = mam.positions.single()
+        val malformed = listOf(
+            mam.copy(message = mam.message.copy(reconciliationObservedAtMs = 1)),
+            mam.copy(aliases = listOf(alias.copy(accountId = "other"))),
+            mam.copy(aliases = listOf(alias.copy(messageId = "other"))),
+            mam.copy(aliases = listOf(alias.copy(kind = IdentityAliasKind.STANZA_ID))),
+            mam.copy(aliases = listOf(alias.copy(status = IdentityAliasStatus.QUARANTINED))),
+            mam.copy(positions = listOf(position.copy(accountId = "other"))),
+            mam.copy(positions = listOf(position.copy(messageId = "other"))),
+        )
+        malformed.forEach { changed ->
+            assertNull(closedIdentitylessPair("mam", listOf(live, changed), closure(null, true), 31_001))
+        }
+        assertNull(closedIdentitylessPair("missing", listOf(live, mam), closure(null, true), 31_001))
+        assertNull(closedIdentitylessPair("live", listOf(live, mam), closure(null, true), 31_001))
+        assertNull(closedIdentitylessPair("mam", listOf(live, mam, mam), closure(null, true), 31_001))
+        assertNull(
+            closedIdentitylessPair(
+                "mam",
+                listOf(
+                    mam(sentAt = 0),
+                    live(observedAt = 30_000),
+                    mam("mam-2", 60_000, 8),
+                    live("live-2", 90_000),
+                ),
+                closure(null, true),
+                30_001,
+            ),
+        )
+    }
+
+    @Test
+    fun longBoundariesRemainFailClosedWithoutOverflow() {
+        assertNull(
+            closedIdentitylessPair(
+                "mam",
+                listOf(live(observedAt = Long.MAX_VALUE), mam(sentAt = Long.MAX_VALUE - 30_000)),
+                closure(null, true),
+                Long.MAX_VALUE,
+            ),
+        )
+        assertEquals(
+            IdentitylessReconciliationPair("live", "mam"),
+            closedIdentitylessPair(
+                "mam",
+                listOf(live(observedAt = Long.MAX_VALUE - 1), mam(sentAt = Long.MAX_VALUE - 30_001)),
+                closure(null, true),
+                Long.MAX_VALUE,
+            ),
+        )
+        assertNull(
+            closedIdentitylessPair(
+                "mam",
+                listOf(live(observedAt = 0), mam(sentAt = 0)),
+                closure(Long.MIN_VALUE),
+                31_001,
+            ),
+        )
+    }
+
     private fun live(id: String = "live", observedAt: Long = 1_000) =
         IdentitylessReconciliationCandidate(
             message = message(id).copy(
