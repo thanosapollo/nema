@@ -1582,6 +1582,88 @@ class MessageStoreTest {
     }
 
     @Test
+    fun identitylessLiveInsertPersistsMonotonicObservationAndFloor() = runBlocking {
+        val dao = database.accountDao()
+        dao.advanceReconciliationWallFloor(ACCOUNT, 500)
+        val store = MessageStore(database, clock = { 100 })
+
+        store.ingest(
+            incoming(localId = "live-one", sentAtEpochMs = 100, sentTimeSource = MessageTimeSource.LOCAL),
+        )
+        store.ingest(
+            incoming(localId = "live-two", sentAtEpochMs = 600, sentTimeSource = MessageTimeSource.LOCAL),
+        )
+
+        assertEquals(
+            listOf(500L, 600L),
+            store.messages(ACCOUNT).map(MessageEntity::reconciliationObservedAtMs),
+        )
+        assertEquals(600L, requireNotNull(dao.reconciliationState(ACCOUNT)).wallFloorMs)
+    }
+
+    @Test
+    fun identitylessReplayDoesNotMoveObservationOrFloor() = runBlocking {
+        val store = MessageStore(database, clock = { 100 })
+        store.ingest(
+            incoming(localId = "live", sentAtEpochMs = 100, sentTimeSource = MessageTimeSource.LOCAL),
+        )
+
+        val replay = store.ingest(
+            incoming(localId = "live", sentAtEpochMs = 200, sentTimeSource = MessageTimeSource.LOCAL),
+        )
+
+        assertFalse(replay.inserted)
+        assertEquals(100L, store.messages(ACCOUNT).single().reconciliationObservedAtMs)
+        assertEquals(100L, requireNotNull(database.accountDao().reconciliationState(ACCOUNT)).wallFloorMs)
+    }
+
+    @Test
+    fun missingReconciliationStateFailsClosedWithoutSynthesizingIt() = runBlocking {
+        database.openHelper.writableDatabase.execSQL(
+            "DELETE FROM account_reconciliation_state WHERE accountId = ?",
+            arrayOf<Any>(ACCOUNT),
+        )
+
+        val store = MessageStore(database, clock = { 100 })
+        store.ingest(incoming(localId = "live"))
+
+        assertNull(store.messages(ACCOUNT).single().reconciliationObservedAtMs)
+        assertNull(database.accountDao().reconciliationState(ACCOUNT))
+    }
+
+    @Test
+    fun onlyUnpositionedIdentitylessInboundLocalInsertAdvancesReconciliationFloor() = runBlocking {
+        val store = MessageStore(database, clock = { 100 })
+        listOf(
+            incoming(localId = "aliased", aliases = listOf(alias("wire"))),
+            incoming(localId = "mam", sentAtEpochMs = 100, sentTimeSource = MessageTimeSource.MAM),
+            incoming(localId = "carbon", sentAtEpochMs = 100, sentTimeSource = MessageTimeSource.CARBON),
+            incoming(localId = "negative", sentAtEpochMs = -1, sentTimeSource = MessageTimeSource.LOCAL),
+            incoming(localId = "outbound", direction = MessageDirection.OUTBOUND),
+            incoming(localId = "positioned", archiveOrdinal = 0),
+        ).forEach { store.ingest(it) }
+
+        assertTrue(store.messages(ACCOUNT).all { it.reconciliationObservedAtMs == null })
+        assertEquals(0L, requireNotNull(database.accountDao().reconciliationState(ACCOUNT)).wallFloorMs)
+    }
+
+    @Test
+    fun failedIdentitylessLiveInsertRollsBackObservationAndFloor() = runBlocking {
+        val faulting = MessageStore.observingWrites(database) {
+            if (it == MessageWriteBoundary.AFTER_MESSAGE) error("stop after message")
+        }
+
+        assertSuspendFailure<IllegalStateException> {
+            faulting.ingest(
+                incoming(localId = "rolled-back", sentAtEpochMs = 100, sentTimeSource = MessageTimeSource.LOCAL),
+            )
+        }
+
+        assertTrue(faulting.messages(ACCOUNT).isEmpty())
+        assertEquals(0L, requireNotNull(database.accountDao().reconciliationState(ACCOUNT)).wallFloorMs)
+    }
+
+    @Test
     fun firstIngestIsInsertedAndAliasReplayIsNot() = runBlocking {
         val store = MessageStore(database)
         val origin = alias("wire-1")
@@ -4153,7 +4235,7 @@ class MessageStoreTest {
     }
 
     private suspend fun addAccount(id: String) {
-        database.accountDao().upsert(
+        database.accountDao().saveBound(
             AccountEntity(
                 id = id,
                 bareJid = "$id@example.org",

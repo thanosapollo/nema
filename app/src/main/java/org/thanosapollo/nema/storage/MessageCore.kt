@@ -1829,7 +1829,10 @@ class MessageStore private constructor(
 
     suspend fun ingest(incoming: IncomingMessage): IngestionResult = database.withTransaction {
         val position = incoming.archivePosition()
-        val result = ingestInTransaction(incoming.withoutArchivePosition())
+        val result = ingestInTransaction(
+            incoming.withoutArchivePosition(),
+            allowLiveReconciliation = position == null,
+        )
         if (position != null) attachArchivePosition(result.messageId, incoming.accountId, position)
         result
     }
@@ -1877,6 +1880,7 @@ class MessageStore private constructor(
         preserveStoredThreadLineage: Boolean = false,
         allowDirectSessionTransition: Boolean = true,
         advanceOutboundLastRead: Boolean = true,
+        allowLiveReconciliation: Boolean = true,
     ): IngestionResult {
         val dao = database.messageDao()
         val timed = received.withStoredTime(clock)
@@ -1913,8 +1917,17 @@ class MessageStore private constructor(
         val inserted = matched == null
         var winner: MessageEntity
         if (matched == null) {
-            val created = incoming.toEntity(allocateSequence(incoming.accountId))
+            val observation = liveReconciliationObservation(incoming, allowLiveReconciliation)
+            val created = incoming.toEntity(allocateSequence(incoming.accountId), observation)
             dao.insertMessage(created)
+            if (observation != null) {
+                check(
+                    database.accountDao().advanceReconciliationWallFloor(
+                        incoming.accountId,
+                        observation,
+                    ) == 1,
+                ) { "Reconciliation state changed during live insert" }
+            }
             writeBoundary(MessageWriteBoundary.AFTER_MESSAGE)
             winner = created
         } else {
@@ -2521,6 +2534,7 @@ class MessageStore private constructor(
                 preserveStoredThreadLineage = true,
                 allowDirectSessionTransition = false,
                 advanceOutboundLastRead = page.direction != ArchiveDirection.BEFORE,
+                allowLiveReconciliation = false,
             )
             attachArchivePosition(
                 result.messageId,
@@ -2713,6 +2727,21 @@ class MessageStore private constructor(
         val updated = update(current)
         database.messageDao().updateOutbox(updated)
         updated
+    }
+
+    private suspend fun liveReconciliationObservation(
+        incoming: IncomingMessage,
+        allowed: Boolean,
+    ): Long? {
+        val receivedAt = incoming.sentAtEpochMs
+        if (!allowed ||
+            incoming.direction != MessageDirection.INBOUND ||
+            incoming.sentTimeSource != MessageTimeSource.LOCAL ||
+            incoming.aliases.isNotEmpty() ||
+            receivedAt == null || receivedAt < 0
+        ) return null
+        val state = database.accountDao().reconciliationState(incoming.accountId) ?: return null
+        return maxOf(receivedAt, state.wallFloorMs)
     }
 
     private suspend fun canMerge(
@@ -3053,7 +3082,10 @@ private fun MessageEntity.threadRef(): ThreadRef? = threadId?.let {
     )
 }
 
-private fun IncomingMessage.toEntity(localSequence: Long) = MessageEntity(
+private fun IncomingMessage.toEntity(
+    localSequence: Long,
+    reconciliationObservedAtMs: Long?,
+) = MessageEntity(
     accountId = accountId,
     localMessageId = localMessageId,
     peerJid = peerJid,
@@ -3067,6 +3099,7 @@ private fun IncomingMessage.toEntity(localSequence: Long) = MessageEntity(
     archiveOrdinal = archiveOrdinal,
     sentAtEpochMs = sentAtEpochMs,
     sentTimeSource = sentTimeSource,
+    reconciliationObservedAtMs = reconciliationObservedAtMs,
     attachmentUrl = attachmentUrl,
     attachmentName = attachmentName,
     attachmentMime = attachmentMime,
