@@ -19,6 +19,11 @@ internal data class IdentitylessReconciliationPair(
     val mamMessageId: String,
 )
 
+internal data class IdentitylessRepairPlan(
+    val pairs: List<IdentitylessReconciliationPair>,
+    val skippedComponents: Int,
+)
+
 internal data class IdentitylessArchiveClosure(
     val key: ArchiveCursorKey,
     val observedThroughMs: Long?,
@@ -67,6 +72,42 @@ internal fun closedIdentitylessPair(
     if (nodes.map(ReconciliationNode::messageId).distinct().size != nodes.size) return null
     val seed = nodes.singleOrNull { it.messageId == seedMamId && it.kind == CandidateKind.MAM }
         ?: return null
+    val component = connectedComponent(seed, nodes)
+    if (component.size != 2) return null
+    val live = component.singleOrNull { it.kind == CandidateKind.LIVE } ?: return null
+    val mam = component.singleOrNull { it.kind == CandidateKind.MAM } ?: return null
+    if (mam.archiveKey != archiveClosure.key) return null
+    if (!archiveClosure.complete && !strictlyBeyond(live.timeMs, archiveClosure.observedThroughMs)) return null
+    if (!strictlyBeyond(mam.timeMs, wallFloorMs)) return null
+    return IdentitylessReconciliationPair(live.messageId, mam.messageId)
+}
+
+internal fun identitylessRepairPlan(
+    candidates: List<IdentitylessReconciliationCandidate>,
+): IdentitylessRepairPlan? {
+    val nodes = candidates.mapNotNull(IdentitylessReconciliationCandidate::node)
+    if (nodes.map(ReconciliationNode::messageId).distinct().size != nodes.size) return null
+    val remaining = nodes.toMutableSet()
+    val pairs = mutableListOf<IdentitylessReconciliationPair>()
+    var skipped = 0
+    while (remaining.isNotEmpty()) {
+        val component = connectedComponent(remaining.first(), nodes)
+        remaining.removeAll(component)
+        val live = component.singleOrNull { it.kind == CandidateKind.LIVE }
+        val mam = component.singleOrNull { it.kind == CandidateKind.MAM }
+        if (component.size == 2 && live != null && mam != null) {
+            pairs += IdentitylessReconciliationPair(live.messageId, mam.messageId)
+        } else if (component.size > 1) {
+            skipped++
+        }
+    }
+    return IdentitylessRepairPlan(pairs, skipped)
+}
+
+private fun connectedComponent(
+    seed: ReconciliationNode,
+    nodes: List<ReconciliationNode>,
+): Set<ReconciliationNode> {
     val component = mutableSetOf(seed)
     var expanded: Boolean
     do {
@@ -78,13 +119,7 @@ internal fun closedIdentitylessPair(
             }
         }
     } while (expanded)
-    if (component.size != 2) return null
-    val live = component.singleOrNull { it.kind == CandidateKind.LIVE } ?: return null
-    val mam = component.singleOrNull { it.kind == CandidateKind.MAM } ?: return null
-    if (mam.archiveKey != archiveClosure.key) return null
-    if (!archiveClosure.complete && !strictlyBeyond(live.timeMs, archiveClosure.observedThroughMs)) return null
-    if (!strictlyBeyond(mam.timeMs, wallFloorMs)) return null
-    return IdentitylessReconciliationPair(live.messageId, mam.messageId)
+    return component
 }
 
 private fun IdentitylessReconciliationCandidate.node(): ReconciliationNode? {

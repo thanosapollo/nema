@@ -8,6 +8,64 @@ import org.thanosapollo.nema.xmpp.transport.MessageTimeSource
 
 class IdentitylessReconciliationTest {
     @Test
+    fun repairPlanFindsUniqueComponentsAndCountsAmbiguity() {
+        val plan = requireNotNull(
+            identitylessRepairPlan(
+                listOf(
+                    live(),
+                    mam(),
+                    live("ambiguous-live", 100_000),
+                    mam("ambiguous-mam-1", 100_000, 8),
+                    mam("ambiguous-mam-2", 100_001, 9),
+                    live("second-live", 200_000),
+                    mam("second-mam", 200_000, 10),
+                ),
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                IdentitylessReconciliationPair("live", "mam"),
+                IdentitylessReconciliationPair("second-live", "second-mam"),
+            ),
+            plan.pairs,
+        )
+        assertEquals(1, plan.skippedComponents)
+    }
+
+    @Test
+    fun repairPlanCountsOneTransitiveAmbiguousComponent() {
+        val plan = requireNotNull(
+            identitylessRepairPlan(
+                listOf(
+                    mam(sentAt = 0),
+                    live(observedAt = 30_000),
+                    mam("mam-2", 60_000, 8),
+                    live("live-2", 90_000),
+                ),
+            ),
+        )
+
+        assertEquals(emptyList<IdentitylessReconciliationPair>(), plan.pairs)
+        assertEquals(1, plan.skippedComponents)
+    }
+
+    @Test
+    fun repairPlanFailsClosedOnDuplicateIdsAndIgnoresIneligibleSingletons() {
+        assertNull(identitylessRepairPlan(listOf(live(), mam(), mam())))
+        assertEquals(
+            IdentitylessRepairPlan(emptyList(), 0),
+            identitylessRepairPlan(
+                listOf(
+                    live().copy(hasOutbox = true),
+                    mam().copy(hasConflict = true),
+                    live("unmatched", 100_000),
+                ),
+            ),
+        )
+    }
+
+    @Test
     fun uniquePairRequiresBothPersistedClosureGates() {
         val candidates = listOf(live(), mam())
         assertNull(closedIdentitylessPair("mam", candidates, closure(31_000), 31_001))
