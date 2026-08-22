@@ -5,6 +5,56 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 internal object MessageSchema {
+    val MIGRATION_20_21: Migration = object : Migration(20, 21) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN reconciliationObservedAtMs INTEGER")
+            db.execSQL(
+                """
+                UPDATE messages
+                SET reconciliationObservedAtMs = sentAtEpochMs
+                WHERE sentTimeSource = 'LOCAL'
+                  AND liveDeliveryObserved = 1
+                  AND sentAtEpochMs IS NOT NULL
+                """.trimIndent(),
+            )
+            db.execSQL(
+                """
+                CREATE TABLE IF NOT EXISTS account_reconciliation_state (
+                    accountId TEXT NOT NULL,
+                    repairKey TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    wallFloorMs INTEGER NOT NULL,
+                    beforeCount INTEGER,
+                    afterCount INTEGER,
+                    matchedCount INTEGER NOT NULL,
+                    skippedCount INTEGER NOT NULL,
+                    caughtErrorCount INTEGER NOT NULL,
+                    PRIMARY KEY(accountId, repairKey),
+                    FOREIGN KEY(accountId)
+                        REFERENCES accounts(id)
+                        ON UPDATE NO ACTION ON DELETE CASCADE
+                )
+                """.trimIndent(),
+            )
+            db.execSQL(
+                """
+                INSERT INTO account_reconciliation_state (
+                    accountId, repairKey, status, wallFloorMs, beforeCount, afterCount,
+                    matchedCount, skippedCount, caughtErrorCount
+                )
+                SELECT accounts.id, ?, 'PENDING',
+                       COALESCE((
+                           SELECT MAX(messages.reconciliationObservedAtMs)
+                           FROM messages WHERE messages.accountId = accounts.id
+                       ), 0),
+                       NULL, NULL, 0, 0, 0
+                FROM accounts
+                """.trimIndent(),
+                arrayOf<Any>(IDENTITYLESS_LIVE_MAM_REPAIR),
+            )
+        }
+    }
+
     val MIGRATION_19_20: Migration = object : Migration(19, 20) {
         override fun migrate(db: SupportSQLiteDatabase) {
             db.execSQL(

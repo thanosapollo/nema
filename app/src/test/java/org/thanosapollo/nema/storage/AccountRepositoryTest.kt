@@ -2,12 +2,17 @@ package org.thanosapollo.nema.storage
 
 import android.app.Application
 import android.content.Context
+import androidx.room.withTransaction
 import androidx.test.core.app.ApplicationProvider
 import java.util.UUID
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Before
 import org.junit.Test
@@ -57,6 +62,84 @@ class AccountRepositoryTest {
         val updated = account(bareJid = "person@example.org", authenticationId = "updated")
         repository.save(updated)
         assertEquals(updated, repository.account(ACCOUNT_ID))
+    }
+
+    @Test
+    fun savingAccountCreatesPendingReconciliationStateWithoutResettingIt() = runBlocking {
+        val original = account(bareJid = "person@example.org", authenticationId = "first")
+        repository.save(original)
+
+        val pending = requireNotNull(
+            database.accountDao().reconciliationState(ACCOUNT_ID.value, IDENTITYLESS_LIVE_MAM_REPAIR),
+        )
+        assertEquals(AccountReconciliationStateEntity(ACCOUNT_ID.value), pending)
+
+        database.accountDao().advanceReconciliationWallFloor(ACCOUNT_ID.value, 123L)
+        database.accountDao().recordCaughtReconciliationError(ACCOUNT_ID.value)
+        database.accountDao().recordCaughtReconciliationError(ACCOUNT_ID.value)
+        repository.save(account(bareJid = "person@example.org", authenticationId = "updated"))
+
+        assertEquals(
+            pending.copy(wallFloorMs = 123, caughtErrorCount = 2),
+            database.accountDao().reconciliationState(ACCOUNT_ID.value),
+        )
+    }
+
+    @Test
+    fun activatingLegacyAccountCreatesPendingReconciliationState() = runBlocking {
+        database.accountDao().upsert(
+            AccountEntity(ACCOUNT_ID.value, "person@example.org", "person", null, "example.org", null, null),
+        )
+        assertNull(database.accountDao().reconciliationState(ACCOUNT_ID.value))
+
+        coroutineScope {
+            listOf(async { repository.activate(ACCOUNT_ID) }, async { repository.activate(ACCOUNT_ID) }).awaitAll()
+        }
+
+        assertEquals(
+            ReconciliationRepairStatus.PENDING,
+            requireNotNull(database.accountDao().reconciliationState(ACCOUNT_ID.value)).status,
+        )
+    }
+
+    @Test
+    fun reconciliationLifecycleIsMonotonicAtomicAndSingleCompletion() = runBlocking {
+        repository.save(account(bareJid = "person@example.org", authenticationId = "first"))
+        val dao = database.accountDao()
+        coroutineScope {
+            listOf(100L, 50L, 150L).map { time ->
+                async { dao.advanceReconciliationWallFloor(ACCOUNT_ID.value, time) }
+            }.awaitAll()
+        }
+        assertEquals(150L, requireNotNull(dao.reconciliationState(ACCOUNT_ID.value)).wallFloorMs)
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking {
+                database.withTransaction {
+                    dao.advanceReconciliationWallFloor(ACCOUNT_ID.value, 200L)
+                    error("interrupt before commit")
+                }
+            }
+        }
+        assertEquals(150L, requireNotNull(dao.reconciliationState(ACCOUNT_ID.value)).wallFloorMs)
+        assertEquals(1, dao.recordCaughtReconciliationError(ACCOUNT_ID.value))
+        assertEquals(0, dao.completeReconciliationState(ACCOUNT_ID.value, 0, 0, 0, -1))
+        assertEquals(0, dao.completeReconciliationState(ACCOUNT_ID.value, 10, 7, 2, 1))
+        assertEquals(1, dao.completeReconciliationState(ACCOUNT_ID.value, 10, 8, 2, 1))
+        assertEquals(0, dao.recordCaughtReconciliationError(ACCOUNT_ID.value))
+        assertEquals(0, dao.completeReconciliationState(ACCOUNT_ID.value, 10, 8, 2, 1))
+        assertEquals(
+            AccountReconciliationStateEntity(
+                accountId = ACCOUNT_ID.value,
+                status = ReconciliationRepairStatus.COMPLETE,
+                wallFloorMs = 150,
+                beforeCount = 10,
+                afterCount = 8,
+                matchedCount = 2,
+                skippedCount = 1,
+                caughtErrorCount = 1,
+            ),
+            dao.reconciliationState(ACCOUNT_ID.value),
+        )
     }
 
     @Test
@@ -169,6 +252,9 @@ class AccountRepositoryTest {
         assertEquals(
             null,
             messages.archiveCursor(ArchiveCursorKey(FIRST_ID.value, first.bareJid.value, "ACCOUNT")),
+        )
+        assertNull(
+            database.accountDao().reconciliationState(FIRST_ID.value, IDENTITYLESS_LIVE_MAM_REPAIR),
         )
         database.openHelper.writableDatabase.query("PRAGMA foreign_key_check").use {
             assertEquals(false, it.moveToFirst())

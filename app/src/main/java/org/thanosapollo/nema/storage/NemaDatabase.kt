@@ -7,6 +7,8 @@ import androidx.room.Database
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
+import androidx.room.Insert
+import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
@@ -30,6 +32,37 @@ data class AccountEntity(
     val serviceDomain: String,
     val networkHost: String?,
     val networkPort: Int?,
+)
+
+internal const val IDENTITYLESS_LIVE_MAM_REPAIR = "identityless-live-mam-v1"
+
+enum class ReconciliationRepairStatus {
+    PENDING,
+    COMPLETE,
+}
+
+@Entity(
+    tableName = "account_reconciliation_state",
+    primaryKeys = ["accountId", "repairKey"],
+    foreignKeys = [
+        ForeignKey(
+            entity = AccountEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["accountId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+)
+data class AccountReconciliationStateEntity(
+    val accountId: String,
+    val repairKey: String = IDENTITYLESS_LIVE_MAM_REPAIR,
+    val status: ReconciliationRepairStatus = ReconciliationRepairStatus.PENDING,
+    val wallFloorMs: Long = 0,
+    val beforeCount: Long? = null,
+    val afterCount: Long? = null,
+    val matchedCount: Long = 0,
+    val skippedCount: Long = 0,
+    val caughtErrorCount: Long = 0,
 )
 
 @Entity(
@@ -62,6 +95,73 @@ abstract class AccountDao {
     @Upsert
     abstract suspend fun upsert(account: AccountEntity)
 
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    protected abstract suspend fun insertReconciliationState(state: AccountReconciliationStateEntity): Long
+
+    @Query(
+        """
+        SELECT * FROM account_reconciliation_state
+        WHERE accountId = :accountId AND repairKey = :repairKey
+        """,
+    )
+    abstract suspend fun reconciliationState(
+        accountId: String,
+        repairKey: String = IDENTITYLESS_LIVE_MAM_REPAIR,
+    ): AccountReconciliationStateEntity?
+
+    @Query(
+        """
+        UPDATE account_reconciliation_state
+        SET wallFloorMs = MAX(wallFloorMs, :observedAtMs)
+        WHERE accountId = :accountId AND repairKey = :repairKey
+        """,
+    )
+    abstract suspend fun advanceReconciliationWallFloor(
+        accountId: String,
+        observedAtMs: Long,
+        repairKey: String = IDENTITYLESS_LIVE_MAM_REPAIR,
+    ): Int
+
+    @Query(
+        """
+        UPDATE account_reconciliation_state
+        SET caughtErrorCount = caughtErrorCount + 1
+        WHERE accountId = :accountId AND repairKey = :repairKey AND status = 'PENDING'
+        """,
+    )
+    abstract suspend fun recordCaughtReconciliationError(
+        accountId: String,
+        repairKey: String = IDENTITYLESS_LIVE_MAM_REPAIR,
+    ): Int
+
+    @Query(
+        """
+        UPDATE account_reconciliation_state
+        SET status = 'COMPLETE',
+            beforeCount = :beforeCount,
+            afterCount = :afterCount,
+            matchedCount = :matchedCount,
+            skippedCount = :skippedCount
+        WHERE accountId = :accountId
+          AND repairKey = :repairKey
+          AND status = 'PENDING'
+          AND :beforeCount >= 0
+          AND :afterCount >= 0
+          AND :matchedCount >= 0
+          AND :skippedCount >= 0
+          AND :beforeCount >= :afterCount
+          AND :beforeCount - :afterCount = :matchedCount
+        """,
+    )
+    abstract suspend fun completeReconciliationState(
+        accountId: String,
+        beforeCount: Long,
+        afterCount: Long,
+        matchedCount: Long,
+        skippedCount: Long,
+        repairKey: String = IDENTITYLESS_LIVE_MAM_REPAIR,
+    ): Int
+
     @Transaction
     open suspend fun saveBound(account: AccountEntity) {
         val existing = account(account.id)
@@ -69,6 +169,7 @@ abstract class AccountDao {
             "Account identity cannot be changed"
         }
         upsert(account)
+        insertReconciliationState(AccountReconciliationStateEntity(account.id))
     }
 
     @Upsert
@@ -119,12 +220,14 @@ abstract class AccountDao {
     @Transaction
     open suspend fun activate(accountId: String) {
         requireNotNull(account(accountId)) { "Cannot activate an unknown account" }
+        insertReconciliationState(AccountReconciliationStateEntity(accountId))
         setActive(ActiveAccountEntity(accountId = accountId))
     }
 
     @Transaction
     open suspend fun switchActive(accountId: String) {
         requireNotNull(account(accountId)) { "Cannot activate an unknown account" }
+        insertReconciliationState(AccountReconciliationStateEntity(accountId))
         clearNavigation(accountId)
         setActive(ActiveAccountEntity(accountId = accountId))
     }
@@ -144,6 +247,7 @@ abstract class AccountDao {
 @Database(
     entities = [
         AccountEntity::class,
+        AccountReconciliationStateEntity::class,
         ActiveAccountEntity::class,
         PeerEntity::class,
         MessageThreadEntity::class,
@@ -160,7 +264,7 @@ abstract class AccountDao {
         ChatNavigationEntity::class,
         MessageReactionEntity::class,
     ],
-    version = 20,
+    version = 21,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -200,6 +304,7 @@ abstract class NemaDatabase : RoomDatabase() {
                 MessageSchema.MIGRATION_17_18,
                 MessageSchema.MIGRATION_18_19,
                 MessageSchema.MIGRATION_19_20,
+                MessageSchema.MIGRATION_20_21,
             )
             .addCallback(MessageSchema.REOPEN_CALLBACK)
             .build()

@@ -669,6 +669,70 @@ class NemaDatabaseMigrationTest {
     }
 
     @Test
+    fun migration20To21BackfillsLiveObservationAndCreatesPendingAccountState() {
+        helper.createDatabase(DATABASE_NAME, 20).apply {
+            execSQL(
+                "INSERT INTO accounts (id, bareJid, authenticationId, serviceDomain) " +
+                    "VALUES ('account-a', 'self@example.org', 'self', 'example.org')",
+            )
+            execSQL(
+                "INSERT INTO peers (accountId, jid, room) " +
+                    "VALUES ('account-a', 'peer@example.org', 0)",
+            )
+            execSQL(
+                """
+                INSERT INTO messages (
+                    accountId, localMessageId, peerJid, senderJid, direction,
+                    messageKind, body, localSequence, sentAtEpochMs, sentTimeSource,
+                    liveDeliveryObserved, markable, directSessionTransitionApplied, unreadEligible
+                ) VALUES
+                    ('account-a', 'live-local', 'peer@example.org', 'peer@example.org',
+                        'INBOUND', 'CHAT', 'live', 1, 1000, 'LOCAL', 1, 0, 0, 1),
+                    ('account-a', 'local-not-live', 'peer@example.org', 'peer@example.org',
+                        'INBOUND', 'CHAT', 'not-live', 2, 2000, 'LOCAL', 0, 0, 0, 1),
+                    ('account-a', 'mam-live', 'peer@example.org', 'peer@example.org',
+                        'INBOUND', 'CHAT', 'mam', 3, 3000, 'MAM', 1, 0, 0, 1),
+                    ('account-a', 'live-no-time', 'peer@example.org', 'peer@example.org',
+                        'INBOUND', 'CHAT', 'no-time', 4, NULL, 'LOCAL', 1, 0, 0, 1)
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(
+            DATABASE_NAME,
+            21,
+            true,
+            MessageSchema.MIGRATION_20_21,
+        ).use { database ->
+            database.query(
+                """
+                SELECT COUNT(*) FROM messages
+                WHERE (localMessageId = 'live-local' AND reconciliationObservedAtMs = 1000)
+                   OR (localMessageId IN ('local-not-live', 'mam-live', 'live-no-time')
+                       AND reconciliationObservedAtMs IS NULL)
+                """.trimIndent(),
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(4, cursor.getInt(0))
+            }
+            database.query(
+                """
+                SELECT COUNT(*) FROM account_reconciliation_state
+                WHERE accountId = 'account-a'
+                  AND repairKey = 'identityless-live-mam-v1' AND status = 'PENDING'
+                  AND wallFloorMs = 1000 AND beforeCount IS NULL AND afterCount IS NULL
+                  AND matchedCount = 0 AND skippedCount = 0 AND caughtErrorCount = 0
+                """.trimIndent(),
+            ).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(1, cursor.getInt(0))
+            }
+            assertForeignKeysClean(database)
+        }
+    }
+
+    @Test
     fun migration17To18QuarantinesOnlyPersistedRoomStanzaIds() {
         helper.createDatabase(DATABASE_NAME, 17).apply {
             execSQL(

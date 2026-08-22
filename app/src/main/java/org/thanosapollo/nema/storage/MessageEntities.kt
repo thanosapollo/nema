@@ -197,6 +197,7 @@ data class MessageEntity(
     val archiveOrdinal: Long?,
     val sentAtEpochMs: Long? = null,
     val sentTimeSource: MessageTimeSource? = null,
+    val reconciliationObservedAtMs: Long? = null,
     val attachmentUrl: String? = null,
     val attachmentName: String? = null,
     val attachmentMime: String? = null,
@@ -523,4 +524,11 @@ class MessageConverters {
 
     @TypeConverter
     fun messageTimeSource(value: String?): MessageTimeSource? = value?.let(MessageTimeSource::valueOf)
+
+    @TypeConverter
+    fun reconciliationRepairStatus(value: ReconciliationRepairStatus): String = value.name
+
+    @TypeConverter
+    fun reconciliationRepairStatus(value: String): ReconciliationRepairStatus =
+        ReconciliationRepairStatus.valueOf(value)
 }
