@@ -4,6 +4,7 @@ import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.xmpp.transport.MessageTimeSource
 
 internal const val IDENTITYLESS_RECONCILIATION_WINDOW_MS = 30_000L
+internal const val IDENTITYLESS_RECONCILIATION_CANDIDATE_CAP = 64
 
 internal data class IdentitylessReconciliationCandidate(
     val message: MessageEntity,

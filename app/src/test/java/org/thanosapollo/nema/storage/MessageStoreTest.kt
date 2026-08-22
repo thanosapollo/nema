@@ -1664,6 +1664,90 @@ class MessageStoreTest {
     }
 
     @Test
+    fun boundedReconciliationCandidateQueryScopesSourcesBoundariesAndOrder() = runBlocking {
+        addAccount(OTHER_ACCOUNT)
+        val store = MessageStore(database, clock = { 0 })
+        val expected = mutableListOf<String>()
+        suspend fun candidate(message: IncomingMessage) {
+            store.ingest(message)
+            expected += message.localMessageId
+        }
+
+        store.ingest(incoming(localId = "outside-low", sentAtEpochMs = 99, sentTimeSource = MessageTimeSource.LOCAL))
+        candidate(incoming(localId = "local-lower", sentAtEpochMs = 100, sentTimeSource = MessageTimeSource.LOCAL))
+        store.ingest(incoming(localId = "wrong-peer", peerJid = "other@example.org", sentAtEpochMs = 110, sentTimeSource = MessageTimeSource.LOCAL))
+        store.ingest(incoming(accountId = OTHER_ACCOUNT, localId = "wrong-account", sentAtEpochMs = 120, sentTimeSource = MessageTimeSource.LOCAL))
+        store.ingest(incoming(localId = "outbound", direction = MessageDirection.OUTBOUND, sentAtEpochMs = 130, sentTimeSource = MessageTimeSource.LOCAL))
+        store.ingest(incoming(localId = "carbon", sentAtEpochMs = 140, sentTimeSource = MessageTimeSource.CARBON))
+        candidate(incoming(localId = "mam-lower", sentAtEpochMs = 100, sentTimeSource = MessageTimeSource.MAM))
+        candidate(incoming(localId = "local-upper", sentAtEpochMs = 200, sentTimeSource = MessageTimeSource.LOCAL))
+        candidate(incoming(localId = "mam-upper", sentAtEpochMs = 200, sentTimeSource = MessageTimeSource.MAM))
+        candidate(incoming(localId = "local-observed-time", sentAtEpochMs = 1, sentTimeSource = MessageTimeSource.LOCAL))
+        repeat(IDENTITYLESS_RECONCILIATION_CANDIDATE_CAP) { index ->
+            candidate(incoming(localId = "candidate-$index", sentAtEpochMs = 150, sentTimeSource = MessageTimeSource.LOCAL))
+        }
+        store.ingest(incoming(localId = "outside-high", sentAtEpochMs = 201, sentTimeSource = MessageTimeSource.LOCAL))
+        store.ingest(incoming(localId = "local-sent-in-window", sentAtEpochMs = 150, sentTimeSource = MessageTimeSource.LOCAL))
+        store.ingest(incoming(localId = "mam-outside", sentAtEpochMs = 201, sentTimeSource = MessageTimeSource.MAM))
+
+        val actual = database.messageDao().identitylessReconciliationCandidates(
+            ACCOUNT,
+            PEER,
+            100,
+            200,
+            IDENTITYLESS_RECONCILIATION_CANDIDATE_CAP + 1,
+        ).map(MessageEntity::localMessageId)
+
+        assertEquals(expected.take(IDENTITYLESS_RECONCILIATION_CANDIDATE_CAP + 1), actual)
+    }
+
+    @Test
+    fun batchedReconciliationMetadataScopesCompleteOwnershipAndEmptyLists() = runBlocking {
+        addAccount(OTHER_ACCOUNT)
+        val store = MessageStore(database)
+        listOf("live", "mam", "other").forEach { store.ingest(incoming(localId = it)) }
+        listOf("live", "mam", "other").forEach {
+            store.ingest(incoming(accountId = OTHER_ACCOUNT, localId = it))
+        }
+        val dao = database.messageDao()
+        val key = archiveKey(ACCOUNT)
+        val trusted = TrustedIdentityAliasEntity(
+            ACCOUNT,
+            IdentityAliasKind.MAM_RESULT,
+            key.aliasAuthority(),
+            "trusted",
+            "mam",
+            IdentityAliasStatus.TRUSTED,
+        )
+        val quarantined = trusted.copy(value = "quarantined", messageId = "live", status = IdentityAliasStatus.QUARANTINED)
+        val otherAccountAlias = trusted.copy(accountId = OTHER_ACCOUNT, value = "other-account")
+        dao.insertTrustedAlias(trusted)
+        dao.insertTrustedAlias(quarantined)
+        dao.insertTrustedAlias(otherAccountAlias)
+        val positions = listOf(
+            ArchiveMessagePositionEntity(ACCOUNT, key.archiveAuthority, key.scope, 7, "mam"),
+            ArchiveMessagePositionEntity(ACCOUNT, "room@example.org", "ROOM", 8, "mam"),
+        )
+        positions.forEach { dao.insertArchivePosition(it) }
+        dao.insertArchivePosition(positions.first().copy(accountId = OTHER_ACCOUNT, archiveOrdinal = 9))
+        val conflicts = listOf(
+            IdentityConflictEntity(ACCOUNT, IdentityAliasKind.MAM_RESULT, key.aliasAuthority(), "first", "live", "other", 2),
+            IdentityConflictEntity(ACCOUNT, IdentityAliasKind.MAM_RESULT, key.aliasAuthority(), "second", "other", "mam", 3),
+        )
+        conflicts.forEach { dao.insertConflict(it) }
+        dao.insertConflict(conflicts.first().copy(accountId = OTHER_ACCOUNT, value = "other-account"))
+        val ids = listOf("live", "mam")
+
+        assertEquals(listOf(trusted), dao.trustedAliasesForMessages(ACCOUNT, ids))
+        assertEquals(positions, dao.archivePositionsForMessages(ACCOUNT, ids))
+        assertEquals(conflicts.toSet(), dao.conflictsForMessages(ACCOUNT, ids).toSet())
+        assertTrue(dao.trustedAliasesForMessages(ACCOUNT, emptyList()).isEmpty())
+        assertTrue(dao.archivePositionsForMessages(ACCOUNT, emptyList()).isEmpty())
+        assertTrue(dao.conflictsForMessages(ACCOUNT, emptyList()).isEmpty())
+        assertTrue(dao.outboxesForMessages(ACCOUNT, emptyList()).isEmpty())
+    }
+
+    @Test
     fun firstIngestIsInsertedAndAliasReplayIsNot() = runBlocking {
         val store = MessageStore(database)
         val origin = alias("wire-1")

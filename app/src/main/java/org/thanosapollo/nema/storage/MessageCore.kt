@@ -473,6 +473,18 @@ abstract class MessageDao {
     @Query(
         """
         SELECT * FROM archive_message_positions
+        WHERE accountId = :accountId AND messageId IN (:messageIds)
+        ORDER BY messageId, archiveAuthority, archiveScope, archiveOrdinal
+        """,
+    )
+    abstract suspend fun archivePositionsForMessages(
+        accountId: String,
+        messageIds: List<String>,
+    ): List<ArchiveMessagePositionEntity>
+
+    @Query(
+        """
+        SELECT * FROM archive_message_positions
         WHERE accountId = :accountId
           AND archiveAuthority = :archiveAuthority
           AND archiveScope = :archiveScope
@@ -546,6 +558,26 @@ abstract class MessageDao {
         """,
     )
     abstract suspend fun messages(accountId: String): List<MessageEntity>
+
+    @Query(
+        """
+        SELECT * FROM messages
+        WHERE accountId = :accountId AND peerJid = :peerJid AND direction = 'INBOUND'
+          AND (
+            (sentTimeSource = 'LOCAL' AND reconciliationObservedAtMs BETWEEN :lowerMs AND :upperMs)
+            OR (sentTimeSource = 'MAM' AND sentAtEpochMs BETWEEN :lowerMs AND :upperMs)
+          )
+        ORDER BY localSequence, localMessageId
+        LIMIT :limit
+        """,
+    )
+    abstract suspend fun identitylessReconciliationCandidates(
+        accountId: String,
+        peerJid: String,
+        lowerMs: Long,
+        upperMs: Long,
+        limit: Int,
+    ): List<MessageEntity>
 
     @Query(
         """
@@ -1110,6 +1142,18 @@ abstract class MessageDao {
     @Query(
         """
         SELECT * FROM trusted_identity_aliases
+        WHERE accountId = :accountId AND messageId IN (:messageIds) AND status = 'TRUSTED'
+        ORDER BY messageId, kind, authority, value
+        """,
+    )
+    abstract suspend fun trustedAliasesForMessages(
+        accountId: String,
+        messageIds: List<String>,
+    ): List<TrustedIdentityAliasEntity>
+
+    @Query(
+        """
+        SELECT * FROM trusted_identity_aliases
         WHERE accountId = :accountId AND kind = :kind
           AND authority = :authority AND value = :value
         """,
@@ -1164,6 +1208,17 @@ abstract class MessageDao {
         messageId: String,
     ): List<IdentityConflictEntity>
 
+    @Query(
+        """
+        SELECT * FROM identity_conflicts
+        WHERE accountId = :accountId
+          AND (firstMessageId IN (:messageIds) OR secondMessageId IN (:messageIds))
+        """,
+    )
+    abstract suspend fun conflictsForMessages(
+        accountId: String,
+        messageIds: List<String>,
+    ): List<IdentityConflictEntity>
 
     @Query("SELECT * FROM identity_conflicts WHERE accountId = :accountId ORDER BY detectedAtSequence")
     abstract suspend fun conflicts(accountId: String): List<IdentityConflictEntity>
