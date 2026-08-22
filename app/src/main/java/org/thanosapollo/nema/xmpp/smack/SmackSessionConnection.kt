@@ -1224,7 +1224,7 @@ internal fun Message.toIncomingEnvelope(
             sender = occupant,
             outbound = (occupantNick != null && occupantNick == ownRoomNick) ||
                 (sentTimeSource == MessageTimeSource.MAM && mucActorBareJid() == expectedBareJid),
-            originId = getExtension(OriginIdElement::class.java)?.id,
+            originId = structurallyValidOriginId(),
             body = messageBody,
             thread = toThreadRef(),
             stanzaIds = emptyList(),
@@ -1249,12 +1249,13 @@ internal fun Message.toIncomingEnvelope(
             peer = peer,
             sender = sender,
             outbound = outbound,
-            originId = getExtension(OriginIdElement::class.java)?.id,
+            originId = structurallyValidOriginId(),
             messageId = stanzaId,
             body = messageBody,
             thread = toThreadRef(),
             stanzaIds = if (trustedStableIdAuthority) {
                 getExtensions(StanzaIdElement::class.java)
+                    .filter { it !is NemaStanzaIdElement || it.structurallyValid }
                     .filter { it.by == expectedBareJid }
                     .map { StanzaIdEnvelope(it.id, it.by) }
             } else {
@@ -1273,6 +1274,12 @@ internal fun Message.toIncomingEnvelope(
         )
     }
 }
+
+private fun Message.structurallyValidOriginId(): String? =
+    getExtensions(OriginIdElement::class.java)
+        .singleOrNull()
+        ?.takeIf { it !is NemaOriginIdElement || it.structurallyValid }
+        ?.id
 
 internal data class OutgoingFailureMapping(
     val consumed: Boolean,
