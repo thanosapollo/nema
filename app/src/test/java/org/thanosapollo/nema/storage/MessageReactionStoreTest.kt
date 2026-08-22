@@ -115,6 +115,134 @@ class MessageReactionStoreTest {
     }
 
     @Test
+    fun resolvedCorrectionReactionsShareOneOriginalState() = runBlocking {
+        store.ingest(incoming("original", message("original-id")).copy(body = "original"))
+        val correction = incoming("correction", message("correction-id"))
+            .copy(body = "edited", replaceId = "original-id")
+        store.ingest(correction)
+
+        assertEquals("original-id", store.reactionWireTarget(ACCOUNT, PEER, "correction"))
+        assertEquals(ReactionApplyOutcome.APPLIED, store.applyIncomingReaction(react("correction-id", listOf("👍"))))
+        assertEquals(listOf(chip("original", "👍")), chips("original"))
+        assertEquals(ReactionApplyOutcome.APPLIED, store.applyIncomingReaction(react("original-id", emptyList())))
+        assertTrue(chips("original").isEmpty())
+
+        store.applyIncomingReaction(react("original-id", listOf("❤️"), sender = SELF))
+        val previous = store.ownReactionEmojis(ACCOUNT, PEER, "correction", SELF)
+        assertEquals(listOf("❤️"), previous)
+        store.applyIncomingReaction(react("original-id", listOf("❤️", "👍"), sender = SELF))
+        store.applyIncomingReaction(react("original-id", previous, sender = SELF))
+        assertEquals(previous, store.ownReactionEmojis(ACCOUNT, PEER, "correction", SELF))
+        database.messageDao().upsertMessageReaction(
+            MessageReactionEntity(
+                ACCOUNT,
+                PEER,
+                PEER,
+                "correction",
+                "correction",
+                "correction-id",
+                "⚠️",
+                5_000L,
+            ),
+        )
+        store.ingest(correction)
+        assertEquals(
+            setOf(chip("original", "⚠️"), chip("original", "❤️", SELF)),
+            chips("original").toSet(),
+        )
+        assertTrue(chips("correction").isEmpty())
+    }
+
+    @Test
+    fun deferredCorrectionReactionSettlesOnOriginal() = runBlocking {
+        val correction = incoming("late-correction", message("late-correction-id"))
+            .copy(body = "edited", replaceId = "late-original-id")
+        store.ingest(correction)
+        assertEquals(
+            ReactionApplyOutcome.PENDING,
+            store.applyIncomingReaction(react("late-correction-id", listOf("👍"))),
+        )
+        store.ingest(incoming("late-original", message("late-original-id")).copy(body = "original"))
+
+        assertEquals(listOf(chip("late-original", "👍")), chips("late-original"))
+        assertTrue(chips("late-correction").isEmpty())
+        assertTrue(database.messageDao().messageReactions(ACCOUNT, PEER).none { it.localMessageId == null })
+    }
+
+    @Test
+    fun multiHopCycleAndMissingCorrectionTargetsRemainInert() = runBlocking {
+        store.ingest(incoming("guard-original", message("guard-original-id")).copy(body = "original"))
+        store.ingest(
+            incoming("guard-middle", message("guard-middle-id"))
+                .copy(body = "middle", replaceId = "guard-original-id"),
+        )
+        val topIncoming = incoming("guard-top", message("guard-top-id"))
+            .copy(body = "top", replaceId = "guard-middle-id")
+        store.ingest(topIncoming)
+        val dao = database.messageDao()
+        val top = requireNotNull(dao.message(ACCOUNT, "guard-top"))
+        val middle = requireNotNull(dao.message(ACCOUNT, "guard-middle"))
+        dao.updateMessage(top.copy(correctionTargetMessageId = middle.localMessageId))
+        val attached = MessageReactionEntity(
+            ACCOUNT, PEER, PEER, "guard-top", "guard-top", "guard-top-id", "⚠️", 5_000L,
+        )
+        dao.upsertMessageReaction(attached)
+
+        assertNull(store.reactionWireTarget(ACCOUNT, PEER, "guard-top"))
+        assertTrue(store.ownReactionEmojis(ACCOUNT, PEER, "guard-top", PEER).isEmpty())
+        store.ingest(topIncoming)
+        assertEquals(listOf(attached), dao.messageReactionsForMessage(ACCOUNT, PEER, "guard-top"))
+        assertEquals(
+            ReactionApplyOutcome.PENDING,
+            store.applyIncomingReaction(react("guard-top-id", listOf("👍"))),
+        )
+        assertEquals(listOf(attached), dao.messageReactionsForMessage(ACCOUNT, PEER, "guard-top"))
+
+        dao.updateMessage(middle.copy(correctionTargetMessageId = top.localMessageId))
+        assertNull(store.reactionWireTarget(ACCOUNT, PEER, "guard-top"))
+        dao.updateMessage(top.copy(correctionTargetMessageId = "missing"))
+        assertNull(store.reactionWireTarget(ACCOUNT, PEER, "guard-top"))
+        assertEquals(listOf(attached), dao.messageReactionsForMessage(ACCOUNT, PEER, "guard-top"))
+    }
+
+    @Test
+    fun corruptOriginalTargetNeverAuthorizesCorrectionReactionState() = runBlocking {
+        val originalIncoming = incoming("corrupt-original", message("corrupt-original-id")).copy(body = "original")
+        val correctionIncoming = incoming("corrupt-correction", message("corrupt-correction-id"))
+            .copy(body = "edited", replaceId = "corrupt-original-id")
+        store.ingest(originalIncoming)
+        store.ingest(correctionIncoming)
+        val dao = database.messageDao()
+        val original = requireNotNull(dao.message(ACCOUNT, "corrupt-original"))
+        val correction = requireNotNull(dao.message(ACCOUNT, "corrupt-correction"))
+        dao.updateMessage(original.copy(correctionTargetMessageId = "corrupt-link"))
+        dao.updateMessage(correction.copy(correctionTargetMessageId = null))
+        val attached = MessageReactionEntity(
+            ACCOUNT, PEER, PEER, "corrupt-correction", "corrupt-correction",
+            "corrupt-correction-id", "⚠️", 5_000L,
+        )
+        val pending = MessageReactionEntity(
+            ACCOUNT, PEER, PEER, "pending:corrupt-correction-id", null,
+            "corrupt-correction-id", "👍", 1_000L,
+        )
+        dao.upsertMessageReaction(attached)
+        dao.upsertMessageReaction(pending)
+        val before = dao.messageReactions(ACCOUNT, PEER).toSet()
+
+        assertNull(store.reactionWireTarget(ACCOUNT, PEER, "corrupt-correction"))
+        assertTrue(store.ownReactionEmojis(ACCOUNT, PEER, "corrupt-correction", PEER).isEmpty())
+        assertEquals(
+            ReactionApplyOutcome.PENDING,
+            store.applyIncomingReaction(react("corrupt-correction-id", listOf("👍"))),
+        )
+        store.ingest(correctionIncoming)
+        store.ingest(originalIncoming)
+
+        assertNull(dao.message(ACCOUNT, "corrupt-correction")?.correctionTargetMessageId)
+        assertEquals(before, dao.messageReactions(ACCOUNT, PEER).toSet())
+    }
+
+    @Test
     fun applyPendingAttachAndMergeKeepNewestTrustedChatSet() = runBlocking {
         store.ingest(incoming("local-1", message("message-1"), origin("origin-1"), stanza("stanza-1")))
         assertEquals(ReactionApplyOutcome.IGNORED, store.applyIncomingReaction(react("origin-1", listOf("⚠️"))))

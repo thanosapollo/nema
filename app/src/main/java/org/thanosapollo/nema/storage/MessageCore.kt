@@ -142,6 +142,38 @@ abstract class MessageDao {
         """
         SELECT * FROM message_reactions
         WHERE accountId = :accountId AND peerJid = :peerJid
+          AND localMessageId = :localMessageId
+        """,
+    )
+    abstract suspend fun messageReactionsForMessage(
+        accountId: String,
+        peerJid: String,
+        localMessageId: String,
+    ): List<MessageReactionEntity>
+
+    @Query(
+        """
+        SELECT DISTINCT reaction.* FROM message_reactions AS reaction
+        INNER JOIN trusted_identity_aliases AS alias
+          ON alias.accountId = reaction.accountId
+         AND alias.messageId = :messageId
+         AND alias.value = reaction.wireTargetId
+        WHERE reaction.accountId = :accountId AND reaction.peerJid = :peerJid
+          AND reaction.localMessageId IS NULL
+          AND alias.status = 'TRUSTED'
+          AND alias.kind IN ('MESSAGE_ID', 'ORIGIN_ID', 'STANZA_ID')
+        """,
+    )
+    abstract suspend fun pendingReactionsForMessageAliases(
+        accountId: String,
+        peerJid: String,
+        messageId: String,
+    ): List<MessageReactionEntity>
+
+    @Query(
+        """
+        SELECT * FROM message_reactions
+        WHERE accountId = :accountId AND peerJid = :peerJid
           AND senderBareJid = :senderBareJid AND targetKey = :targetKey
         """,
     )
@@ -1931,26 +1963,35 @@ class MessageStore private constructor(
     suspend fun applyIncomingReaction(reaction: IncomingReactionApply): ReactionApplyOutcome =
         database.withTransaction { applyIncomingReactionInTransaction(reaction) }
 
-    suspend fun reactionWireTarget(accountId: String, peerJid: String, localMessageId: String): String? {
-        val dao = database.messageDao()
-        val message = dao.message(accountId, localMessageId)
-            ?.takeIf { it.peerJid == peerJid && it.messageKind == MessageKind.CHAT }
-            ?: return null
-        return dao.trustedAliasesForMessage(message.accountId, message.localMessageId)
-            .filter { it.kind == IdentityAliasKind.MESSAGE_ID }
-            .singleOrNull()
-            ?.value
-    }
+    suspend fun reactionWireTarget(accountId: String, peerJid: String, localMessageId: String): String? =
+        database.withTransaction {
+            val dao = database.messageDao()
+            val selected = dao.message(accountId, localMessageId)
+                ?.takeIf { it.peerJid == peerJid && it.messageKind == MessageKind.CHAT }
+                ?: return@withTransaction null
+            val message = dao.directReactionTarget(selected) ?: return@withTransaction null
+            dao.trustedAliasesForMessage(message.accountId, message.localMessageId)
+                .filter { it.kind == IdentityAliasKind.MESSAGE_ID }
+                .singleOrNull()
+                ?.value
+        }
 
     suspend fun ownReactionEmojis(
         accountId: String,
         peerJid: String,
         localMessageId: String,
         senderBareJid: String,
-    ): List<String> {
-        val row = database.messageDao().messageReactions(accountId, peerJid)
-            .firstOrNull { it.localMessageId == localMessageId && it.senderBareJid == senderBareJid }
-        return row?.let { decodeReactionEmojis(it.emojis) }.orEmpty()
+    ): List<String> = database.withTransaction {
+        val dao = database.messageDao()
+        val selected = dao.message(accountId, localMessageId)
+            ?.takeIf { it.peerJid == peerJid && it.messageKind == MessageKind.CHAT }
+            ?: return@withTransaction emptyList()
+        val target = dao.directReactionTarget(selected) ?: return@withTransaction emptyList()
+        if (selected.localMessageId != target.localMessageId) reparentReactions(selected, target)
+        dao.messageReactionsForMessage(accountId, peerJid, target.localMessageId)
+            .firstOrNull { it.senderBareJid == senderBareJid }
+            ?.let { decodeReactionEmojis(it.emojis) }
+            .orEmpty()
     }
 
     suspend fun reactionDisplays(
@@ -2126,7 +2167,9 @@ class MessageStore private constructor(
             } else {
                 writeReactionRow(dao, reaction, localMessageId = null)
             }
-            1 -> writeReactionRow(dao, reaction, localMessageId = matches.single().localMessageId)
+            1 -> dao.directReactionTarget(matches.single())?.let { target ->
+                writeReactionRow(dao, reaction, localMessageId = target.localMessageId)
+            } ?: writeReactionRow(dao, reaction, localMessageId = null)
             else -> ReactionApplyOutcome.IGNORED
         }
     }
@@ -2180,19 +2223,22 @@ class MessageStore private constructor(
         val aliases = dao.trustedAliasesForMessage(winner.accountId, winner.localMessageId)
             .filter { it.kind in REACTION_REFERENCE_KINDS }
         val messageIds = aliases.filter { it.kind == IdentityAliasKind.MESSAGE_ID }.map { it.value }.toSet()
-        val knownIds = aliases.map { it.value }.toSet()
-        val pending = dao.messageReactions(winner.accountId, winner.peerJid)
-            .filter { it.localMessageId == null && it.wireTargetId in knownIds }
+        val pending = dao.pendingReactionsForMessageAliases(
+            winner.accountId,
+            winner.peerJid,
+            winner.localMessageId,
+        )
         pending.filter { it.wireTargetId !in messageIds }.forEach { row ->
             dao.deleteMessageReaction(row.accountId, row.peerJid, row.senderBareJid, row.targetKey)
         }
+        val target = dao.directReactionTarget(winner) ?: return
         for (rows in pending.filter { it.wireTargetId in messageIds }
             .groupBy(MessageReactionEntity::senderBareJid).values) {
             val newest = rows.maxBy { it.updatedAtMs }
             writeReactionRow(
                 dao,
                 newest.toApply(requireNotNull(dao.accountBareJid(newest.accountId))),
-                winner.localMessageId,
+                target.localMessageId,
                 keepNewest = true,
             )
             rows.forEach { row ->
@@ -2203,8 +2249,7 @@ class MessageStore private constructor(
 
     private suspend fun reparentReactions(loser: MessageEntity, winner: MessageEntity) {
         val dao = database.messageDao()
-        dao.messageReactions(loser.accountId, loser.peerJid)
-            .filter { it.localMessageId == loser.localMessageId }
+        dao.messageReactionsForMessage(loser.accountId, loser.peerJid, loser.localMessageId)
             .forEach { row ->
             writeReactionRow(
                 dao,
@@ -2214,6 +2259,20 @@ class MessageStore private constructor(
             )
             dao.deleteMessageReaction(row.accountId, row.peerJid, row.senderBareJid, row.targetKey)
         }
+    }
+
+    private suspend fun MessageDao.directReactionTarget(message: MessageEntity): MessageEntity? {
+        if (message.replaceId == null) return message.takeIf { it.correctionTargetMessageId == null }
+        val targetId = message.correctionTargetMessageId ?: return null
+        val target = message(message.accountId, targetId) ?: return null
+        if (!message.canCorrect(target)) return null
+        val alias = trustedAlias(
+            message.accountId,
+            IdentityAliasKind.MESSAGE_ID,
+            message.senderJid,
+            message.replaceId,
+        )
+        return target.takeIf { alias?.messageId == target.localMessageId }
     }
 
     private suspend fun reconcileCorrections(
@@ -2235,6 +2294,10 @@ class MessageStore private constructor(
                 dao.updateMessage(winner)
             }
         }
+        dao.directReactionTarget(winner)?.takeIf { it.localMessageId != winner.localMessageId }?.let { original ->
+            reparentReactions(winner, original)
+            attachPendingReactions(dao, winner)
+        }
         if (winner.replaceId == null) {
             val resolved = mutableSetOf<String>()
             for (alias in incoming.aliases) {
@@ -2247,7 +2310,10 @@ class MessageStore private constructor(
                     alias.value,
                 )) {
                     if (resolved.add(correction.localMessageId) && correction.canCorrect(winner)) {
-                        dao.updateMessage(correction.copy(correctionTargetMessageId = winner.localMessageId))
+                        val linked = correction.copy(correctionTargetMessageId = winner.localMessageId)
+                        dao.updateMessage(linked)
+                        reparentReactions(correction, winner)
+                        attachPendingReactions(dao, linked)
                     }
                 }
             }
@@ -3413,6 +3479,7 @@ private fun MessageEntity.canCorrect(target: MessageEntity): Boolean =
         isPlainDirectText() &&
         target.isPlainDirectText() &&
         target.replaceId == null &&
+        target.correctionTargetMessageId == null &&
         threadId == target.threadId &&
         parentThreadId == target.parentThreadId
 
