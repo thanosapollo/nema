@@ -209,7 +209,9 @@ internal class SmackSessionConnection(
     private val revoked = AtomicBoolean(false)
     private val disconnectStarted = AtomicBoolean(false)
     private val stableIdGate = StableIdDiscoveryGate()
+    private val roomStableIdAuthorities = RoomStableIdAuthorityRegistry()
     private val watchedRooms = mutableSetOf<String>()
+    private val roomStatusListeners = ConcurrentHashMap<String, RoomStableIdRevocationListener>()
     private val roomNicks = ConcurrentHashMap<String, String>()
     private val roomDiscoNames = ConcurrentHashMap<String, String>()
     private val connectionListener = AttemptConnectionListener().also(connection::addConnectionListener)
@@ -259,6 +261,7 @@ internal class SmackSessionConnection(
         synchronized(entryGate) {
             if (revoked.compareAndSet(false, true)) {
                 stableIdGate.retireAll()
+                roomStableIdAuthorities.retireAll()
                 roomNicks.clear()
                 connectionListener.localDisconnect()
             }
@@ -366,7 +369,16 @@ internal class SmackSessionConnection(
             }
             requireExactAttempt(request.accountId, request.generation)
             val attempt = requireNotNull(connectionListener.currentAttempt())
-            val trustStableIds = request.scope == ACCOUNT_ARCHIVE_SCOPE && stableIdGate.support(attempt) == true
+            val roomLease = if (request.scope == ACCOUNT_ARCHIVE_SCOPE) {
+                null
+            } else {
+                roomStableIdAuthorities.lease(attempt, archiveJid)
+            }
+            val trustStableIdsAtStart = if (request.scope == ACCOUNT_ARCHIVE_SCOPE) {
+                stableIdGate.support(attempt) == true
+            } else {
+                roomLease != null
+            }
             val builder = MamManager.MamQueryArgs.builder().setResultPageSizeTo(request.pageSize)
             when (request.direction) {
                 ArchivePageDirection.BOOTSTRAP -> builder.queryLastPage()
@@ -379,6 +391,11 @@ internal class SmackSessionConnection(
             ).queryArchive(builder.build()).page
             requireExactAttempt(request.accountId, request.generation)
             if (connectionListener.currentAttempt() != attempt) throw SendNotAttemptedException()
+            val trustStableIds = trustStableIdsAtStart && if (request.scope == ACCOUNT_ARCHIVE_SCOPE) {
+                stableIdGate.support(attempt) == true
+            } else {
+                roomLease?.let(roomStableIdAuthorities::isCurrent) == true
+            }
             val fin = queryPage.mamFinIq
             val rsm = requireNotNull(fin.rsmSet) { "MAM response omitted RSM boundaries" }
             val carriers = queryPage.mamResultCarrierMessages
@@ -553,12 +570,28 @@ internal class SmackSessionConnection(
         password: String?,
     ): Boolean = runInterruptible(Dispatchers.IO) {
         requireExactAttempt(accountId, generation)
+        val attempt = requireNotNull(connectionListener.currentAttempt())
         val room = JidCreate.entityBareFrom(roomJid)
+        val roomLease = roomStableIdAuthorities.beginJoin(attempt, room.toString())
+            ?: throw SendNotAttemptedException()
         val muc = MultiUserChatManager.getInstanceFor(connection).getMultiUserChat(room)
+        listenToRoom(muc, roomJid, roomLease)
+        val supportsStableIds = try {
+            ServiceDiscoveryManager.getInstanceFor(connection).supportsFeature(
+                room,
+                StableUniqueStanzaIdManager.NAMESPACE,
+            )
+        } catch (interrupted: InterruptedException) {
+            throw interrupted
+        } catch (_: Exception) {
+            false
+        }
+        requireExactAttempt(accountId, generation)
+        if (connectionListener.currentAttempt() != attempt) throw SendNotAttemptedException()
         val roomNick = preferredRoomNick(nick, expectedBareJid)
         val nickPart = Resourcepart.from(roomNick)
-        listenToRoom(muc, roomJid)
         if (muc.isJoined) {
+            roomStableIdAuthorities.publish(roomLease, supportsStableIds)
             rememberRoomDiscoName(room, roomJid)
             emitRoomView(muc, roomJid)
             return@runInterruptible true
@@ -572,10 +605,12 @@ internal class SmackSessionConnection(
             .build()
         try {
             muc.join(enter)
+            roomStableIdAuthorities.publish(roomLease, supportsStableIds)
             rememberRoomDiscoName(room, roomJid)
             emitRoomView(muc, roomJid)
             true
         } catch (_: MultiUserChatException.MucAlreadyJoinedException) {
+            roomStableIdAuthorities.publish(roomLease, supportsStableIds)
             rememberRoomDiscoName(room, roomJid)
             emitRoomView(muc, roomJid)
             true
@@ -688,7 +723,13 @@ internal class SmackSessionConnection(
         }
     }
 
-    private fun listenToRoom(muc: MultiUserChat, roomJid: String) {
+    private fun listenToRoom(muc: MultiUserChat, roomJid: String, lease: RoomStableIdLease) {
+        val statusListener = RoomStableIdRevocationListener(roomStableIdAuthorities, lease) {
+            roomNicks.remove(roomJid)
+        }
+        val previous = roomStatusListeners.put(roomJid, statusListener)
+        muc.addUserStatusListener(statusListener)
+        previous?.let(muc::removeUserStatusListener)
         if (!watchedRooms.add(roomJid)) return
         muc.addParticipantListener { emitRoomView(muc, roomJid) }
         muc.addSubjectUpdatedListener { _, _ -> emitRoomView(muc, roomJid) }
@@ -815,9 +856,13 @@ internal class SmackSessionConnection(
         decision.message.toIncomingEnvelope(
             decision.attempt,
             expectedBareJid,
-            expectedBareJid.takeIf {
-                decision.trustStableIds && decision.message.type != Message.Type.groupchat
-            },
+            trustedStableIdAuthority(
+                decision.message,
+                decision.attempt,
+                expectedBareJid,
+                decision.trustStableIds,
+                roomStableIdAuthorities,
+            ),
             room?.let(roomNicks::get),
             decision.sentAtEpochMs,
             decision.sentTimeSource,
@@ -913,12 +958,14 @@ internal class SmackSessionConnection(
 
         fun attemptStarting(attempt: SessionAttemptIdentity) {
             stableIdGate.begin(attempt)
+            roomStableIdAuthorities.begin(attempt)
             this.attempt = attempt
             lossNotifier.attemptStarting()
         }
 
         fun updateAttempt(attempt: SessionAttemptIdentity) {
             stableIdGate.begin(attempt)
+            roomStableIdAuthorities.begin(attempt)
             this.attempt = attempt
         }
 
