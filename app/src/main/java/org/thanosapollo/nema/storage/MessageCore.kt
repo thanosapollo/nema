@@ -861,17 +861,27 @@ abstract class MessageDao {
             WHERE correction.accountId = messages.accountId
               AND correction.correctionTargetMessageId = messages.localMessageId
           ) AS edited,
-          (
-            SELECT alias.value
-            FROM trusted_identity_aliases AS alias
-            WHERE alias.accountId = messages.accountId
-              AND alias.messageId = messages.localMessageId
-              AND alias.status = 'TRUSTED'
-              AND messages.messageKind != 'GROUPCHAT'
-              AND alias.kind IN ('ORIGIN_ID', 'MESSAGE_ID')
-            ORDER BY CASE alias.kind WHEN 'ORIGIN_ID' THEN 0 ELSE 1 END, alias.value
-            LIMIT 1
-          ) AS replyReferenceId,
+          CASE
+            WHEN messages.messageKind = 'GROUPCHAT' THEN (
+              SELECT CASE WHEN COUNT(*) = 1 THEN MIN(alias.value) END
+              FROM trusted_identity_aliases AS alias
+              WHERE alias.accountId = messages.accountId
+                AND alias.messageId = messages.localMessageId
+                AND alias.status = 'TRUSTED'
+                AND alias.kind = 'STANZA_ID'
+                AND alias.authority = messages.peerJid
+            )
+            ELSE (
+              SELECT alias.value
+              FROM trusted_identity_aliases AS alias
+              WHERE alias.accountId = messages.accountId
+                AND alias.messageId = messages.localMessageId
+                AND alias.status = 'TRUSTED'
+                AND alias.kind IN ('ORIGIN_ID', 'MESSAGE_ID')
+              ORDER BY CASE alias.kind WHEN 'ORIGIN_ID' THEN 0 ELSE 1 END, alias.value
+              LIMIT 1
+            )
+          END AS replyReferenceId,
           (
             SELECT position.archiveOrdinal
             FROM archive_message_positions AS position

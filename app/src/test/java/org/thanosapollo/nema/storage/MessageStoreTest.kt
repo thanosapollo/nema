@@ -4030,7 +4030,7 @@ class MessageStoreTest {
     }
 
     @Test
-    fun roomMamResultAndPersistedStanzaIdsNeverBecomeReplyTargetsWithoutRoomAuthority() = runBlocking {
+    fun roomMamResultIsNotReplyTargetButOneTrustedRoomStanzaIdIs() = runBlocking {
         val room = "room@conference.example.org"
         val key = ArchiveCursorKey(ACCOUNT, room, room)
         fun roomMessage(localId: String, body: String, aliases: List<TrustedIdentityAlias>) =
@@ -4054,7 +4054,17 @@ class MessageStoreTest {
                 complete = true,
                 hasEarlier = false,
                 messages = listOf(
-                    ArchivedIncomingMessage("mam-only", roomMessage("without", "without", emptyList())),
+                    ArchivedIncomingMessage(
+                        "mam-only",
+                        roomMessage(
+                            "without",
+                            "without",
+                            listOf(
+                                TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, "$room/alice", "top-level"),
+                                TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, "$room/alice", "origin"),
+                            ),
+                        ),
+                    ),
                     ArchivedIncomingMessage(
                         "different-mam-id",
                         roomMessage(
@@ -4063,16 +4073,45 @@ class MessageStoreTest {
                             listOf(TrustedIdentityAlias(IdentityAliasKind.STANZA_ID, room, "room-stanza-id")),
                         ),
                     ),
+                    ArchivedIncomingMessage(
+                        "wrong-authority-result",
+                        roomMessage(
+                            "wrong",
+                            "wrong",
+                            listOf(
+                                TrustedIdentityAlias(
+                                    IdentityAliasKind.STANZA_ID,
+                                    "other@conference.example.org",
+                                    "wrong-room-id",
+                                ),
+                            ),
+                        ),
+                    ),
+                    ArchivedIncomingMessage(
+                        "ambiguous-result",
+                        roomMessage(
+                            "ambiguous",
+                            "ambiguous",
+                            listOf(
+                                TrustedIdentityAlias(IdentityAliasKind.STANZA_ID, room, "room-id-one"),
+                                TrustedIdentityAlias(IdentityAliasKind.STANZA_ID, room, "room-id-two"),
+                            ),
+                        ),
+                    ),
                 ),
             ),
         )
 
         val timeline = database.messageDao().observeDirectTimeline(ACCOUNT, room).first()
-        assertEquals(listOf(null, null), timeline.map { it.replyReferenceId })
+        assertEquals(listOf(null, "room-stanza-id", null, null), timeline.map { it.replyReferenceId })
         assertEquals(
-            setOf(IdentityAliasKind.MAM_RESULT),
+            setOf(
+                IdentityAliasKind.MAM_RESULT,
+                IdentityAliasKind.MESSAGE_ID,
+                IdentityAliasKind.ORIGIN_ID,
+            ),
             database.messageDao().trustedAliases(ACCOUNT)
-                .filter { it.value in setOf("mam-only", "different-mam-id") }
+                .filter { it.messageId == "without" }
                 .map { it.kind }
                 .toSet(),
         )
