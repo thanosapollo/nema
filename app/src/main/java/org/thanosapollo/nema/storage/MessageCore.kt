@@ -24,6 +24,12 @@ import org.thanosapollo.nema.xmpp.reactions.reactionDisplaysFor
 import org.thanosapollo.nema.xmpp.transport.MessageTimeSource
 import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
 
+private val REACTION_REFERENCE_KINDS = setOf(
+    IdentityAliasKind.MESSAGE_ID,
+    IdentityAliasKind.ORIGIN_ID,
+    IdentityAliasKind.STANZA_ID,
+)
+
 @Dao
 abstract class MessageDao {
     @Query("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = :accountId)")
@@ -91,6 +97,26 @@ abstract class MessageDao {
         """,
     )
     abstract suspend fun outboundChatByAliasValue(
+        accountId: String,
+        peerJid: String,
+        targetId: String,
+    ): List<MessageEntity>
+
+    @Query(
+        """
+        SELECT messages.* FROM messages
+        INNER JOIN trusted_identity_aliases AS alias
+          ON alias.accountId = messages.accountId
+         AND alias.messageId = messages.localMessageId
+        WHERE messages.accountId = :accountId
+          AND messages.peerJid = :peerJid
+          AND messages.messageKind = 'CHAT'
+          AND alias.kind = 'MESSAGE_ID'
+          AND alias.value = :targetId
+          AND alias.status = 'TRUSTED'
+        """,
+    )
+    abstract suspend fun chatByMessageId(
         accountId: String,
         peerJid: String,
         targetId: String,
@@ -1906,9 +1932,14 @@ class MessageStore private constructor(
         database.withTransaction { applyIncomingReactionInTransaction(reaction) }
 
     suspend fun reactionWireTarget(accountId: String, peerJid: String, localMessageId: String): String? {
-        val aliases = database.messageDao().trustedAliasesForMessage(accountId, localMessageId)
-        return aliases.firstOrNull { it.kind == IdentityAliasKind.ORIGIN_ID }?.value
-            ?: aliases.firstOrNull { it.kind == IdentityAliasKind.MESSAGE_ID }?.value
+        val dao = database.messageDao()
+        val message = dao.message(accountId, localMessageId)
+            ?.takeIf { it.peerJid == peerJid && it.messageKind == MessageKind.CHAT }
+            ?: return null
+        return dao.trustedAliasesForMessage(message.accountId, message.localMessageId)
+            .filter { it.kind == IdentityAliasKind.MESSAGE_ID }
+            .singleOrNull()
+            ?.value
     }
 
     suspend fun ownReactionEmojis(
@@ -2087,16 +2118,22 @@ class MessageStore private constructor(
         if (reaction.senderBareJid !in setOf(reaction.accountBareJid, reaction.peerJid)) {
             return ReactionApplyOutcome.IGNORED
         }
-        val matches = (
-            dao.inboundChatByAliasValue(reaction.accountId, reaction.peerJid, reaction.targetId) +
-                dao.outboundChatByAliasValue(reaction.accountId, reaction.peerJid, reaction.targetId)
-            ).distinctBy(MessageEntity::localMessageId)
+        val matches = dao.chatByMessageId(reaction.accountId, reaction.peerJid, reaction.targetId)
+            .distinctBy(MessageEntity::localMessageId)
         return when (matches.size) {
-            0 -> writeReactionRow(dao, reaction, localMessageId = null)
+            0 -> if (dao.hasKnownAliasForReactionTarget(reaction)) {
+                ReactionApplyOutcome.IGNORED
+            } else {
+                writeReactionRow(dao, reaction, localMessageId = null)
+            }
             1 -> writeReactionRow(dao, reaction, localMessageId = matches.single().localMessageId)
             else -> ReactionApplyOutcome.IGNORED
         }
     }
+
+    private suspend fun MessageDao.hasKnownAliasForReactionTarget(reaction: IncomingReactionApply): Boolean =
+        inboundChatByAliasValue(reaction.accountId, reaction.peerJid, reaction.targetId).isNotEmpty() ||
+            outboundChatByAliasValue(reaction.accountId, reaction.peerJid, reaction.targetId).isNotEmpty()
 
     private suspend fun writeReactionRow(
         dao: MessageDao,
@@ -2141,16 +2178,16 @@ class MessageStore private constructor(
     private suspend fun attachPendingReactions(dao: MessageDao, winner: MessageEntity) {
         if (winner.messageKind != MessageKind.CHAT) return
         val aliases = dao.trustedAliasesForMessage(winner.accountId, winner.localMessageId)
-            .filter {
-                it.kind == IdentityAliasKind.ORIGIN_ID ||
-                    it.kind == IdentityAliasKind.MESSAGE_ID ||
-                    it.kind == IdentityAliasKind.STANZA_ID
-            }
-            .map { it.value }
-            .toSet()
+            .filter { it.kind in REACTION_REFERENCE_KINDS }
+        val messageIds = aliases.filter { it.kind == IdentityAliasKind.MESSAGE_ID }.map { it.value }.toSet()
+        val knownIds = aliases.map { it.value }.toSet()
         val pending = dao.messageReactions(winner.accountId, winner.peerJid)
-            .filter { it.localMessageId == null && it.wireTargetId in aliases }
-        for (rows in pending.groupBy(MessageReactionEntity::senderBareJid).values) {
+            .filter { it.localMessageId == null && it.wireTargetId in knownIds }
+        pending.filter { it.wireTargetId !in messageIds }.forEach { row ->
+            dao.deleteMessageReaction(row.accountId, row.peerJid, row.senderBareJid, row.targetKey)
+        }
+        for (rows in pending.filter { it.wireTargetId in messageIds }
+            .groupBy(MessageReactionEntity::senderBareJid).values) {
             val newest = rows.maxBy { it.updatedAtMs }
             writeReactionRow(
                 dao,
