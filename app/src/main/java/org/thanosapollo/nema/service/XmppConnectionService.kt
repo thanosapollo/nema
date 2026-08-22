@@ -678,6 +678,8 @@ class SessionRuntime(
                     )
                     return@withContext ConnectionCommandOutcome.NEEDS_CREDENTIALS
                 }
+                messages.attemptIdentitylessRepair(accountId.value)
+                if (!isCurrent()) return@withContext ConnectionCommandOutcome.STALE
                 controller.switchTo(
                     configuration = configuration,
                     credential = access.value,
@@ -713,6 +715,8 @@ class SessionRuntime(
                     controller.requireCredentials(active.id)
                     return@withContext ConnectionCommandOutcome.NEEDS_CREDENTIALS
                 }
+                messages.attemptIdentitylessRepair(active.id.value)
+                if (!isCurrent()) return@withContext ConnectionCommandOutcome.STALE
                 controller.start(active, access.value)
                 outcome()
             } finally {

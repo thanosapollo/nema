@@ -4,12 +4,14 @@ import android.app.Application
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import java.util.UUID
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -212,6 +214,43 @@ class IdentitylessRepairTest {
         val failure = runCatching { faulting.repairIdentitylessDuplicates(ACCOUNT) }.exceptionOrNull()
 
         assertTrue(failure is IllegalStateException)
+        assertEquals(2, store.messages(ACCOUNT).size)
+        assertEquals(
+            AccountReconciliationStateEntity(accountId = ACCOUNT, wallFloorMs = 1_000),
+            database.accountDao().reconciliationState(ACCOUNT),
+        )
+    }
+
+    @Test
+    fun ordinaryRepairFailureIsCountedSeparatelyAndRemainsPending() = runBlocking {
+        val store = MessageStore(database, clock = { 1_000 })
+        store.ingest(incoming("live", "same", MessageTimeSource.LOCAL))
+        store.applyArchivePage(page(archived("result", "mam", "same")))
+        val faulting = MessageStore.observingWrites(database) {
+            if (it == MessageWriteBoundary.AFTER_DEPENDENT_REPARENT) error("ordinary failure")
+        }
+
+        assertFalse(faulting.attemptIdentitylessRepair(ACCOUNT))
+
+        assertEquals(2, store.messages(ACCOUNT).size)
+        assertEquals(
+            AccountReconciliationStateEntity(accountId = ACCOUNT, wallFloorMs = 1_000, caughtErrorCount = 1),
+            database.accountDao().reconciliationState(ACCOUNT),
+        )
+    }
+
+    @Test
+    fun cancelledRepairIsNotCountedAndPropagates() = runBlocking {
+        val store = MessageStore(database, clock = { 1_000 })
+        store.ingest(incoming("live", "same", MessageTimeSource.LOCAL))
+        store.applyArchivePage(page(archived("result", "mam", "same")))
+        val faulting = MessageStore.observingWrites(database) {
+            if (it == MessageWriteBoundary.AFTER_DEPENDENT_REPARENT) throw CancellationException("cancel")
+        }
+
+        val failure = runCatching { faulting.attemptIdentitylessRepair(ACCOUNT) }.exceptionOrNull()
+
+        assertTrue(failure is CancellationException)
         assertEquals(2, store.messages(ACCOUNT).size)
         assertEquals(
             AccountReconciliationStateEntity(accountId = ACCOUNT, wallFloorMs = 1_000),

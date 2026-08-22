@@ -10,6 +10,7 @@ import androidx.room.Transaction
 import androidx.room.Update
 import androidx.room.Upsert
 import androidx.room.withTransaction
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.thread.ThreadId
@@ -2786,6 +2787,18 @@ class MessageStore private constructor(
             ) { "Identityless repair state changed during repair" }
             requireNotNull(accountDao.reconciliationState(accountId))
         }
+
+    suspend fun attemptIdentitylessRepair(accountId: String): Boolean = try {
+        repairIdentitylessDuplicates(accountId)
+        true
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        database.withTransaction {
+            database.accountDao().recordCaughtReconciliationError(accountId)
+        }
+        false
+    }
 
     suspend fun claim(accountId: String, operationId: String, generation: Long): OutboxClaim? {
         require(generation > 0) { "Connection generation must be positive" }

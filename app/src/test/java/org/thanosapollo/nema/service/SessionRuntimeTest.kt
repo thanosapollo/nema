@@ -9,6 +9,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -31,11 +32,19 @@ import org.thanosapollo.nema.session.SessionConnection
 import org.thanosapollo.nema.session.SessionConnectionFactory
 import org.thanosapollo.nema.session.SessionEvent
 import org.thanosapollo.nema.storage.AccountRepository
+import org.thanosapollo.nema.storage.ArchiveCursorKey
+import org.thanosapollo.nema.storage.ArchiveDirection
+import org.thanosapollo.nema.storage.ArchivePage
+import org.thanosapollo.nema.storage.ArchivedIncomingMessage
+import org.thanosapollo.nema.storage.IncomingMessage
 import org.thanosapollo.nema.storage.NemaDatabase
+import org.thanosapollo.nema.storage.MessageDirection
+import org.thanosapollo.nema.storage.MessageWriteBoundary
 import org.thanosapollo.nema.storage.MessageStore
 import org.thanosapollo.nema.storage.OutboundIntent
 import org.thanosapollo.nema.storage.OutboxStatus
 import org.thanosapollo.nema.storage.PeerIdentityStore
+import org.thanosapollo.nema.storage.ReconciliationRepairStatus
 import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmark
 import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmarkSnapshot
@@ -123,6 +132,107 @@ class SessionRuntimeTest {
         assertEquals(CredentialAccess.Missing, credentials.load(second.id))
         assertTrue(credentials.load(first.id) is CredentialAccess.Available)
         assertEquals(1, connections.created.last().disconnectCalls)
+    }
+
+    @Test
+    fun `connect and activate repair before opening each account connection`() = runTest {
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val observed = mutableListOf<ReconciliationRepairStatus?>()
+        val connections = RecordingConnectionFactory(onCreate = { accountId ->
+            observed += runBlocking {
+                database.accountDao().reconciliationState(accountId.value)?.status
+            }
+        })
+        val runtime = SessionRuntime(
+            accounts,
+            credentials,
+            MessageStore(database),
+            PeerIdentityStore(database.messageDao()),
+            backgroundScope,
+            connections,
+        )
+        val first = account("first")
+        val second = account("second")
+        runtime.prepareActivation(runtime.beginPendingActivation(), first, "first-secret".toCharArray()) {}
+        accounts.activate(first.id)
+
+        assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
+        runtime.prepareActivation(runtime.beginPendingActivation(), second, "second-secret".toCharArray()) {}
+        assertEquals(ConnectionCommandOutcome.RUNNING, runtime.activate(second.id))
+
+        assertEquals(listOf(ReconciliationRepairStatus.COMPLETE, ReconciliationRepairStatus.COMPLETE), observed)
+    }
+
+    @Test
+    fun `stale ownership after repair prevents connection creation`() = runTest {
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val connections = RecordingConnectionFactory()
+        val runtime = SessionRuntime(
+            accounts, credentials, MessageStore(database), PeerIdentityStore(database.messageDao()), backgroundScope, connections,
+        )
+        val active = account("active")
+        runtime.prepareActivation(runtime.beginPendingActivation(), active, "secret".toCharArray()) {}
+        accounts.activate(active.id)
+        var checks = 0
+
+        val result = runtime.connectActive { ++checks < 3 }
+
+        assertEquals(ConnectionCommandOutcome.STALE, result)
+        assertTrue(connections.created.isEmpty())
+        assertEquals(ReconciliationRepairStatus.COMPLETE, database.accountDao().reconciliationState(active.id.value)?.status)
+    }
+
+    @Test
+    fun `ordinary repair failure is counted and connection still opens`() = runTest {
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val active = account("active")
+        val setupStore = MessageStore(database, clock = { 1_000 })
+        val connections = RecordingConnectionFactory()
+        val faulting = MessageStore.observingWrites(database) {
+            if (it == MessageWriteBoundary.AFTER_DEPENDENT_REPARENT) error("repair failure")
+        }
+        val runtime = SessionRuntime(
+            accounts, credentials, faulting, PeerIdentityStore(database.messageDao()), backgroundScope, connections,
+        )
+        runtime.prepareActivation(runtime.beginPendingActivation(), active, "secret".toCharArray()) {}
+        accounts.activate(active.id)
+        prepareDuplicate(setupStore, active.id)
+
+        assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
+
+        assertEquals(1, connections.created.size)
+        val state = requireNotNull(database.accountDao().reconciliationState(active.id.value))
+        assertEquals(ReconciliationRepairStatus.PENDING, state.status)
+        assertEquals(1L, state.caughtErrorCount)
+    }
+
+    @Test
+    fun `repair cancellation prevents connection and remains uncounted`() = runTest {
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val active = account("active")
+        val setupStore = MessageStore(database, clock = { 1_000 })
+        val connections = RecordingConnectionFactory()
+        val faulting = MessageStore.observingWrites(database) {
+            if (it == MessageWriteBoundary.AFTER_DEPENDENT_REPARENT) throw kotlinx.coroutines.CancellationException("cancel")
+        }
+        val runtime = SessionRuntime(
+            accounts, credentials, faulting, PeerIdentityStore(database.messageDao()), backgroundScope, connections,
+        )
+        runtime.prepareActivation(runtime.beginPendingActivation(), active, "secret".toCharArray()) {}
+        accounts.activate(active.id)
+        prepareDuplicate(setupStore, active.id)
+
+        val failure = runCatching { runtime.connectActive() }.exceptionOrNull()
+
+        assertTrue(failure is kotlinx.coroutines.CancellationException)
+        assertTrue(connections.created.isEmpty())
+        val state = requireNotNull(database.accountDao().reconciliationState(active.id.value))
+        assertEquals(ReconciliationRepairStatus.PENDING, state.status)
+        assertEquals(0L, state.caughtErrorCount)
     }
 
     @Test
@@ -608,6 +718,38 @@ class SessionRuntimeTest {
         networkEndpoint = null,
     )
 
+    private suspend fun prepareDuplicate(store: MessageStore, accountId: AccountId) {
+        fun message(id: String, source: MessageTimeSource) = IncomingMessage(
+            accountId.value,
+            id,
+            "peer@example.org",
+            "peer@example.org",
+            MessageDirection.INBOUND,
+            MessageKind.CHAT,
+            null,
+            null,
+            "same",
+            null,
+            emptyList(),
+            sentAtEpochMs = 1_000,
+            sentTimeSource = source,
+        )
+        store.ingest(message("live", MessageTimeSource.LOCAL))
+        store.applyArchivePage(
+            ArchivePage(
+                ArchiveCursorKey(accountId.value, "${accountId.value}@example.org", "ACCOUNT"),
+                ArchiveDirection.BOOTSTRAP,
+                null,
+                complete = false,
+                hasEarlier = false,
+                stable = true,
+                firstId = "result",
+                lastId = "result",
+                messages = listOf(ArchivedIncomingMessage("result", message("mam", MessageTimeSource.MAM))),
+            ),
+        )
+    }
+
     private class MemoryBlobStore : CredentialBlobStore {
         private val values = mutableMapOf<AccountId, WrappedCredential>()
 
@@ -635,6 +777,7 @@ class SessionRuntimeTest {
     private class RecordingConnectionFactory(
         private val connectionStarted: CompletableDeferred<Unit>? = null,
         private val releaseConnection: CompletableDeferred<Unit>? = null,
+        private val onCreate: ((AccountId) -> Unit)? = null,
     ) : SessionConnectionFactory {
         val created = mutableListOf<RecordingConnection>()
 
@@ -642,7 +785,10 @@ class SessionRuntimeTest {
             configuration: AccountConfiguration,
             identity: org.thanosapollo.nema.session.SessionIdentity,
             event: (org.thanosapollo.nema.session.SessionEvent) -> Unit,
-        ) = RecordingConnection(configuration.id, connectionStarted, releaseConnection, event).also(created::add)
+        ): RecordingConnection {
+            onCreate?.invoke(configuration.id)
+            return RecordingConnection(configuration.id, connectionStarted, releaseConnection, event).also(created::add)
+        }
     }
 
     private class RecordingConnection(
