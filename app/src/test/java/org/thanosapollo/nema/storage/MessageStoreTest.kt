@@ -1748,6 +1748,129 @@ class MessageStoreTest {
     }
 
     @Test
+    fun closedArchivePageReconcilesOneIdentitylessLiveMamPair() = runBlocking {
+        val now = 31_001L
+        val store = MessageStore(database, clock = { now })
+        store.ingest(
+            incoming(localId = "live", body = "same", sentAtEpochMs = 1_000, sentTimeSource = MessageTimeSource.LOCAL),
+        )
+
+        val result = store.applyArchivePage(
+            archivePage(
+                archiveKey(ACCOUNT),
+                ArchiveDirection.BOOTSTRAP,
+                complete = true,
+                hasEarlier = false,
+                messages = listOf(identitylessArchived("result", "mam", 1_000)),
+            ),
+        )
+
+        assertEquals(0, result.inserted)
+        assertTrue(result.insertedInbound.isEmpty())
+        assertEquals(listOf("live"), store.messages(ACCOUNT).map(MessageEntity::localMessageId))
+        assertEquals(listOf(0L), store.archivePositions(ACCOUNT, "live").map { it.archiveOrdinal })
+        assertEquals(setOf("live"), store.aliases(ACCOUNT).mapNotNull { it.messageId }.toSet())
+        assertEquals(now, requireNotNull(database.accountDao().reconciliationState(ACCOUNT)).wallFloorMs)
+    }
+
+    @Test
+    fun coherentLaterFinSettlesPersistedBoundaryCandidate() = runBlocking {
+        var now = 31_001L
+        val store = MessageStore(database, clock = { now })
+        store.ingest(
+            incoming(localId = "live", body = "same", sentAtEpochMs = 1_000, sentTimeSource = MessageTimeSource.LOCAL),
+        )
+        val key = archiveKey(ACCOUNT)
+        store.applyArchivePage(
+            archivePage(
+                key,
+                ArchiveDirection.BOOTSTRAP,
+                complete = false,
+                hasEarlier = false,
+                messages = listOf(identitylessArchived("result", "mam", 1_000)),
+            ),
+        )
+        assertEquals(2, store.messages(ACCOUNT).size)
+
+        now = 31_002
+        store.applyArchivePage(
+            archivePage(
+                key,
+                ArchiveDirection.AFTER,
+                boundaryId = "result",
+                complete = true,
+                hasEarlier = false,
+            ),
+        )
+
+        assertEquals(listOf("live"), store.messages(ACCOUNT).map(MessageEntity::localMessageId))
+    }
+
+    @Test
+    fun failedFallbackMergeRollsBackPageAndFloor() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(
+            incoming(localId = "live", body = "same", sentAtEpochMs = 1_000, sentTimeSource = MessageTimeSource.LOCAL),
+        )
+        val faulting = MessageStore.observingWrites(database) {
+            if (it == MessageWriteBoundary.AFTER_DEPENDENT_REPARENT) error("stop during merge")
+        }
+
+        assertSuspendFailure<IllegalStateException> {
+            faulting.applyArchivePage(
+                archivePage(
+                    archiveKey(ACCOUNT),
+                    ArchiveDirection.BOOTSTRAP,
+                    complete = true,
+                    hasEarlier = false,
+                    messages = listOf(identitylessArchived("result", "mam", 1_000)),
+                ),
+            )
+        }
+
+        assertEquals(listOf("live"), store.messages(ACCOUNT).map(MessageEntity::localMessageId))
+        assertTrue(store.aliases(ACCOUNT).isEmpty())
+        assertNull(store.archiveCursor(archiveKey(ACCOUNT)))
+        assertEquals(1_000L, requireNotNull(database.accountDao().reconciliationState(ACCOUNT)).wallFloorMs)
+    }
+
+    @Test
+    fun denseWindowSkipsFallbackWithoutRejectingArchivePage() = runBlocking {
+        var store = MessageStore(database, clock = { 31_001 })
+        store.ingest(
+            incoming(localId = "matching-live", body = "same", sentAtEpochMs = 1_000, sentTimeSource = MessageTimeSource.LOCAL),
+        )
+        repeat(IDENTITYLESS_RECONCILIATION_CANDIDATE_CAP) { index ->
+            store.ingest(
+                incoming(
+                    localId = "unrelated-$index",
+                    body = "unrelated-$index",
+                    sentAtEpochMs = 1_000,
+                    sentTimeSource = MessageTimeSource.LOCAL,
+                ),
+            )
+        }
+        val page = archivePage(
+            archiveKey(ACCOUNT),
+            ArchiveDirection.BOOTSTRAP,
+            complete = true,
+            hasEarlier = false,
+            messages = listOf(identitylessArchived("result", "mam", 1_000)),
+        )
+
+        val result = store.applyArchivePage(page)
+
+        assertEquals(ArchivePageStatus.APPLIED, result.status)
+        assertEquals(IDENTITYLESS_RECONCILIATION_CANDIDATE_CAP + 2, store.messages(ACCOUNT).size)
+        assertEquals(31_001L, requireNotNull(database.accountDao().reconciliationState(ACCOUNT)).wallFloorMs)
+        assertEquals("result", store.archiveCursor(archiveKey(ACCOUNT))?.newestId)
+
+        store = reopenStore()
+        assertEquals(ArchivePageStatus.RETRYABLE_ERROR, store.applyArchivePage(page).status)
+        assertEquals(IDENTITYLESS_RECONCILIATION_CANDIDATE_CAP + 2, store.messages(ACCOUNT).size)
+    }
+
+    @Test
     fun firstIngestIsInsertedAndAliasReplayIsNot() = runBlocking {
         val store = MessageStore(database)
         val origin = alias("wire-1")
@@ -4402,6 +4525,16 @@ class MessageStoreTest {
             replyFallbackBody = replyFallbackBody,
         ),
     )
+
+    private fun identitylessArchived(resultId: String, localId: String, sentAtMs: Long) =
+        archived(resultId, localId, "same").let { archived ->
+            archived.copy(
+                message = requireNotNull(archived.message).copy(
+                    sentAtEpochMs = sentAtMs,
+                    sentTimeSource = MessageTimeSource.MAM,
+                ),
+            )
+        }
 
     private fun incoming(
         accountId: String = ACCOUNT,

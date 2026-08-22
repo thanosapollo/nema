@@ -2558,9 +2558,7 @@ class MessageStore private constructor(
             }
         }
 
-        var ingested = 0
-        var inserted = 0
-        val insertedInbound = mutableListOf<InsertedInbound>()
+        val ingestedContent = mutableListOf<Pair<ArchivedIncomingMessage, IngestionResult>>()
         page.messages.forEachIndexed { index, archived ->
             archived.signal?.let { signal ->
                 recordReceiptSignalInTransaction(
@@ -2579,10 +2577,9 @@ class MessageStore private constructor(
                 authority = aliasAuthority,
                 value = archived.resultId,
             )
-            val aliases = (message.aliases + archiveAlias).distinct()
             val result = ingestInTransaction(
                 message.withoutArchivePosition().copy(
-                    aliases = aliases,
+                    aliases = (message.aliases + archiveAlias).distinct(),
                     unreadEligible = page.direction == ArchiveDirection.AFTER &&
                         archived.resultId != page.boundaryId,
                 ),
@@ -2600,8 +2597,47 @@ class MessageStore private constructor(
                     ordinal = Math.addExact(startOrdinal, index.toLong()),
                 ),
             )
-            ingested++
-            if (result.inserted && !result.identityConflict) {
+            ingestedContent += archived to result
+        }
+
+        val accountDao = database.accountDao()
+        val floor = if (accountDao.advanceReconciliationWallFloor(
+                page.key.accountId,
+                maxOf(clock(), 0),
+            ) == 1
+        ) {
+            accountDao.reconciliationState(page.key.accountId)?.wallFloorMs
+        } else {
+            null
+        }
+        val closure = IdentitylessArchiveClosure(
+            key = page.key,
+            observedThroughMs = page.messages.mapNotNull { archived ->
+                archived.message?.takeIf { it.sentTimeSource == MessageTimeSource.MAM }
+                    ?.sentAtEpochMs?.takeIf { it >= 0 }
+            }.maxOrNull(),
+            complete = page.complete,
+        )
+        val seedIds = ingestedContent.mapTo(mutableSetOf()) { it.second.messageId }
+        page.boundaryId?.let { boundaryId ->
+            dao.trustedAlias(
+                page.key.accountId,
+                IdentityAliasKind.MAM_RESULT,
+                aliasAuthority,
+                boundaryId,
+            )?.messageId?.let(seedIds::add)
+        }
+        if (seedIds.size <= IDENTITYLESS_RECONCILIATION_CANDIDATE_CAP) {
+            seedIds.forEach { reconcileIdentitylessArchiveSeed(it, closure, floor) }
+        }
+
+        var inserted = 0
+        val insertedInbound = mutableListOf<InsertedInbound>()
+        ingestedContent.forEach { (archived, result) ->
+            val message = requireNotNull(archived.message)
+            if (result.inserted && !result.identityConflict &&
+                dao.message(page.key.accountId, result.messageId) != null
+            ) {
                 inserted++
                 insertedInbound += InsertedInbound(
                     peerJid = message.peerJid,
@@ -2611,6 +2647,7 @@ class MessageStore private constructor(
                 )
             }
         }
+        val ingested = ingestedContent.size
 
         val pageOldestOrdinal = page.firstId?.let { startOrdinal }
         val pageNewestOrdinal = page.lastId?.let {
@@ -2646,6 +2683,55 @@ class MessageStore private constructor(
         dao.upsertArchiveCursor(next)
         writeBoundary(MessageWriteBoundary.AFTER_ARCHIVE_CURSOR)
         ArchivePageResult(ArchivePageStatus.APPLIED, next, ingested, inserted, insertedInbound)
+    }
+
+    private suspend fun reconcileIdentitylessArchiveSeed(
+        seedMessageId: String,
+        closure: IdentitylessArchiveClosure,
+        wallFloorMs: Long?,
+    ) {
+        if (wallFloorMs == null) return
+        val dao = database.messageDao()
+        val seed = dao.message(closure.key.accountId, seedMessageId) ?: return
+        val seedTime = seed.sentAtEpochMs?.takeIf { it >= 0 } ?: return
+        val radius = IDENTITYLESS_RECONCILIATION_WINDOW_MS * 2
+        val lower = maxOf(seedTime - radius, 0)
+        val upper = if (seedTime > Long.MAX_VALUE - radius) Long.MAX_VALUE else seedTime + radius
+        val messages = dao.identitylessReconciliationCandidates(
+            closure.key.accountId,
+            seed.peerJid,
+            lower,
+            upper,
+            IDENTITYLESS_RECONCILIATION_CANDIDATE_CAP + 1,
+        )
+        if (messages.isEmpty() || messages.size > IDENTITYLESS_RECONCILIATION_CANDIDATE_CAP) return
+        val messageIds = messages.map(MessageEntity::localMessageId)
+        val aliases = dao.trustedAliasesForMessages(closure.key.accountId, messageIds)
+            .groupBy(TrustedIdentityAliasEntity::messageId)
+        val positions = dao.archivePositionsForMessages(closure.key.accountId, messageIds)
+            .groupBy(ArchiveMessagePositionEntity::messageId)
+        val outboxIds = dao.outboxesForMessages(closure.key.accountId, messageIds)
+            .mapTo(mutableSetOf(), OutboxEntity::messageId)
+        val conflictIds = dao.conflictsForMessages(closure.key.accountId, messageIds)
+            .flatMapTo(mutableSetOf()) { listOf(it.firstMessageId, it.secondMessageId) }
+        val candidates = messages.map { message ->
+            IdentitylessReconciliationCandidate(
+                message = message,
+                aliases = aliases[message.localMessageId].orEmpty(),
+                positions = positions[message.localMessageId].orEmpty(),
+                hasOutbox = message.localMessageId in outboxIds,
+                hasConflict = message.localMessageId in conflictIds,
+            )
+        }
+        val pair = closedIdentitylessPair(
+            seedMessageId,
+            candidates,
+            closure,
+            wallFloorMs,
+        ) ?: return
+        val live = dao.message(closure.key.accountId, pair.liveMessageId) ?: return
+        val mam = dao.message(closure.key.accountId, pair.mamMessageId) ?: return
+        mergePair(live, mam)
     }
 
     suspend fun claim(accountId: String, operationId: String, generation: Long): OutboxClaim? {
