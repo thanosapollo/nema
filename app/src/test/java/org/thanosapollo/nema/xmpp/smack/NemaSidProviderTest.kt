@@ -133,7 +133,7 @@ class NemaSidProviderTest {
                     message.toIncomingEnvelope(
                         attempt,
                         "account@example.org",
-                        trustedStableIdAuthority = true,
+                        trustedStableIdAuthority = "account@example.org",
                     ),
                 ).stanzaIds.isEmpty(),
             )
@@ -144,7 +144,7 @@ class NemaSidProviderTest {
                     reparsed.toIncomingEnvelope(
                         attempt,
                         "account@example.org",
-                        trustedStableIdAuthority = true,
+                        trustedStableIdAuthority = "account@example.org",
                     ),
                 ).stanzaIds.isEmpty(),
             )

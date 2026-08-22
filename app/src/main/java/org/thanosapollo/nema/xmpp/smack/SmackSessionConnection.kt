@@ -815,7 +815,9 @@ internal class SmackSessionConnection(
         decision.message.toIncomingEnvelope(
             decision.attempt,
             expectedBareJid,
-            decision.trustStableIds,
+            expectedBareJid.takeIf {
+                decision.trustStableIds && decision.message.type != Message.Type.groupchat
+            },
             room?.let(roomNicks::get),
             decision.sentAtEpochMs,
             decision.sentTimeSource,
@@ -1171,7 +1173,7 @@ private fun Message.mucActorBareJid(): String? = extensions
 internal fun Message.toIncomingEnvelope(
     attempt: SessionAttemptIdentity,
     expectedBareJid: String,
-    trustedStableIdAuthority: Boolean = false,
+    trustedStableIdAuthority: String? = null,
     ownRoomNick: String? = null,
     suppliedSentAtEpochMs: Long? = null,
     suppliedSentTimeSource: MessageTimeSource? = null,
@@ -1227,7 +1229,7 @@ internal fun Message.toIncomingEnvelope(
             originId = structurallyValidOriginId(),
             body = messageBody,
             thread = toThreadRef(),
-            stanzaIds = emptyList(),
+            stanzaIds = trustedStanzaIds(trustedStableIdAuthority.takeIf { it == room }),
             kind = MessageKind.GROUPCHAT,
             attachmentUrl = share?.url,
             attachmentName = share?.description,
@@ -1253,14 +1255,7 @@ internal fun Message.toIncomingEnvelope(
             messageId = stanzaId,
             body = messageBody,
             thread = toThreadRef(),
-            stanzaIds = if (trustedStableIdAuthority) {
-                getExtensions(StanzaIdElement::class.java)
-                    .filter { it !is NemaStanzaIdElement || it.structurallyValid }
-                    .filter { it.by == expectedBareJid }
-                    .map { StanzaIdEnvelope(it.id, it.by) }
-            } else {
-                emptyList()
-            },
+            stanzaIds = trustedStanzaIds(trustedStableIdAuthority.takeIf { it == expectedBareJid }),
             kind = MessageKind.CHAT,
             attachmentUrl = share?.url,
             attachmentName = share?.description,
@@ -1275,11 +1270,31 @@ internal fun Message.toIncomingEnvelope(
     }
 }
 
-private fun Message.structurallyValidOriginId(): String? =
-    getExtensions(OriginIdElement::class.java)
-        .singleOrNull()
-        ?.takeIf { it !is NemaOriginIdElement || it.structurallyValid }
-        ?.id
+private fun Message.structurallyValidOriginId(): String? {
+    val candidates = extensions.filter {
+        it.elementName == OriginIdElement.ELEMENT && it.namespace == StableUniqueStanzaIdManager.NAMESPACE
+    }
+    val candidate = candidates.singleOrNull() as? OriginIdElement ?: return null
+    if (candidate is NemaOriginIdElement && !candidate.structurallyValid) return null
+    return candidate.id.takeIf(String::isNotEmpty)
+}
+
+private fun Message.trustedStanzaIds(authority: String?): List<StanzaIdEnvelope> {
+    if (authority == null) return emptyList()
+    val candidates = extensions.filter {
+        it.elementName == StanzaIdElement.ELEMENT &&
+            it.namespace == StableUniqueStanzaIdManager.NAMESPACE &&
+            when (it) {
+                is StanzaIdElement -> it.by == authority
+                is StandardExtensionElement -> it.getAttributeValue("by") == authority
+                else -> false
+            }
+    }
+    val candidate = candidates.singleOrNull() as? StanzaIdElement ?: return emptyList()
+    if (candidate is NemaStanzaIdElement && !candidate.structurallyValid) return emptyList()
+    if (candidate.id.isEmpty()) return emptyList()
+    return listOf(StanzaIdEnvelope(candidate.id, candidate.by))
+}
 
 internal data class OutgoingFailureMapping(
     val consumed: Boolean,
@@ -1403,7 +1418,7 @@ internal fun normalizeMamResults(
             owned.actualMessage?.toIncomingEnvelope(
                 attempt,
                 mappingBareJid,
-                trustStableIds,
+                expectedArchiveAuthority.takeIf { trustStableIds },
                 ownRoomNick,
                 owned.forwarded.delayInformation?.stamp?.time,
                 owned.forwarded.delayInformation?.let { MessageTimeSource.MAM },

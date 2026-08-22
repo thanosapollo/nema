@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.test.core.app.ApplicationProvider
 import java.time.Instant
 import java.util.Date
+import org.jivesoftware.smack.packet.ExtensionElement
 import org.jivesoftware.smack.packet.Message
 import org.jivesoftware.smack.packet.StandardExtensionElement
 import org.jivesoftware.smack.packet.StanzaBuilder
@@ -18,6 +19,7 @@ import org.jivesoftware.smackx.disco.ServiceDiscoveryManager
 import org.jivesoftware.smackx.message_correct.element.MessageCorrectExtension
 import org.jivesoftware.smackx.receipts.DeliveryReceipt
 import org.jivesoftware.smackx.receipts.DeliveryReceiptRequest
+import org.jivesoftware.smackx.sid.StableUniqueStanzaIdManager
 import org.jivesoftware.smackx.sid.element.OriginIdElement
 import org.jivesoftware.smackx.sid.element.StanzaIdElement
 import org.jxmpp.jid.impl.JidCreate
@@ -61,6 +63,7 @@ import org.thanosapollo.nema.xmpp.transport.OutgoingMessageEnvelope
 import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
 import org.thanosapollo.nema.xmpp.transport.MessageSignalProtocol
 import org.thanosapollo.nema.xmpp.transport.OutgoingMessageSignal
+import org.thanosapollo.nema.xmpp.transport.StanzaIdEnvelope
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
@@ -96,7 +99,13 @@ class SmackDirectMessageMapperTest {
         assertEquals(2, envelope.attempt)
         assertEquals("peer@example.org", message.to.toString())
         assertEquals("body", message.body)
-        assertEquals("origin", message.getExtension(OriginIdElement::class.java).id)
+        val origin = message.getExtension(OriginIdElement::class.java)
+        assertEquals("origin", origin.id)
+        assertEquals(
+            "<origin-id xmlns='urn:xmpp:sid:0' id='origin'/>",
+            origin.toXML().toString(),
+        )
+        assertTrue(message.getExtensions(StanzaIdElement::class.java).isEmpty())
         assertEquals(envelope.thread, message.toThreadRef())
         assertTrue(DeliveryReceiptRequest.from(message) != null)
         assertTrue(message.getExtensionElement("markable", "urn:xmpp:chat-markers:0") != null)
@@ -104,6 +113,36 @@ class SmackDirectMessageMapperTest {
             "active",
             message.getExtensionElement("active", CHAT_STATES_NAMESPACE)?.elementName,
         )
+    }
+
+    @Test
+    fun `incoming origin ID requires one structurally valid element`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        fun message(vararg extensions: ExtensionElement): Message {
+            val builder = StanzaBuilder.buildMessage("message")
+                .from(JidCreate.entityFullFrom("peer@example.org/device"))
+                .ofType(Message.Type.chat)
+                .setBody("body")
+            extensions.forEach(builder::addExtension)
+            return builder.build()
+        }
+        val valid = message(OriginIdElement("valid"))
+        val duplicate = message(OriginIdElement("one"), OriginIdElement("two"))
+        val malformed = StandardExtensionElement.builder("origin-id", StableUniqueStanzaIdManager.NAMESPACE)
+            .addAttribute("id", "malformed")
+            .addElement("child", StableUniqueStanzaIdManager.NAMESPACE)
+            .build()
+        val mixed = message(OriginIdElement("typed"), malformed)
+
+        assertEquals("valid", requireNotNull(valid.toIncomingEnvelope(attempt, "account@example.org")).originId)
+        listOf(duplicate, mixed).forEach {
+            assertNull(requireNotNull(it.toIncomingEnvelope(attempt, "account@example.org")).originId)
+        }
     }
 
     @Test
@@ -702,6 +741,10 @@ class SmackDirectMessageMapperTest {
         )
         assertTrue(ServiceDiscoveryManager.getInstanceFor(connection).includesFeature(REACTIONS_NAMESPACE))
         assertTrue(ServiceDiscoveryManager.getInstanceFor(connection).includesFeature(RTT_NAMESPACE))
+        assertFalse(
+            ServiceDiscoveryManager.getInstanceFor(connection)
+                .includesFeature(StableUniqueStanzaIdManager.NAMESPACE),
+        )
     }
 
     @Test
@@ -724,7 +767,7 @@ class SmackDirectMessageMapperTest {
             message.toIncomingEnvelope(
                 attempt,
                 "account@example.org",
-                trustedStableIdAuthority = true,
+                trustedStableIdAuthority = "account@example.org",
             ),
         )
 
@@ -1090,12 +1133,81 @@ class SmackDirectMessageMapperTest {
             .build()
 
         val trusted = requireNotNull(
-            message.toIncomingEnvelope(attempt, "account@example.org", trustedStableIdAuthority = true),
+            message.toIncomingEnvelope(
+                attempt,
+                "account@example.org",
+                trustedStableIdAuthority = "account@example.org",
+            ),
         )
         val undiscovered = requireNotNull(message.toIncomingEnvelope(attempt, "account@example.org"))
 
         assertEquals(listOf("trusted"), trusted.stanzaIds.map { it.id })
         assertTrue(undiscovered.stanzaIds.isEmpty())
+    }
+
+    @Test
+    fun `groupchat accepts exactly one advertised room stanza ID`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        val room = "room@conference.example.org"
+        val message = StanzaBuilder.buildMessage("occupant-controlled")
+            .from(JidCreate.entityFullFrom("$room/alice"))
+            .ofType(Message.Type.groupchat)
+            .setBody("body")
+            .addExtension(StanzaIdElement("room-issued", room))
+            .addExtension(StanzaIdElement("foreign", "archive.example.org"))
+            .build()
+
+        val trusted = requireNotNull(
+            message.toIncomingEnvelope(
+                attempt,
+                "account@example.org",
+                trustedStableIdAuthority = room,
+            ),
+        )
+
+        assertEquals(listOf(StanzaIdEnvelope("room-issued", room)), trusted.stanzaIds)
+    }
+
+    @Test
+    fun `duplicate or malformed trusted authority stanza IDs fail closed`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        val authority = "account@example.org"
+        fun message(vararg extensions: ExtensionElement): Message {
+            val builder = StanzaBuilder.buildMessage("message")
+                .from(JidCreate.entityFullFrom("peer@example.org/device"))
+                .ofType(Message.Type.chat)
+                .setBody("body")
+            extensions.forEach(builder::addExtension)
+            return builder.build()
+        }
+        val duplicate = message(
+            StanzaIdElement("one", authority),
+            StanzaIdElement("two", authority),
+        )
+        val malformed = StandardExtensionElement.builder("stanza-id", StableUniqueStanzaIdManager.NAMESPACE)
+            .addAttribute("id", "malformed")
+            .addAttribute("by", authority)
+            .addElement("child", StableUniqueStanzaIdManager.NAMESPACE)
+            .build()
+        val mixed = message(StanzaIdElement("trusted", authority), malformed)
+
+        listOf(duplicate, mixed).forEach {
+            assertTrue(
+                requireNotNull(
+                    it.toIncomingEnvelope(attempt, authority, trustedStableIdAuthority = authority),
+                ).stanzaIds.isEmpty(),
+            )
+        }
     }
 
     @Test
@@ -1137,7 +1249,7 @@ class SmackDirectMessageMapperTest {
             direct.message.toIncomingEnvelope(
                 direct.attempt,
                 "account@example.org",
-                direct.trustStableIds,
+                "account@example.org".takeIf { direct.trustStableIds },
             ),
         )
         assertEquals(listOf("trusted"), envelope.stanzaIds.map { it.id })
