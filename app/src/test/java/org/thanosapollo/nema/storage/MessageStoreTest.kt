@@ -1871,6 +1871,66 @@ class MessageStoreTest {
     }
 
     @Test
+    fun repeatedIdentitylessArchiveCopiesRemainSeparate() = runBlocking {
+        val store = MessageStore(database, clock = { 31_002 })
+        store.ingest(
+            incoming(localId = "live", body = "same", sentAtEpochMs = 1_000, sentTimeSource = MessageTimeSource.LOCAL),
+        )
+
+        val result = store.applyArchivePage(
+            archivePage(
+                archiveKey(ACCOUNT),
+                ArchiveDirection.BOOTSTRAP,
+                complete = true,
+                hasEarlier = false,
+                messages = listOf(
+                    identitylessArchived("result-1", "mam-1", 1_000),
+                    identitylessArchived("result-2", "mam-2", 1_001),
+                ),
+            ),
+        )
+
+        assertEquals(2, result.inserted)
+        assertEquals(setOf("live", "mam-1", "mam-2"), store.messages(ACCOUNT).map { it.localMessageId }.toSet())
+    }
+
+    @Test
+    fun persistedBoundaryAndCurrentInclusiveDuplicateRemainSeparate() = runBlocking {
+        var now = 30_001L
+        val store = MessageStore(database, clock = { now })
+        store.ingest(
+            incoming(localId = "live", body = "same", sentAtEpochMs = 30_000, sentTimeSource = MessageTimeSource.LOCAL),
+        )
+        val key = archiveKey(ACCOUNT)
+        store.applyArchivePage(
+            archivePage(
+                key,
+                ArchiveDirection.BOOTSTRAP,
+                complete = false,
+                hasEarlier = false,
+                messages = listOf(identitylessArchived("old-result", "old-mam", 0)),
+            ),
+        )
+
+        now = 90_001
+        store.applyArchivePage(
+            archivePage(
+                key,
+                ArchiveDirection.AFTER,
+                boundaryId = "old-result",
+                complete = true,
+                hasEarlier = false,
+                messages = listOf(identitylessArchived("new-result", "new-mam", 60_000)),
+            ),
+        )
+
+        assertEquals(
+            setOf("live", "old-mam", "new-mam"),
+            store.messages(ACCOUNT).map(MessageEntity::localMessageId).toSet(),
+        )
+    }
+
+    @Test
     fun firstIngestIsInsertedAndAliasReplayIsNot() = runBlocking {
         val store = MessageStore(database)
         val origin = alias("wire-1")
