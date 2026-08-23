@@ -30,6 +30,11 @@ private val REACTION_REFERENCE_KINDS = setOf(
     IdentityAliasKind.STANZA_ID,
 )
 
+enum class ReactionMutationOutcome { WRITTEN, SUPERSEDED }
+data class PendingReactionSelection(
+    val accepted: List<MessageReactionEntity>, val unsupported: List<MessageReactionEntity>,
+)
+
 @Dao
 abstract class MessageDao {
     @Query("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = :accountId)")
@@ -200,6 +205,91 @@ abstract class MessageDao {
         senderBareJid: String,
         targetKey: String,
     ): Int
+
+    @Query("SELECT changes()")
+    protected abstract suspend fun changedRowCount(): Int
+
+    private suspend fun requireValidReaction(row: MessageReactionEntity) {
+        check(row.accountId.isNotBlank() && row.peerJid.isNotBlank() && row.senderBareJid.isNotBlank())
+        check(row.wireTargetId.isNotBlank() && row.targetKey == reactionTargetKey(row.localMessageId, row.wireTargetId))
+        check(encodeReactionEmojis(decodeReactionEmojis(row.emojis)) == row.emojis)
+        check(row.revision in 1 until Long.MAX_VALUE)
+        row.localMessageId?.let { id ->
+            val owner = message(row.accountId, id)
+            check(owner != null && owner.peerJid == row.peerJid)
+        }
+    }
+
+    private suspend fun writeReaction(candidate: MessageReactionEntity): ReactionMutationOutcome {
+        requireValidReaction(candidate)
+        val current = messageReaction(candidate.accountId, candidate.peerJid, candidate.senderBareJid, candidate.targetKey)
+        current?.let { requireValidReaction(it) }
+        check(current == null || current.revision < Long.MAX_VALUE - 1)
+        upsertMessageReaction(candidate.copy(revision = (current?.revision ?: 0) + 1))
+        check(changedRowCount() == 1)
+        return ReactionMutationOutcome.WRITTEN
+    }
+
+    @Transaction
+    open suspend fun writeReactionFullSet(
+        candidate: MessageReactionEntity,
+        keepNewest: Boolean = false,
+    ): ReactionMutationOutcome {
+        requireValidReaction(candidate)
+        val current = messageReaction(candidate.accountId, candidate.peerJid, candidate.senderBareJid, candidate.targetKey)
+        current?.let { requireValidReaction(it) }
+        return if (keepNewest && current != null && current.updatedAtMs > candidate.updatedAtMs) {
+            ReactionMutationOutcome.SUPERSEDED
+        } else writeReaction(candidate)
+    }
+
+    @Transaction
+    open suspend fun moveMessageReaction(
+        source: MessageReactionEntity,
+        destination: MessageReactionEntity,
+    ): ReactionMutationOutcome {
+        requireValidReaction(source)
+        requireValidReaction(destination)
+        check(source.targetKey != destination.targetKey && source.accountId == destination.accountId && source.peerJid == destination.peerJid && source.senderBareJid == destination.senderBareJid)
+        check(messageReaction(source.accountId, source.peerJid, source.senderBareJid, source.targetKey) == source)
+        val current = messageReaction(destination.accountId, destination.peerJid, destination.senderBareJid, destination.targetKey)
+        current?.let { requireValidReaction(it) }
+        val outcome = if (current != null && current.updatedAtMs > destination.updatedAtMs) {
+            ReactionMutationOutcome.SUPERSEDED
+        } else writeReaction(destination)
+        check(deleteMessageReaction(source.accountId, source.peerJid, source.senderBareJid, source.targetKey) == 1)
+        return outcome
+    }
+
+    @Transaction
+    open suspend fun retireUnsupportedPendingReaction(source: MessageReactionEntity): Int {
+        requireValidReaction(source)
+        check(source.localMessageId == null)
+        check(messageReaction(source.accountId, source.peerJid, source.senderBareJid, source.targetKey) == source)
+        return deleteMessageReaction(
+            source.accountId, source.peerJid, source.senderBareJid, source.targetKey,
+        ).also { check(it == 1) }
+    }
+
+    open suspend fun classifyPendingReactions(
+        accountId: String,
+        peerJid: String,
+        messageId: String,
+    ): PendingReactionSelection? {
+        val aliases = trustedAliasesForMessage(accountId, messageId).filter { it.kind in REACTION_REFERENCE_KINDS }
+        val candidates = pendingReactionsForMessageAliases(accountId, peerJid, messageId)
+        candidates.forEach { requireValidReaction(it) }
+        val messageAliases = aliases.filter { it.kind == IdentityAliasKind.MESSAGE_ID }
+        if (messageAliases.size != 1) return null
+        val acceptedValue = messageAliases.single().value
+        val owners = chatByMessageId(accountId, peerJid, acceptedValue).map { it.localMessageId }.distinct()
+        if (owners != listOf(messageId)) return null
+        val accepted = candidates.filter { it.wireTargetId == acceptedValue }
+        val unsupported = candidates.filter { row ->
+            row.wireTargetId != acceptedValue && chatByMessageId(accountId, peerJid, row.wireTargetId).isEmpty()
+        }
+        return PendingReactionSelection(accepted, unsupported)
+    }
 
     @Upsert
     abstract suspend fun upsertPeer(peer: PeerEntity)

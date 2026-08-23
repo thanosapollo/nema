@@ -9,6 +9,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -266,6 +267,95 @@ class MessageReactionStoreTest {
         assertEquals(listOf(chip("keep", "🙏")), chips("keep"))
         assertTrue(chips("drop").isEmpty())
     }
+
+    @Test
+    fun semanticFullSetValidatesRowsFreshnessAndRevision() = runBlocking {
+        store.ingest(incoming("owner", message("wire")))
+        val dao = database.messageDao()
+        val row = reaction("owner", "wire", "👍", 10)
+        assertEquals(ReactionMutationOutcome.WRITTEN, dao.writeReactionFullSet(row))
+        assertEquals(1L, dao.messageReaction(ACCOUNT, PEER, PEER, "owner")?.revision)
+        assertEquals(ReactionMutationOutcome.WRITTEN, dao.writeReactionFullSet(row))
+        assertEquals(2L, dao.messageReaction(ACCOUNT, PEER, PEER, "owner")?.revision)
+        assertEquals(ReactionMutationOutcome.WRITTEN, dao.writeReactionFullSet(row.copy(emojis = "")))
+        assertEquals(3L, dao.messageReaction(ACCOUNT, PEER, PEER, "owner")?.revision)
+        assertEquals(ReactionMutationOutcome.SUPERSEDED, dao.writeReactionFullSet(row.copy(updatedAtMs = 9), true))
+        raw(row.copy(revision = Long.MAX_VALUE - 1))
+        assertThrows(IllegalStateException::class.java) { runBlocking { dao.writeReactionFullSet(row) } }
+        assertEquals(Long.MAX_VALUE - 1, dao.messageReaction(ACCOUNT, PEER, PEER, "owner")?.revision)
+        listOf(
+            row.copy(accountId = ""), row.copy(peerJid = ""), row.copy(senderBareJid = ""), row.copy(wireTargetId = ""),
+            row.copy(targetKey = "wrong"), row.copy(localMessageId = "missing"), row.copy(emojis = "👍\u001F"),
+            row.copy(revision = -1), row.copy(revision = 0), row.copy(revision = Long.MAX_VALUE),
+        ).forEach { bad ->
+            assertThrows(IllegalStateException::class.java) { runBlocking { dao.writeReactionFullSet(bad) } }
+        }
+    }
+
+    @Test
+    fun exactMoveHasFiniteOutcomesAndRollsBackFailures() = runBlocking {
+        store.ingest(incoming("from", message("from-wire")))
+        store.ingest(incoming("to", message("to-wire")))
+        val dao = database.messageDao()
+        val source = reaction("from", "from-wire", "👍", 20)
+        val destination = reaction("to", "to-wire", "👍", 20)
+        raw(source)
+        assertEquals(ReactionMutationOutcome.WRITTEN, dao.moveMessageReaction(source, destination))
+        assertNull(dao.messageReaction(ACCOUNT, PEER, PEER, "from"))
+        assertEquals(1L, dao.messageReaction(ACCOUNT, PEER, PEER, "to")?.revision)
+        raw(source)
+        assertEquals(ReactionMutationOutcome.WRITTEN, dao.moveMessageReaction(source, destination))
+        assertEquals(2L, dao.messageReaction(ACCOUNT, PEER, PEER, "to")?.revision)
+        raw(source)
+        raw(destination.copy(updatedAtMs = 30, revision = 4))
+        assertEquals(ReactionMutationOutcome.SUPERSEDED, dao.moveMessageReaction(source, destination))
+        assertNull(dao.messageReaction(ACCOUNT, PEER, PEER, "from"))
+        assertEquals(4L, dao.messageReaction(ACCOUNT, PEER, PEER, "to")?.revision)
+        raw(source)
+        raw(destination.copy(revision = Long.MAX_VALUE - 1))
+        assertThrows(IllegalStateException::class.java) { runBlocking { dao.moveMessageReaction(source, destination) } }
+        assertEquals(source, dao.messageReaction(ACCOUNT, PEER, PEER, "from"))
+        assertThrows(IllegalStateException::class.java) { runBlocking { dao.moveMessageReaction(source, destination.copy(targetKey = "bad")) } }
+        raw(destination.copy(updatedAtMs = 30, revision = 4))
+        database.openHelper.writableDatabase.execSQL(
+            "CREATE TRIGGER fail_reaction_retire BEFORE DELETE ON message_reactions BEGIN SELECT RAISE(ABORT, 'fault'); END",
+        )
+        assertThrows(Exception::class.java) { runBlocking { dao.moveMessageReaction(source, destination.copy(updatedAtMs = 40)) } }
+        assertEquals(source, dao.messageReaction(ACCOUNT, PEER, PEER, "from"))
+        assertEquals(4L, dao.messageReaction(ACCOUNT, PEER, PEER, "to")?.revision)
+    }
+
+    @Test
+    fun pendingClassificationHonorsMessageIdAuthorityAndRetirement() = runBlocking {
+        store.ingest(incoming("owner", message("accepted"), origin("unsupported"), stanza("accepted")))
+        store.ingest(incoming("other", message("owned-elsewhere")))
+        val dao = database.messageDao()
+        val accepted = pending("accepted", "👍")
+        val unsupported = pending("unsupported", "⚠️")
+        val owned = pending("owned-elsewhere", "❤️")
+        val unrelated = pending("unrelated", "🙏")
+        listOf(accepted, unsupported, owned, unrelated).forEach(::raw)
+        val selected = requireNotNull(dao.classifyPendingReactions(ACCOUNT, PEER, "owner"))
+        assertEquals(listOf(accepted), selected.accepted)
+        assertEquals(listOf(unsupported), selected.unsupported)
+        assertEquals(1, dao.retireUnsupportedPendingReaction(unsupported))
+        assertEquals(setOf(accepted, owned, unrelated), dao.messageReactions(ACCOUNT, PEER).toSet())
+        store.ingest(incoming("global-collision", TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, SELF, "accepted")))
+        assertNull(dao.classifyPendingReactions(ACCOUNT, PEER, "owner"))
+        store.ingest(incoming("ambiguous", message("one"), message("two")))
+        assertNull(dao.classifyPendingReactions(ACCOUNT, PEER, "ambiguous"))
+        raw(pending("accepted", "👍", revision = 0))
+        assertThrows(IllegalStateException::class.java) {
+            runBlocking { dao.classifyPendingReactions(ACCOUNT, PEER, "owner") }
+        }
+        Unit
+    }
+
+    private fun reaction(localId: String, wire: String, emojis: String, time: Long, revision: Long = 1) =
+        MessageReactionEntity(ACCOUNT, PEER, PEER, localId, localId, wire, emojis, time, revision)
+    private fun pending(wire: String, emojis: String, revision: Long = 1) =
+        MessageReactionEntity(ACCOUNT, PEER, PEER, "pending:$wire", null, wire, emojis, 10, revision)
+    private fun raw(row: MessageReactionEntity) = runBlocking { database.messageDao().upsertMessageReaction(row) }
 
     private fun incoming(localId: String, vararg aliases: TrustedIdentityAlias) = IncomingMessage(
         ACCOUNT, localId, PEER, PEER, MessageDirection.INBOUND, MessageKind.CHAT,
