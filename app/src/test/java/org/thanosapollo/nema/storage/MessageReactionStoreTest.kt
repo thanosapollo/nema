@@ -524,6 +524,48 @@ internal class MessageReactionStoreTest : ReactionStoreTestFixture() {
     }
 
     @Test
+    fun outgoingReactionPreparationIsReadOnlyBoundedAndSnapshotExposed() = runBlocking {
+        val clock = CountingFixedClock(42L)
+        store = MessageStore(database, clock)
+        installFacts(incoming("outbound", TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, SELF, "self-wire"))
+            .copy(senderJid = SELF, direction = MessageDirection.OUTBOUND))
+        clock.resetCount()
+        assertNull(assertReadOnlyState { store.prepareOutgoingReaction(ACCOUNT, PEER, "outbound", SELF, "") })
+        assertNull(assertReadOnlyState { store.prepareOutgoingReaction(ACCOUNT, PEER, "outbound", SELF, " \t\n") })
+        assertNull(assertReadOnlyState { store.prepareOutgoingReaction(ACCOUNT, PEER, "outbound", PEER, "👍") })
+        val prepared = requireNotNull(assertReadOnlyState {
+            store.prepareOutgoingReaction(ACCOUNT, PEER, "outbound", SELF, "👍")
+        })
+        assertEquals(listOf(ACCOUNT, PEER, "self-wire"),
+            listOf(prepared.accountId, prepared.peerJid, prepared.wireTargetId))
+        val exposed = prepared.emojis
+        assertEquals(listOf("👍"), exposed)
+        assertTrue(exposed is MutableList<*>)
+        @Suppress("UNCHECKED_CAST")
+        (exposed as MutableList<String>).add("mutant")
+        assertEquals(listOf("👍"), prepared.emojis)
+        assertFalse(exposed === prepared.emojis)
+        val row = MessageReactionEntity(ACCOUNT, PEER, SELF, "outbound", "outbound", "self-wire", "👍", 10, 1)
+        insertReactionUnchecked(row)
+        val empty = requireNotNull(assertReadOnlyState {
+            store.prepareOutgoingReaction(ACCOUNT, PEER, "outbound", SELF, "👍")
+        })
+        assertTrue(empty.emojis.isEmpty())
+        assertFalse(empty.emojis === empty.emojis)
+        insertReactionUnchecked(row.copy(revision = Long.MAX_VALUE - 1))
+        assertNull(assertReadOnlyState { store.prepareOutgoingReaction(ACCOUNT, PEER, "outbound", SELF, "👍") })
+        for (revision in listOf(-1L, 0L, Long.MAX_VALUE)) {
+            insertReactionUnchecked(row.copy(revision = revision))
+            val before = state()
+            assertThrows(IllegalStateException::class.java) {
+                runBlocking { store.prepareOutgoingReaction(ACCOUNT, PEER, "outbound", SELF, "👍") }
+            }
+            assertEquals("revision $revision", before, state())
+        }
+        assertEquals(0, clock.calls)
+    }
+
+    @Test
     fun pendingClassificationHonorsMessageIdAuthorityAndRetirement() = runBlocking {
         store.ingest(incoming("owner", message("accepted"), origin("unsupported"), stanza("accepted")))
         store.ingest(incoming("other", message("owned-elsewhere")))

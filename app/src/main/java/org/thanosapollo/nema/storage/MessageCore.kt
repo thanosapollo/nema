@@ -21,6 +21,7 @@ import org.thanosapollo.nema.thread.draftKey
 import org.thanosapollo.nema.xmpp.reactions.decodeReactionEmojis
 import org.thanosapollo.nema.xmpp.reactions.encodeReactionEmojis
 import org.thanosapollo.nema.xmpp.reactions.reactionDisplaysFor
+import org.thanosapollo.nema.xmpp.reactions.toggleReaction
 import org.thanosapollo.nema.xmpp.transport.MessageTimeSource
 import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
 
@@ -219,6 +220,14 @@ abstract class MessageDao {
             check(owner != null && owner.peerJid == row.peerJid)
         }
     }
+
+    suspend fun validatedReaction(
+        accountId: String,
+        peerJid: String,
+        senderBareJid: String,
+        targetKey: String,
+    ): MessageReactionEntity? = messageReaction(accountId, peerJid, senderBareJid, targetKey)
+        ?.also { requireValidReaction(it) }
 
     private suspend fun writeReaction(candidate: MessageReactionEntity): ReactionMutationOutcome {
         requireValidReaction(candidate)
@@ -1622,6 +1631,26 @@ internal data class DirectReactionTarget(
     val wireTargetId: String,
 )
 
+internal interface OutgoingReactionCommand {
+    val accountId: String
+    val peerJid: String
+    val wireTargetId: String
+    val emojis: List<String>
+}
+
+private class PreparedOutgoingReaction(
+    val owner: MessageStore,
+    override val accountId: String,
+    override val peerJid: String,
+    val ownSender: String,
+    val target: DirectReactionTarget,
+    val expectedRevision: Long,
+    private val encodedEmojis: String,
+) : OutgoingReactionCommand {
+    override val wireTargetId: String get() = target.wireTargetId
+    override val emojis: List<String> get() = decodeReactionEmojis(encodedEmojis).toMutableList()
+}
+
 internal fun reactionTargetKey(localMessageId: String?, wireTargetId: String): String =
     localMessageId ?: "pending:$wireTargetId"
 
@@ -2111,6 +2140,22 @@ class MessageStore private constructor(
             ?.takeIf { it.authority == canonical.senderJid && it.value.isNotBlank() }
             ?: return@withTransaction null
         DirectReactionTarget(accountId, peerJid, canonical.localMessageId, alias.value)
+    }
+
+    internal suspend fun prepareOutgoingReaction(
+        accountId: String,
+        peerJid: String,
+        localMessageId: String,
+        ownSenderBareJid: String,
+        emoji: String,
+    ): OutgoingReactionCommand? = database.withTransaction {
+        val dao = database.messageDao()
+        if (emoji.trim().isEmpty() || dao.accountBareJid(accountId) != ownSenderBareJid) return@withTransaction null
+        val target = resolveDirectReactionTarget(accountId, peerJid, localMessageId) ?: return@withTransaction null
+        val current = dao.validatedReaction(accountId, peerJid, ownSenderBareJid, target.canonicalLocalId)
+        if (current?.revision == Long.MAX_VALUE - 1) return@withTransaction null
+        val encoded = encodeReactionEmojis(toggleReaction(emoji, current?.let { decodeReactionEmojis(it.emojis) }.orEmpty()))
+        PreparedOutgoingReaction(this, accountId, peerJid, ownSenderBareJid, target, current?.revision ?: 0, encoded)
     }
 
     suspend fun ownReactionEmojis(
