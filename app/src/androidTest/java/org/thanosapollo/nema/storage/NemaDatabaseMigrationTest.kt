@@ -733,6 +733,61 @@ class NemaDatabaseMigrationTest {
     }
 
     @Test
+    fun migration21To22PreservesReactionRowsAndDefaultsRevision() {
+        helper.createDatabase(DATABASE_NAME, 21).apply {
+            execSQL("INSERT INTO accounts (id, bareJid, authenticationId, serviceDomain) " +
+                "VALUES ('account-a', 'self@example.org', 'self', 'example.org')")
+            execSQL(
+                """
+                INSERT INTO message_reactions (
+                    accountId, peerJid, senderBareJid, targetKey, localMessageId,
+                    wireTargetId, emojis, updatedAtMs
+                ) VALUES
+                    ('account-a', 'peer@example.org', 'one@example.org', 'visible',
+                        'message-visible', 'wire-visible', '👍', 101),
+                    ('account-a', 'peer@example.org', 'two@example.org', 'pending-nonempty',
+                        NULL, 'wire-pending', '🔥', 102),
+                    ('account-a', 'peer@example.org', 'three@example.org', 'pending-empty',
+                        NULL, 'wire-empty', '', 103)
+                """.trimIndent(),
+            )
+            close()
+        }
+
+        helper.runMigrationsAndValidate(DATABASE_NAME, 22, true, MessageSchema.MIGRATION_21_22).use { database ->
+            database.query(
+                "SELECT targetKey, localMessageId, wireTargetId, emojis, updatedAtMs, revision " +
+                    "FROM message_reactions ORDER BY updatedAtMs",
+            ).use { cursor ->
+                val rows = buildList {
+                    while (cursor.moveToNext()) add((0..5).map { cursor.getString(it) })
+                }
+                assertEquals(
+                    listOf(
+                        listOf("visible", "message-visible", "wire-visible", "👍", "101", "1"),
+                        listOf("pending-nonempty", null, "wire-pending", "🔥", "102", "1"),
+                        listOf("pending-empty", null, "wire-empty", "", "103", "1"),
+                    ),
+                    rows,
+                )
+            }
+            database.execSQL(
+                """
+                INSERT INTO message_reactions (
+                    accountId, peerJid, senderBareJid, targetKey, localMessageId,
+                    wireTargetId, emojis, updatedAtMs
+                ) VALUES ('account-a', 'peer@example.org', 'fresh@example.org', 'fresh',
+                    NULL, 'wire-fresh', '', 104)
+                """.trimIndent(),
+            )
+            database.query("SELECT revision FROM message_reactions WHERE targetKey = 'fresh'").use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(1, cursor.getInt(0))
+            }
+        }
+    }
+
+    @Test
     fun migration17To18QuarantinesOnlyPersistedRoomStanzaIds() {
         helper.createDatabase(DATABASE_NAME, 17).apply {
             execSQL(

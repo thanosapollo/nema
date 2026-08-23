@@ -480,6 +480,8 @@ data class MessageReactionEntity(
     val wireTargetId: String,
     val emojis: String,
     val updatedAtMs: Long,
+    @ColumnInfo(defaultValue = "1")
+    val revision: Long = 1,
 )
 
 class MessageConverters {
