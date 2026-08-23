@@ -12,6 +12,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -253,6 +254,175 @@ class IdentitylessRepairTest {
             database.accountDao().reconciliationState(ACCOUNT),
         )
     }
+
+    @Test
+    fun archiveReconciliationRevisionFailuresRollBackThenRetryExactlyOnce() = runBlocking {
+        corruptions().forEach { (name, sourceRevision, destinationRevision) ->
+            resetAccount()
+            val store = MessageStore(database, clock = { 70_001 })
+            val pair = seedPair(store, name)
+            val rows = corruptPair(pair, sourceRevision, destinationRevision)
+            val messages = store.messages(ACCOUNT)
+            val positions = database.messageDao().archivePositions(ACCOUNT)
+            val aliases = store.aliases(ACCOUNT)
+            val cursor = requireNotNull(store.archiveCursor(pair.key))
+            assertEquals(70_001L, requireNotNull(database.accountDao().reconciliationState(ACCOUNT)).wallFloorMs)
+            val next = archivePage(
+                pair.key,
+                ArchiveDirection.AFTER,
+                pair.resultId,
+                complete = true,
+                archived("$name-tail-result", "$name-tail", "tail", 80_000),
+            )
+
+            val failure = requireNotNull(runCatching { store.applyArchivePage(next) }.exceptionOrNull())
+            val failureMethods = failure.stackTrace.mapTo(mutableSetOf()) { it.methodName }
+            assertTrue(
+                setOf("moveMessageReaction", "reparentReactions", "mergePair").all(failureMethods::contains),
+            )
+            assertEquals(messages, store.messages(ACCOUNT))
+            assertEquals(positions, database.messageDao().archivePositions(ACCOUNT))
+            assertEquals(aliases, store.aliases(ACCOUNT))
+            assertEquals(rows, reactions())
+            assertEquals(cursor, store.archiveCursor(pair.key))
+
+            val corrected = correctPair(rows)
+            corrected.forEach(::raw)
+            assertEquals(ArchivePageStatus.APPLIED, store.applyArchivePage(next).status)
+            val final = reactions().single()
+            assertEquals(pair.liveId, final.localMessageId)
+            assertEquals(if (corrected.size == 1) 1 else 10, final.revision)
+            assertNull(database.messageDao().message(ACCOUNT, pair.mamId))
+            assertEquals(ArchivePageStatus.RETRYABLE_ERROR, store.applyArchivePage(next).status)
+            assertEquals(final, reactions().single())
+        }
+    }
+
+    @Test
+    fun explicitRepairRevisionFailuresPreserveEvidenceAndRetry() = runBlocking {
+        corruptions().forEach { (name, sourceRevision, destinationRevision) ->
+            resetAccount()
+            val store = MessageStore(database, clock = { 0 })
+            val pair = seedPair(store, name)
+            val malformed = corruptPair(pair, sourceRevision, destinationRevision)
+            val owners = store.messages(ACCOUNT)
+            val pending = requireNotNull(database.accountDao().reconciliationState(ACCOUNT))
+
+            assertTrue(runCatching { store.repairIdentitylessDuplicates(ACCOUNT) }.isFailure)
+            assertEquals(owners, store.messages(ACCOUNT))
+            assertEquals(malformed, reactions())
+            assertEquals(pending, database.accountDao().reconciliationState(ACCOUNT))
+            assertFalse(store.attemptIdentitylessRepair(ACCOUNT))
+            assertEquals(malformed, reactions())
+            assertEquals(owners, store.messages(ACCOUNT))
+            assertEquals(pending.copy(caughtErrorCount = 1), database.accountDao().reconciliationState(ACCOUNT))
+
+            val corrected = correctPair(malformed)
+            corrected.forEach(::raw)
+            val cancelling = MessageStore.observingWrites(database) {
+                if (it == MessageWriteBoundary.AFTER_DEPENDENT_REPARENT) throw CancellationException("cancel")
+            }
+            assertTrue(runCatching { cancelling.attemptIdentitylessRepair(ACCOUNT) }.exceptionOrNull() is CancellationException)
+            assertEquals(corrected, reactions())
+            assertEquals(pending.copy(caughtErrorCount = 1), database.accountDao().reconciliationState(ACCOUNT))
+
+            assertEquals(ReconciliationRepairStatus.COMPLETE, store.repairIdentitylessDuplicates(ACCOUNT)?.status)
+            assertEquals(setOf(pair.liveId), store.messages(ACCOUNT).mapTo(mutableSetOf()) { it.localMessageId })
+            val final = reactions().single()
+            assertEquals("😀\u001F👍", final.emojis)
+            assertEquals(if (corrected.size == 1) 1 else 10, final.revision)
+        }
+    }
+
+    @Test
+    fun accountRemovalCascadesEveryReactionShape() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(incoming("owner", "body", MessageTimeSource.LOCAL))
+        listOf(
+            MessageReactionEntity(ACCOUNT, PEER, PEER, "owner", "owner", "visible", "👍", 1),
+            MessageReactionEntity(ACCOUNT, PEER, "pending@example.org", "pending:pending", null, "pending", "❤️", 2),
+            MessageReactionEntity(ACCOUNT, PEER, "tombstone@example.org", "pending:tombstone", null, "tombstone", "", 3),
+        ).forEach { assertEquals(ReactionMutationOutcome.WRITTEN, database.messageDao().writeReactionFullSet(it)) }
+
+        database.accountDao().remove(ACCOUNT)
+
+        assertTrue(reactions().isEmpty())
+        assertNull(database.accountDao().account(ACCOUNT))
+    }
+
+    private data class PairSeed(
+        val key: ArchiveCursorKey,
+        val liveId: String,
+        val mamId: String,
+        val resultId: String,
+    )
+
+    private fun corruptions() = listOf(
+        Triple("source", 0L, null),
+        Triple("destination", 7L, 0L),
+        Triple("exhausted", 7L, Long.MAX_VALUE - 1),
+    )
+
+    private suspend fun resetAccount() {
+        database.accountDao().account(ACCOUNT)?.let { database.accountDao().remove(ACCOUNT) }
+        database.accountDao().saveBound(
+            AccountEntity(ACCOUNT, "account@example.org", ACCOUNT, null, "example.org", null, null),
+        )
+    }
+
+    private suspend fun seedPair(store: MessageStore, name: String): PairSeed {
+        val live = "$name-live"
+        val mam = "$name-mam"
+        val result = "$name-result"
+        val key = ArchiveCursorKey(ACCOUNT, "account@example.org", name)
+        store.ingest(incoming(live, name, MessageTimeSource.LOCAL, 10_000))
+        assertEquals(
+            ArchivePageStatus.APPLIED,
+            store.applyArchivePage(
+                archivePage(key, ArchiveDirection.BOOTSTRAP, null, false, archived(result, mam, name, 40_000)),
+            ).status,
+        )
+        return PairSeed(key, live, mam, result)
+    }
+
+    private fun corruptPair(pair: PairSeed, sourceRevision: Long, destinationRevision: Long?): List<MessageReactionEntity> {
+        val source = MessageReactionEntity(
+            ACCOUNT, PEER, PEER, pair.mamId, pair.mamId, "wire", "😀\u001F👍", 5_000, sourceRevision,
+        )
+        val rows = listOfNotNull(
+            destinationRevision?.let {
+                source.copy(targetKey = pair.liveId, localMessageId = pair.liveId, revision = it)
+            },
+            source,
+        )
+        rows.forEach(::raw)
+        return rows
+    }
+
+    private fun correctPair(rows: List<MessageReactionEntity>) = rows.mapIndexed { index, row ->
+        row.copy(revision = if (rows.size == 1) 7 else if (index == 0) 9 else 7)
+    }
+
+    private fun raw(row: MessageReactionEntity) {
+        database.openHelper.writableDatabase.execSQL(
+            "INSERT OR REPLACE INTO message_reactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            arrayOf<Any?>(row.accountId, row.peerJid, row.senderBareJid, row.targetKey, row.localMessageId,
+                row.wireTargetId, row.emojis, row.updatedAtMs, row.revision),
+        )
+    }
+
+    private suspend fun reactions() = database.messageDao().messageReactions(ACCOUNT, PEER)
+
+    private fun archivePage(
+        key: ArchiveCursorKey,
+        direction: ArchiveDirection,
+        boundaryId: String?,
+        complete: Boolean,
+        vararg messages: ArchivedIncomingMessage,
+    ) = ArchivePage(
+        key, direction, boundaryId, complete, false, true,
+        messages.first().resultId, messages.last().resultId, messages.toList(),
+    )
 
     private fun incoming(
         id: String,
