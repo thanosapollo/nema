@@ -1,48 +1,21 @@
 package org.thanosapollo.nema.storage
 
 import android.app.Application
-import android.content.Context
-import androidx.test.core.app.ApplicationProvider
-import java.util.UUID
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
-import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.thanosapollo.nema.thread.MessageKind
-import org.thanosapollo.nema.xmpp.reactions.ReactionDisplay
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
-class MessageReactionStoreTest {
-    private lateinit var context: Context
-    private lateinit var databaseName: String
-    private lateinit var database: NemaDatabase
-    private lateinit var store: MessageStore
-
-    @Before
-    fun setUp() = runBlocking {
-        context = ApplicationProvider.getApplicationContext()
-        databaseName = "message-reactions-${UUID.randomUUID()}.db"
-        database = NemaDatabase.create(context, databaseName)
-        database.accountDao().upsert(
-            AccountEntity(ACCOUNT, SELF, ACCOUNT, null, "example.org", null, null),
-        )
-        store = MessageStore(database)
-    }
-
-    @After
-    fun tearDown() {
-        database.close()
-        context.deleteDatabase(databaseName)
-    }
+internal class MessageReactionStoreTest : ReactionStoreTestFixture() {
 
     @Test
     fun directReplyAndReactionUseOperationSpecificTargets() = runBlocking {
@@ -271,13 +244,13 @@ class MessageReactionStoreTest {
     @Test
     fun pendingRowsSurviveMultipleLocalMessageIdAliasRowsIncludingDuplicateValues() = runBlocking {
         val dao = database.messageDao()
-        listOf(pending("first", "👍", 3), pending("second", "❤️", 4), pending("cross-kind", "⚠️", 5)).forEach(::raw)
+        listOf(pending("first", "👍", 3), pending("second", "❤️", 4), pending("cross-kind", "⚠️", 5)).forEach(::insertReactionUnchecked)
         store.ingest(incoming("multiple", message("first"), message("second"), origin("cross-kind")))
         assertEquals(
             setOf("pending:first" to 3L, "pending:second" to 4L, "pending:cross-kind" to 5L),
             dao.messageReactions(ACCOUNT, PEER).map { it.targetKey to it.revision }.toSet(),
         )
-        listOf(pending("duplicate", "🙏", 6), pending("duplicate-cross-kind", "😂", 7)).forEach(::raw)
+        listOf(pending("duplicate", "🙏", 6), pending("duplicate-cross-kind", "😂", 7)).forEach(::insertReactionUnchecked)
         store.ingest(incoming("duplicate", message("duplicate"),
             TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, SELF, "duplicate"), origin("duplicate-cross-kind")))
         assertEquals(setOf("pending:first" to 3L, "pending:second" to 4L, "pending:cross-kind" to 5L,
@@ -296,7 +269,7 @@ class MessageReactionStoreTest {
         assertEquals(ReactionMutationOutcome.WRITTEN, dao.writeReactionFullSet(row.copy(emojis = "")))
         assertEquals(3L, dao.messageReaction(ACCOUNT, PEER, PEER, "owner")?.revision)
         assertEquals(ReactionMutationOutcome.SUPERSEDED, dao.writeReactionFullSet(row.copy(updatedAtMs = 9), true))
-        raw(row.copy(revision = Long.MAX_VALUE - 1))
+        insertReactionUnchecked(row.copy(revision = Long.MAX_VALUE - 1))
         assertThrows(IllegalStateException::class.java) { runBlocking { dao.writeReactionFullSet(row) } }
         assertEquals(Long.MAX_VALUE - 1, dao.messageReaction(ACCOUNT, PEER, PEER, "owner")?.revision)
         listOf(
@@ -315,24 +288,24 @@ class MessageReactionStoreTest {
         val dao = database.messageDao()
         val source = reaction("from", "from-wire", "👍", 20)
         val destination = reaction("to", "to-wire", "👍", 20)
-        raw(source)
+        insertReactionUnchecked(source)
         assertEquals(ReactionMutationOutcome.WRITTEN, dao.moveMessageReaction(source, destination))
         assertNull(dao.messageReaction(ACCOUNT, PEER, PEER, "from"))
         assertEquals(1L, dao.messageReaction(ACCOUNT, PEER, PEER, "to")?.revision)
-        raw(source)
+        insertReactionUnchecked(source)
         assertEquals(ReactionMutationOutcome.WRITTEN, dao.moveMessageReaction(source, destination))
         assertEquals(2L, dao.messageReaction(ACCOUNT, PEER, PEER, "to")?.revision)
-        raw(source)
-        raw(destination.copy(updatedAtMs = 30, revision = 4))
+        insertReactionUnchecked(source)
+        insertReactionUnchecked(destination.copy(updatedAtMs = 30, revision = 4))
         assertEquals(ReactionMutationOutcome.SUPERSEDED, dao.moveMessageReaction(source, destination))
         assertNull(dao.messageReaction(ACCOUNT, PEER, PEER, "from"))
         assertEquals(4L, dao.messageReaction(ACCOUNT, PEER, PEER, "to")?.revision)
-        raw(source)
-        raw(destination.copy(revision = Long.MAX_VALUE - 1))
+        insertReactionUnchecked(source)
+        insertReactionUnchecked(destination.copy(revision = Long.MAX_VALUE - 1))
         assertThrows(IllegalStateException::class.java) { runBlocking { dao.moveMessageReaction(source, destination) } }
         assertEquals(source, dao.messageReaction(ACCOUNT, PEER, PEER, "from"))
         assertThrows(IllegalStateException::class.java) { runBlocking { dao.moveMessageReaction(source, destination.copy(targetKey = "bad")) } }
-        raw(destination.copy(updatedAtMs = 30, revision = 4))
+        insertReactionUnchecked(destination.copy(updatedAtMs = 30, revision = 4))
         database.openHelper.writableDatabase.execSQL(
             "CREATE TRIGGER fail_reaction_retire BEFORE DELETE ON message_reactions BEGIN SELECT RAISE(ABORT, 'fault'); END",
         )
@@ -350,7 +323,7 @@ class MessageReactionStoreTest {
         val unsupported = pending("unsupported", "⚠️")
         val owned = pending("owned-elsewhere", "❤️")
         val unrelated = pending("unrelated", "🙏")
-        listOf(accepted, unsupported, owned, unrelated).forEach(::raw)
+        listOf(accepted, unsupported, owned, unrelated).forEach(::insertReactionUnchecked)
         val selected = requireNotNull(dao.classifyPendingReactions(ACCOUNT, PEER, "owner"))
         assertEquals(listOf(accepted), selected.accepted)
         assertEquals(listOf(unsupported), selected.unsupported)
@@ -360,51 +333,11 @@ class MessageReactionStoreTest {
         assertNull(dao.classifyPendingReactions(ACCOUNT, PEER, "owner"))
         store.ingest(incoming("ambiguous", message("one"), message("two")))
         assertNull(dao.classifyPendingReactions(ACCOUNT, PEER, "ambiguous"))
-        raw(pending("accepted", "👍", revision = 0))
+        insertReactionUnchecked(pending("accepted", "👍", revision = 0))
         assertThrows(IllegalStateException::class.java) {
             runBlocking { dao.classifyPendingReactions(ACCOUNT, PEER, "owner") }
         }
         Unit
     }
 
-    private fun reaction(localId: String, wire: String, emojis: String, time: Long, revision: Long = 1) =
-        MessageReactionEntity(ACCOUNT, PEER, PEER, localId, localId, wire, emojis, time, revision)
-    private fun pending(wire: String, emojis: String, revision: Long = 1) =
-        MessageReactionEntity(ACCOUNT, PEER, PEER, "pending:$wire", null, wire, emojis, 10, revision)
-    private fun raw(row: MessageReactionEntity) {
-        database.openHelper.writableDatabase.execSQL(
-            "INSERT OR REPLACE INTO message_reactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            arrayOf<Any?>(row.accountId, row.peerJid, row.senderBareJid, row.targetKey, row.localMessageId,
-                row.wireTargetId, row.emojis, row.updatedAtMs, row.revision),
-        )
-    }
-
-    private fun incoming(localId: String, vararg aliases: TrustedIdentityAlias) = IncomingMessage(
-        ACCOUNT, localId, PEER, PEER, MessageDirection.INBOUND, MessageKind.CHAT,
-        null, null, "body", null, aliases.toList(),
-    )
-
-    private fun message(value: String) = TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, value)
-    private fun origin(value: String) = TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, value)
-    private fun stanza(value: String) = TrustedIdentityAlias(IdentityAliasKind.STANZA_ID, PEER, value)
-    private fun react(
-        targetId: String,
-        emojis: List<String>,
-        sender: String = PEER,
-        receivedAtMs: Long = 1_000L,
-        delayedAtMs: Long? = null,
-    ) = IncomingReactionApply(ACCOUNT, SELF, PEER, sender, targetId, emojis, receivedAtMs, delayedAtMs)
-    private suspend fun chips(localMessageId: String) =
-        store.reactionDisplays(ACCOUNT, PEER, SELF).filter { it.localMessageId == localMessageId }
-    private fun chip(localMessageId: String, emoji: String, sender: String = PEER) =
-        ReactionDisplay(localMessageId, emoji, 1, sender == SELF, listOf(sender))
-
-    companion object {
-        private const val ACCOUNT = "account"
-        private const val OTHER_ACCOUNT = "other-account"
-        private const val PEER = "peer@example.org"
-        private const val OTHER_PEER = "other-peer@example.org"
-        private const val ROOM = "room@conference.example.org"
-        private const val SELF = "account@example.org"
-    }
 }
