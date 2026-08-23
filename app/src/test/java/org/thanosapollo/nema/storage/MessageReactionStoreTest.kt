@@ -379,6 +379,151 @@ internal class MessageReactionStoreTest : ReactionStoreTestFixture() {
     }
 
     @Test
+    fun directReactionResolutionRequiresCanonicalCorrectionAncestry() = runBlocking {
+        suspend fun resolve(id: String = "selected") = assertReadOnlyState {
+            store.resolveDirectReactionTarget(ACCOUNT, PEER, id)
+        }
+        suspend fun installPair() {
+            resetStore()
+            installFacts(
+                incoming("original", message("original-wire")).copy(body = "original"),
+                incoming("selected", message("selected-wire")).copy(body = "edited", replaceId = "original-wire"),
+            )
+        }
+
+        installPair()
+        assertEquals(DirectReactionTarget(ACCOUNT, PEER, "original", "original-wire"), resolve("original"))
+        assertEquals(DirectReactionTarget(ACCOUNT, PEER, "original", "original-wire"), resolve())
+        val dao = database.messageDao()
+        val selected = requireNotNull(dao.message(ACCOUNT, "selected"))
+        val original = requireNotNull(dao.message(ACCOUNT, "original"))
+        dao.updateMessage(selected.copy(correctionTargetMessageId = null))
+        assertNull("replaceId without correction target", resolve())
+        dao.updateMessage(selected.copy(replaceId = null, correctionTargetMessageId = original.localMessageId))
+        assertNull("correction target without replaceId", resolve())
+
+        resetStore()
+        installFacts(
+            incoming("original", message("original-wire")),
+            incoming("middle", message("middle-wire")).copy(replaceId = "original-wire"),
+            incoming("selected", message("selected-wire")).copy(replaceId = "middle-wire"),
+        )
+        assertNull("multi-hop correction", resolve())
+        installPair()
+        val canonical = requireNotNull(database.messageDao().message(ACCOUNT, "original"))
+        database.messageDao().updateMessage(canonical.copy(replaceId = "selected-wire", correctionTargetMessageId = "selected"))
+        assertNull("correction-marked canonical", resolve())
+    }
+
+    @Test
+    fun directReactionResolutionDelegatesEveryCorrectionAuthorityDimension() = runBlocking {
+        data class AuthorityCase(
+            val name: String,
+            val mutate: (MessageEntity, MessageEntity) -> Pair<MessageEntity, MessageEntity>,
+        )
+        val cases = listOf(
+            AuthorityCase("sender") { selected, target -> selected.copy(senderJid = SELF) to target },
+            AuthorityCase("direction") { selected, target -> selected.copy(direction = MessageDirection.OUTBOUND) to target },
+            AuthorityCase("thread") { selected, target -> selected.copy(threadId = null) to target },
+            AuthorityCase("parent thread") { selected, target -> selected.copy(parentThreadId = null) to target },
+            AuthorityCase("selected blank body") { selected, target -> selected.copy(body = " ") to target },
+            AuthorityCase("canonical blank body") { selected, target -> selected to target.copy(body = " ") },
+            AuthorityCase("attachment URL") { selected, target -> selected.copy(attachmentUrl = "https://example.org/a") to target },
+            AuthorityCase("attachment name") { selected, target -> selected.copy(attachmentName = "a") to target },
+            AuthorityCase("attachment size") { selected, target -> selected.copy(attachmentSize = 1) to target },
+            AuthorityCase("attachment MIME type") { selected, target -> selected.copy(attachmentMime = "text/plain") to target },
+            AuthorityCase("reply ID") { selected, target -> selected.copy(replyToId = "reply") to target },
+            AuthorityCase("reply JID") { selected, target -> selected.copy(replyToId = "reply", replyToJid = PEER) to target },
+            AuthorityCase("reply fallback body") { selected, target -> selected.copy(replyToId = "reply", replyFallbackBody = "quoted") to target },
+            AuthorityCase("same local ID") { selected, _ -> selected.copy(
+                replaceId = "selected-wire", correctionTargetMessageId = selected.localMessageId,
+            ) to selected },
+            AuthorityCase("canonical wrong peer") { selected, target -> selected to target.copy(peerJid = OTHER_PEER) },
+            AuthorityCase("canonical non-CHAT") { selected, target -> selected to target.copy(messageKind = MessageKind.GROUPCHAT) },
+            AuthorityCase("canonical target attachment metadata") { selected, target -> selected to target.copy(attachmentUrl = "https://example.org/a") },
+            AuthorityCase("canonical target reply metadata") { selected, target -> selected to target.copy(replyToId = "reply") },
+        )
+
+        for (case in cases) {
+            resetStore()
+            installFacts(
+                incoming("target", message("target-wire")).copy(body = "original", threadId = "thread", parentThreadId = "parent"),
+                incoming("selected", message("selected-wire")).copy(
+                    body = "edited", threadId = "thread", parentThreadId = "parent", replaceId = "target-wire",
+                ),
+            )
+            val dao = database.messageDao()
+            dao.insertPeer(PeerEntity(ACCOUNT, OTHER_PEER))
+            dao.insertThread(MessageThreadEntity(ACCOUNT, OTHER_PEER, MessageKind.CHAT, "parent", null))
+            dao.insertThread(MessageThreadEntity(ACCOUNT, OTHER_PEER, MessageKind.CHAT, "thread", "parent"))
+            dao.insertThread(MessageThreadEntity(ACCOUNT, PEER, MessageKind.GROUPCHAT, "parent", null))
+            dao.insertThread(MessageThreadEntity(ACCOUNT, PEER, MessageKind.GROUPCHAT, "thread", "parent"))
+            val selected = requireNotNull(dao.message(ACCOUNT, "selected"))
+            val target = requireNotNull(dao.message(ACCOUNT, "target"))
+            val (changedSelected, changedTarget) = case.mutate(selected, target)
+            if (changedSelected.localMessageId != changedTarget.localMessageId) dao.updateMessage(changedTarget)
+            dao.updateMessage(changedSelected)
+            assertNull(case.name, assertReadOnlyState { store.resolveDirectReactionTarget(ACCOUNT, PEER, "selected") })
+        }
+    }
+
+    @Test
+    fun directReactionResolutionRejectsNonCorrectionAuthorityFailures() = runBlocking {
+        suspend fun rejected(label: String) = assertNull(label, assertReadOnlyState {
+            store.resolveDirectReactionTarget(ACCOUNT, PEER, "selected")
+        })
+        suspend fun baseline(vararg aliases: TrustedIdentityAlias) {
+            resetStore()
+            installFacts(incoming("selected", *aliases))
+        }
+
+        baseline(message("wire"))
+        assertNull("wrong account", assertReadOnlyState { store.resolveDirectReactionTarget("missing", PEER, "selected") })
+        assertNull("wrong peer", assertReadOnlyState { store.resolveDirectReactionTarget(ACCOUNT, OTHER_PEER, "selected") })
+        assertNull("missing selected message", assertReadOnlyState { store.resolveDirectReactionTarget(ACCOUNT, PEER, "missing") })
+        database.messageDao().updateMessage(requireNotNull(database.messageDao().message(ACCOUNT, "selected"))
+            .copy(messageKind = MessageKind.GROUPCHAT))
+        rejected("selected non-CHAT")
+
+        val aliasCases = listOf(
+            "missing MESSAGE_ID" to emptyArray(), "origin-only" to arrayOf(origin("origin")),
+            "stanza-only" to arrayOf(stanza("stanza")),
+            "MAM-only" to arrayOf(TrustedIdentityAlias(IdentityAliasKind.MAM_RESULT, PEER, "mam")),
+            "duplicate MESSAGE_ID" to arrayOf(message("one"), message("two")),
+        )
+        for ((label, aliases) in aliasCases) { baseline(*aliases); rejected(label) }
+        baseline()
+        insertAliasFact(TrustedIdentityAliasEntity(ACCOUNT, IdentityAliasKind.MESSAGE_ID, PEER, "wire", null, IdentityAliasStatus.QUARANTINED))
+        rejected("quarantined MESSAGE_ID")
+        baseline(message("wire"))
+        insertAliasFact(TrustedIdentityAliasEntity(ACCOUNT, IdentityAliasKind.MESSAGE_ID, SELF, "wire", "selected", IdentityAliasStatus.TRUSTED))
+        rejected("duplicate wrong-authority MESSAGE_ID")
+        baseline()
+        insertAliasFact(TrustedIdentityAliasEntity(ACCOUNT, IdentityAliasKind.MESSAGE_ID, "wrong", "wire", "selected", IdentityAliasStatus.TRUSTED))
+        rejected("wrong-authority MESSAGE_ID")
+        baseline()
+        insertAliasFact(TrustedIdentityAliasEntity(ACCOUNT, IdentityAliasKind.MESSAGE_ID, PEER, "", "selected", IdentityAliasStatus.TRUSTED))
+        rejected("blank MESSAGE_ID")
+
+        suspend fun correctionLink(status: IdentityAliasStatus, messageId: String?) {
+            resetStore()
+            installFacts(
+                incoming("canonical", message("target-wire"), message("canonical-wire")).copy(body = "original"),
+                incoming("selected", message("selected-wire")).copy(body = "edited", replaceId = "target-wire"),
+                incoming("other", message("other-wire")),
+            )
+            database.openHelper.writableDatabase.execSQL(
+                "UPDATE trusted_identity_aliases SET messageId = ?, status = ? WHERE value = 'target-wire'",
+                arrayOf(messageId, status.name),
+            )
+        }
+        correctionLink(IdentityAliasStatus.QUARANTINED, null)
+        rejected("selected correction trusted MESSAGE_ID link absent")
+        correctionLink(IdentityAliasStatus.TRUSTED, "other")
+        rejected("link resolves to different local message than correctionTargetMessageId")
+    }
+
+    @Test
     fun pendingClassificationHonorsMessageIdAuthorityAndRetirement() = runBlocking {
         store.ingest(incoming("owner", message("accepted"), origin("unsupported"), stanza("accepted")))
         store.ingest(incoming("other", message("owned-elsewhere")))

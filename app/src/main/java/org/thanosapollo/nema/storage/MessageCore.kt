@@ -1615,6 +1615,13 @@ data class IncomingReactionApply(
     val delayedAtMs: Long? = null,
 )
 
+internal data class DirectReactionTarget(
+    val accountId: String,
+    val peerJid: String,
+    val canonicalLocalId: String,
+    val wireTargetId: String,
+)
+
 internal fun reactionTargetKey(localMessageId: String?, wireTargetId: String): String =
     localMessageId ?: "pending:$wireTargetId"
 
@@ -2075,6 +2082,36 @@ class MessageStore private constructor(
                 .singleOrNull()
                 ?.value
         }
+
+    internal suspend fun resolveDirectReactionTarget(
+        accountId: String,
+        peerJid: String,
+        localMessageId: String,
+    ): DirectReactionTarget? = database.withTransaction {
+        val dao = database.messageDao()
+        val selected = dao.message(accountId, localMessageId)
+            ?.takeIf { it.peerJid == peerJid && it.messageKind == MessageKind.CHAT }
+            ?: return@withTransaction null
+        if ((selected.replaceId == null) != (selected.correctionTargetMessageId == null)) {
+            return@withTransaction null
+        }
+        val canonical = if (selected.replaceId == null) selected else {
+            val target = dao.message(accountId, selected.correctionTargetMessageId!!) ?: return@withTransaction null
+            if (!selected.canCorrect(target)) return@withTransaction null
+            val link = dao.trustedAlias(
+                accountId, IdentityAliasKind.MESSAGE_ID, selected.senderJid, selected.replaceId!!,
+            )
+            if (link?.messageId != target.localMessageId) return@withTransaction null
+            target
+        }
+        if (canonical.replaceId != null || canonical.correctionTargetMessageId != null) return@withTransaction null
+        val alias = dao.trustedAliasesForMessage(accountId, canonical.localMessageId)
+            .filter { it.kind == IdentityAliasKind.MESSAGE_ID }
+            .singleOrNull()
+            ?.takeIf { it.authority == canonical.senderJid && it.value.isNotBlank() }
+            ?: return@withTransaction null
+        DirectReactionTarget(accountId, peerJid, canonical.localMessageId, alias.value)
+    }
 
     suspend fun ownReactionEmojis(
         accountId: String,
