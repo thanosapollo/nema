@@ -68,18 +68,18 @@ class MessageReactionStoreTest {
     }
 
     @Test
-    fun pendingForbiddenAliasesAreDiscardedBeforeTheirValueCanAttachElsewhere() = runBlocking {
+    fun pendingRowsSurviveWhenLocalMessageIdAliasIsAbsent() = runBlocking {
+        val dao = database.messageDao()
         assertEquals(ReactionApplyOutcome.PENDING, store.applyIncomingReaction(react("late-origin", listOf("⚠️"))))
         store.ingest(incoming("origin-owner", origin("late-origin")))
-        assertTrue(database.messageDao().messageReactions(ACCOUNT, PEER).isEmpty())
-        store.ingest(incoming("later-message", message("late-origin")))
-        assertTrue(chips("later-message").isEmpty())
+        assertEquals(setOf("pending:late-origin" to 1L), dao.messageReactions(ACCOUNT, PEER).map { it.targetKey to it.revision }.toSet())
 
         assertEquals(ReactionApplyOutcome.PENDING, store.applyIncomingReaction(react("late-stanza", listOf("⚠️"))))
         store.ingest(incoming("stanza-owner", stanza("late-stanza")))
-        assertTrue(database.messageDao().messageReactions(ACCOUNT, PEER).isEmpty())
-        store.ingest(incoming("later-stanza-message", message("late-stanza")))
-        assertTrue(chips("later-stanza-message").isEmpty())
+        assertEquals(
+            setOf("pending:late-origin" to 1L, "pending:late-stanza" to 1L),
+            dao.messageReactions(ACCOUNT, PEER).map { it.targetKey to it.revision }.toSet(),
+        )
     }
 
     @Test
@@ -134,7 +134,7 @@ class MessageReactionStoreTest {
         store.applyIncomingReaction(react("original-id", listOf("❤️", "👍"), sender = SELF))
         store.applyIncomingReaction(react("original-id", previous, sender = SELF))
         assertEquals(previous, store.ownReactionEmojis(ACCOUNT, PEER, "correction", SELF))
-        database.messageDao().upsertMessageReaction(
+        assertEquals(ReactionMutationOutcome.WRITTEN, database.messageDao().writeReactionFullSet(
             MessageReactionEntity(
                 ACCOUNT,
                 PEER,
@@ -145,7 +145,7 @@ class MessageReactionStoreTest {
                 "⚠️",
                 5_000L,
             ),
-        )
+        ))
         store.ingest(correction)
         assertEquals(
             setOf(chip("original", "⚠️"), chip("original", "❤️", SELF)),
@@ -187,7 +187,7 @@ class MessageReactionStoreTest {
         val attached = MessageReactionEntity(
             ACCOUNT, PEER, PEER, "guard-top", "guard-top", "guard-top-id", "⚠️", 5_000L,
         )
-        dao.upsertMessageReaction(attached)
+        assertEquals(ReactionMutationOutcome.WRITTEN, dao.writeReactionFullSet(attached))
 
         assertNull(store.reactionWireTarget(ACCOUNT, PEER, "guard-top"))
         assertTrue(store.ownReactionEmojis(ACCOUNT, PEER, "guard-top", PEER).isEmpty())
@@ -226,8 +226,8 @@ class MessageReactionStoreTest {
             ACCOUNT, PEER, PEER, "pending:corrupt-correction-id", null,
             "corrupt-correction-id", "👍", 1_000L,
         )
-        dao.upsertMessageReaction(attached)
-        dao.upsertMessageReaction(pending)
+        assertEquals(ReactionMutationOutcome.WRITTEN, dao.writeReactionFullSet(attached))
+        assertEquals(ReactionMutationOutcome.WRITTEN, dao.writeReactionFullSet(pending))
         val before = dao.messageReactions(ACCOUNT, PEER).toSet()
 
         assertNull(store.reactionWireTarget(ACCOUNT, PEER, "corrupt-correction"))
@@ -254,7 +254,7 @@ class MessageReactionStoreTest {
         store.applyIncomingReaction(react("message-1", listOf("❤️"), receivedAtMs = 2_000L))
         assertEquals(ReactionApplyOutcome.PENDING, store.applyIncomingReaction(react("clear", emptyList(), receivedAtMs = 3_000L)))
         store.ingest(incoming("local-1", message("message-1"), message("clear")))
-        assertTrue(chips("local-1").isEmpty())
+        assertEquals(listOf(chip("local-1", "❤️")), chips("local-1"))
         assertEquals(ReactionApplyOutcome.PENDING, store.applyIncomingReaction(react("p-old", listOf("👍"), receivedAtMs = 1_000L)))
         assertEquals(ReactionApplyOutcome.PENDING, store.applyIncomingReaction(react("p-new", emptyList(), receivedAtMs = 2_000L)))
         store.ingest(incoming("local-3", message("p-old"), message("p-new")))
@@ -266,6 +266,22 @@ class MessageReactionStoreTest {
         store.ingest(incoming("keep", message("keep-a"), message("drop-b")))
         assertEquals(listOf(chip("keep", "🙏")), chips("keep"))
         assertTrue(chips("drop").isEmpty())
+    }
+
+    @Test
+    fun pendingRowsSurviveMultipleLocalMessageIdAliasRowsIncludingDuplicateValues() = runBlocking {
+        val dao = database.messageDao()
+        listOf(pending("first", "👍", 3), pending("second", "❤️", 4), pending("cross-kind", "⚠️", 5)).forEach(::raw)
+        store.ingest(incoming("multiple", message("first"), message("second"), origin("cross-kind")))
+        assertEquals(
+            setOf("pending:first" to 3L, "pending:second" to 4L, "pending:cross-kind" to 5L),
+            dao.messageReactions(ACCOUNT, PEER).map { it.targetKey to it.revision }.toSet(),
+        )
+        listOf(pending("duplicate", "🙏", 6), pending("duplicate-cross-kind", "😂", 7)).forEach(::raw)
+        store.ingest(incoming("duplicate", message("duplicate"),
+            TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, SELF, "duplicate"), origin("duplicate-cross-kind")))
+        assertEquals(setOf("pending:first" to 3L, "pending:second" to 4L, "pending:cross-kind" to 5L,
+            "pending:duplicate" to 6L, "pending:duplicate-cross-kind" to 7L), dao.messageReactions(ACCOUNT, PEER).map { it.targetKey to it.revision }.toSet())
     }
 
     @Test
@@ -355,7 +371,13 @@ class MessageReactionStoreTest {
         MessageReactionEntity(ACCOUNT, PEER, PEER, localId, localId, wire, emojis, time, revision)
     private fun pending(wire: String, emojis: String, revision: Long = 1) =
         MessageReactionEntity(ACCOUNT, PEER, PEER, "pending:$wire", null, wire, emojis, 10, revision)
-    private fun raw(row: MessageReactionEntity) = runBlocking { database.messageDao().upsertMessageReaction(row) }
+    private fun raw(row: MessageReactionEntity) {
+        database.openHelper.writableDatabase.execSQL(
+            "INSERT OR REPLACE INTO message_reactions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            arrayOf<Any?>(row.accountId, row.peerJid, row.senderBareJid, row.targetKey, row.localMessageId,
+                row.wireTargetId, row.emojis, row.updatedAtMs, row.revision),
+        )
+    }
 
     private fun incoming(localId: String, vararg aliases: TrustedIdentityAlias) = IncomingMessage(
         ACCOUNT, localId, PEER, PEER, MessageDirection.INBOUND, MessageKind.CHAT,

@@ -190,7 +190,7 @@ abstract class MessageDao {
     ): MessageReactionEntity?
 
     @Upsert
-    abstract suspend fun upsertMessageReaction(reaction: MessageReactionEntity)
+    protected abstract suspend fun upsertMessageReaction(reaction: MessageReactionEntity)
 
     @Query(
         """
@@ -199,7 +199,7 @@ abstract class MessageDao {
           AND senderBareJid = :senderBareJid AND targetKey = :targetKey
         """,
     )
-    abstract suspend fun deleteMessageReaction(
+    protected abstract suspend fun deleteMessageReaction(
         accountId: String,
         peerJid: String,
         senderBareJid: String,
@@ -2267,9 +2267,15 @@ class MessageStore private constructor(
             } else {
                 writeReactionRow(dao, reaction, localMessageId = null)
             }
-            1 -> dao.directReactionTarget(matches.single())?.let { target ->
-                writeReactionRow(dao, reaction, localMessageId = target.localMessageId)
-            } ?: writeReactionRow(dao, reaction, localMessageId = null)
+            1 -> {
+                val match = matches.single()
+                dao.directReactionTarget(match)?.let { target ->
+                    writeReactionRow(dao, reaction, localMessageId = target.localMessageId)
+                } ?: if (match.correctionTargetMessageId != null || match.replaceId?.let { replaceId ->
+                        dao.trustedAlias(match.accountId, IdentityAliasKind.MESSAGE_ID, match.senderJid, replaceId)
+                    } != null
+                ) ReactionApplyOutcome.PENDING else writeReactionRow(dao, reaction, localMessageId = null)
+            }
             else -> ReactionApplyOutcome.IGNORED
         }
     }
@@ -2286,78 +2292,52 @@ class MessageStore private constructor(
     ): ReactionApplyOutcome {
         val eventTime = reaction.delayedAtMs ?: reaction.receivedAtMs
         val key = reactionTargetKey(localMessageId, reaction.targetId)
-        val existing = dao.messageReaction(
-            reaction.accountId,
-            reaction.peerJid,
-            reaction.senderBareJid,
-            key,
+        val outcome = dao.writeReactionFullSet(
+            MessageReactionEntity(
+                accountId = reaction.accountId,
+                peerJid = reaction.peerJid,
+                senderBareJid = reaction.senderBareJid,
+                targetKey = key,
+                localMessageId = localMessageId,
+                wireTargetId = reaction.targetId,
+                emojis = encodeReactionEmojis(reaction.emojis),
+                updatedAtMs = eventTime,
+            ),
+            keepNewest || reaction.delayedAtMs != null,
         )
-        if ((keepNewest || reaction.delayedAtMs != null) &&
-            existing != null &&
-            existing.updatedAtMs > eventTime
-        ) {
-            return ReactionApplyOutcome.IGNORED
-        }
-        val emojis = encodeReactionEmojis(reaction.emojis)
-        if (emojis.isEmpty() && localMessageId != null) {
-            dao.deleteMessageReaction(reaction.accountId, reaction.peerJid, reaction.senderBareJid, key)
-        } else {
-            dao.upsertMessageReaction(
-                MessageReactionEntity(
-                    accountId = reaction.accountId,
-                    peerJid = reaction.peerJid,
-                    senderBareJid = reaction.senderBareJid,
-                    targetKey = key,
-                    localMessageId = localMessageId,
-                    wireTargetId = reaction.targetId,
-                    emojis = emojis,
-                    updatedAtMs = eventTime,
-                ),
-            )
-        }
+        if (outcome == ReactionMutationOutcome.SUPERSEDED) return ReactionApplyOutcome.IGNORED
         return if (localMessageId == null) ReactionApplyOutcome.PENDING else ReactionApplyOutcome.APPLIED
     }
 
     private suspend fun attachPendingReactions(dao: MessageDao, winner: MessageEntity) {
         if (winner.messageKind != MessageKind.CHAT) return
-        val aliases = dao.trustedAliasesForMessage(winner.accountId, winner.localMessageId)
-            .filter { it.kind in REACTION_REFERENCE_KINDS }
-        val messageIds = aliases.filter { it.kind == IdentityAliasKind.MESSAGE_ID }.map { it.value }.toSet()
-        val pending = dao.pendingReactionsForMessageAliases(
-            winner.accountId,
-            winner.peerJid,
-            winner.localMessageId,
-        )
-        pending.filter { it.wireTargetId !in messageIds }.forEach { row ->
-            dao.deleteMessageReaction(row.accountId, row.peerJid, row.senderBareJid, row.targetKey)
-        }
+        val pending = dao.classifyPendingReactions(
+            winner.accountId, winner.peerJid, winner.localMessageId,
+        ) ?: return
         val target = dao.directReactionTarget(winner) ?: return
-        for (rows in pending.filter { it.wireTargetId in messageIds }
-            .groupBy(MessageReactionEntity::senderBareJid).values) {
-            val newest = rows.maxBy { it.updatedAtMs }
-            writeReactionRow(
-                dao,
-                newest.toApply(requireNotNull(dao.accountBareJid(newest.accountId))),
-                target.localMessageId,
-                keepNewest = true,
+        pending.accepted.forEach { row ->
+            dao.moveMessageReaction(
+                row,
+                row.copy(
+                    targetKey = target.localMessageId,
+                    localMessageId = target.localMessageId,
+                ),
             )
-            rows.forEach { row ->
-                dao.deleteMessageReaction(row.accountId, row.peerJid, row.senderBareJid, row.targetKey)
-            }
         }
+        pending.unsupported.forEach { dao.retireUnsupportedPendingReaction(it) }
     }
 
     private suspend fun reparentReactions(loser: MessageEntity, winner: MessageEntity) {
         val dao = database.messageDao()
         dao.messageReactionsForMessage(loser.accountId, loser.peerJid, loser.localMessageId)
             .forEach { row ->
-            writeReactionRow(
-                dao,
-                row.toApply(requireNotNull(dao.accountBareJid(row.accountId))),
-                winner.localMessageId,
-                keepNewest = true,
+            dao.moveMessageReaction(
+                row,
+                row.copy(
+                    targetKey = winner.localMessageId,
+                    localMessageId = winner.localMessageId,
+                ),
             )
-            dao.deleteMessageReaction(row.accountId, row.peerJid, row.senderBareJid, row.targetKey)
         }
     }
 

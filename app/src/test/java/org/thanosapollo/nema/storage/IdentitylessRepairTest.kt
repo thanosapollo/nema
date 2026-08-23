@@ -120,16 +120,12 @@ class IdentitylessRepairTest {
         val dao = database.messageDao()
         val correction = requireNotNull(dao.message(ACCOUNT, "correction"))
         dao.updateMessage(correction.copy(correctionTargetMessageId = "mam"))
-        dao.upsertMessageReaction(
-            MessageReactionEntity(
-                ACCOUNT,
-                PEER,
-                PEER,
-                reactionTargetKey("mam", "wire"),
-                "mam",
-                "wire",
-                "😀",
-                2_000,
+        assertEquals(
+            ReactionMutationOutcome.WRITTEN,
+            dao.writeReactionFullSet(
+                MessageReactionEntity(
+                    ACCOUNT, PEER, PEER, reactionTargetKey("mam", "wire"), "mam", "wire", "😀", 2_000,
+                ),
             ),
         )
 
