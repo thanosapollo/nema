@@ -1,13 +1,31 @@
 package org.thanosapollo.nema.storage
 
 import android.content.Context
+import androidx.room.withTransaction
 import androidx.test.core.app.ApplicationProvider
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Before
 import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.xmpp.reactions.ReactionDisplay
+
+internal data class ReactionStoreState(
+    val accounts: List<AccountEntity>,
+    val messages: List<MessageEntity>,
+    val aliases: List<TrustedIdentityAliasEntity>,
+    val reactions: List<MessageReactionEntity>,
+    val totalChanges: Long,
+)
+
+internal class CountingFixedClock(private val value: Long) : () -> Long {
+    var calls = 0
+        private set
+    override fun invoke(): Long = value.also { calls++ }
+    fun resetCount() { calls = 0 }
+}
 
 internal open class ReactionStoreTestFixture {
     protected lateinit var context: Context
@@ -30,6 +48,73 @@ internal open class ReactionStoreTestFixture {
     fun tearDown() {
         database.close()
         context.deleteDatabase(databaseName)
+    }
+
+    protected suspend fun resetStore() {
+        database.close()
+        context.deleteDatabase(databaseName)
+        database = NemaDatabase.create(context, databaseName)
+        database.accountDao().upsert(
+            AccountEntity(ACCOUNT, SELF, ACCOUNT, null, "example.org", null, null),
+        )
+        store = MessageStore(database)
+    }
+
+    protected suspend fun installFacts(vararg facts: IncomingMessage) = facts.forEach { store.ingest(it) }
+
+    protected suspend fun insertAliasFact(alias: TrustedIdentityAliasEntity) =
+        database.messageDao().insertTrustedAlias(alias)
+
+    protected suspend fun state(): ReactionStoreState = database.withTransaction {
+        val accounts = database.accountDao().allAccounts()
+        val dao = database.messageDao()
+        val messages = accounts.flatMap { dao.messages(it.id) }
+        val aliases = accounts.flatMap { dao.trustedAliases(it.id) }
+        val db = database.openHelper.writableDatabase
+        val scopes = db.query(
+            "SELECT DISTINCT accountId, peerJid FROM message_reactions ORDER BY accountId, peerJid",
+        ).use { cursor ->
+            buildList {
+                while (cursor.moveToNext()) add(cursor.getString(0) to cursor.getString(1))
+            }
+        }
+        val reactions = scopes.flatMap { (account, peer) -> dao.messageReactions(account, peer) }
+            .sortedWith(compareBy<MessageReactionEntity>(
+                { it.accountId },
+                { it.peerJid },
+                { it.senderBareJid },
+                { it.targetKey },
+                { it.localMessageId ?: "" },
+                { it.wireTargetId },
+                { it.emojis },
+                { it.updatedAtMs },
+                { it.revision },
+            ))
+        val totalChanges = db.query("SELECT total_changes()").use { cursor ->
+            check(cursor.moveToFirst())
+            cursor.getLong(0)
+        }
+        ReactionStoreState(accounts, messages, aliases, reactions, totalChanges)
+    }
+
+    protected suspend fun <T> assertReadOnlyState(block: suspend () -> T): T {
+        val before = state()
+        val result = block()
+        assertEquals(before, state())
+        return result
+    }
+
+    protected suspend fun assertRejectedWithoutMutation(
+        clock: CountingFixedClock,
+        block: suspend () -> Boolean,
+    ): Boolean {
+        clock.resetCount()
+        return assertReadOnlyState {
+            val result = block()
+            assertFalse(result)
+            assertEquals(0, clock.calls)
+            result
+        }
     }
 
     protected fun reaction(localId: String, wire: String, emojis: String, time: Long, revision: Long = 1) =

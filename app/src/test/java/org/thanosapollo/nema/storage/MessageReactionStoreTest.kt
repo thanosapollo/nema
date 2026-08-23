@@ -4,6 +4,7 @@ import android.app.Application
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
@@ -16,6 +17,69 @@ import org.thanosapollo.nema.thread.MessageKind
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 internal class MessageReactionStoreTest : ReactionStoreTestFixture() {
+
+    @Test
+    fun fixtureOraclesPreserveCompleteStateAndDetectMutants() = runBlocking {
+        val bootstrap = state()
+        assertEquals(listOf(AccountEntity(ACCOUNT, SELF, ACCOUNT, null, "example.org", null, null)), bootstrap.accounts)
+        assertTrue(bootstrap.messages.isEmpty())
+        assertTrue(bootstrap.aliases.isEmpty())
+        assertTrue(bootstrap.reactions.isEmpty())
+        assertEquals(bootstrap, state())
+
+        val original = incoming("original", message("original-id")).copy(body = "original")
+        val correction = incoming("correction", message("correction-id"))
+            .copy(body = "edited", replaceId = "original-id")
+        installFacts(original, correction)
+        val quarantined = TrustedIdentityAliasEntity(
+            ACCOUNT, IdentityAliasKind.STANZA_ID, PEER, "bad", null, IdentityAliasStatus.QUARANTINED,
+        )
+        insertAliasFact(quarantined)
+        val malformed = pending("pending", "", revision = 0)
+        insertReactionUnchecked(malformed)
+        val captured = state()
+        val dao = database.messageDao()
+        assertEquals(listOf(dao.message(ACCOUNT, "original"), dao.message(ACCOUNT, "correction")), captured.messages)
+        assertEquals(listOf("original", "edited"), captured.messages.map { it.body })
+        assertEquals("original", captured.messages.single { it.localMessageId == "correction" }.correctionTargetMessageId)
+        assertEquals(listOf(
+            TrustedIdentityAliasEntity(ACCOUNT, IdentityAliasKind.MESSAGE_ID, PEER, "correction-id", "correction", IdentityAliasStatus.TRUSTED),
+            TrustedIdentityAliasEntity(ACCOUNT, IdentityAliasKind.MESSAGE_ID, PEER, "original-id", "original", IdentityAliasStatus.TRUSTED),
+            quarantined,
+        ), captured.aliases)
+        assertEquals(listOf(malformed), captured.reactions)
+        assertEquals(captured, state())
+        assertEquals("read-result", assertReadOnlyState { "read-result" })
+
+        insertReactionUnchecked(pending("changed", "👍"))
+        assertTrue(state().totalChanges > captured.totalChanges)
+        resetStore()
+
+        val clock = CountingFixedClock(42L)
+        assertEquals(42L, clock())
+        assertEquals(1, clock.calls)
+        clock.resetCount()
+        assertEquals(0, clock.calls)
+        assertFalse(assertRejectedWithoutMutation(clock) { false })
+
+        assertThrows(AssertionError::class.java) {
+            runBlocking { assertRejectedWithoutMutation(clock) { true } }
+        }
+        resetStore()
+        assertThrows(AssertionError::class.java) {
+            runBlocking { assertRejectedWithoutMutation(clock) { insertReactionUnchecked(pending("mutant", "👍")); false } }
+        }
+        resetStore()
+        assertThrows(AssertionError::class.java) {
+            runBlocking { assertRejectedWithoutMutation(clock) { clock(); false } }
+        }
+        resetStore()
+        assertThrows(AssertionError::class.java) {
+            runBlocking { assertReadOnlyState { insertReactionUnchecked(pending("hidden", "👍")) } }
+        }
+        resetStore()
+        assertEquals(bootstrap, state())
+    }
 
     @Test
     fun directReplyAndReactionUseOperationSpecificTargets() = runBlocking {
