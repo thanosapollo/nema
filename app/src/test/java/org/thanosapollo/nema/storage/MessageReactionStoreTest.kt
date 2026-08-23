@@ -739,4 +739,184 @@ internal class MessageReactionStoreTest : ReactionStoreTestFixture() {
         }
     }
 
+    private suspend fun assertCommitRejected(
+        case: String,
+        clock: CountingFixedClock,
+        block: suspend () -> Boolean,
+    ) {
+        clock.resetCount()
+        val before = state()
+        assertFalse(case, block())
+        assertEquals("$case exact state and total_changes", before, state())
+        assertEquals("$case clock", 0, clock.calls)
+    }
+
+    @Test
+    fun outgoingReactionCommitWritesPinnedSnapshotAndRejectsForgedOrWrongStore() = runBlocking {
+        suspend fun install() = installFacts(incoming("target", message("wire")))
+        val clock = CountingFixedClock(42L)
+        store = MessageStore(database, clock)
+        install()
+        val facts = state()
+        clock.resetCount()
+        val command = requireNotNull(store.prepareOutgoingReaction(ACCOUNT, PEER, "target", SELF, "👍"))
+        assertEquals("successful preparation clock", 0, clock.calls)
+        assertTrue("initial commit", store.commitOutgoingReaction(command))
+        assertEquals("initial commit clock", 1, clock.calls)
+        assertEquals("initial commit exact row", MessageReactionEntity(ACCOUNT, PEER, SELF, "target", "target", "wire", "👍", 42, 1),
+            database.messageDao().messageReaction(ACCOUNT, PEER, SELF, "target"))
+        val after = state()
+        assertEquals("initial commit preserves unrelated facts",
+            facts.copy(reactions = after.reactions, totalChanges = after.totalChanges), after)
+
+        resetStore(); store = MessageStore(database, clock); install(); clock.resetCount()
+        val forged = object : OutgoingReactionCommand {
+            override val accountId = ACCOUNT; override val peerJid = PEER
+            override val wireTargetId = "wire"; override val emojis = listOf("👍")
+        }
+        assertCommitRejected("forged command", clock) { store.commitOutgoingReaction(forged) }
+        val other = MessageStore(database, clock)
+        val wrongOwner = requireNotNull(other.prepareOutgoingReaction(ACCOUNT, PEER, "target", SELF, "👍"))
+        assertCommitRejected("wrong-store command", clock) { store.commitOutgoingReaction(wrongOwner) }
+
+        resetStore(); store = MessageStore(database, clock); install()
+        insertReactionUnchecked(MessageReactionEntity(ACCOUNT, PEER, SELF, "target", "target", "wire", "👍", 10,
+            Long.MAX_VALUE - 2))
+        clock.resetCount()
+        val finite = requireNotNull(store.prepareOutgoingReaction(ACCOUNT, PEER, "target", SELF, "👍"))
+        assertEquals("maximum finite preparation clock", 0, clock.calls)
+        assertTrue("maximum finite commit", store.commitOutgoingReaction(finite))
+        assertEquals("maximum finite commit clock", 1, clock.calls)
+        assertEquals("maximum finite exact row", MessageReactionEntity(ACCOUNT, PEER, SELF, "target", "target", "wire", "", 42,
+            Long.MAX_VALUE - 1), database.messageDao().messageReaction(ACCOUNT, PEER, SELF, "target"))
+    }
+
+    @Test
+    fun outgoingReactionCommitRejectsAccountTargetAndAliasDriftWithoutClockOrWrite() = runBlocking {
+        lateinit var clock: CountingFixedClock
+        suspend fun prepared(): OutgoingReactionCommand {
+            resetStore(); clock = CountingFixedClock(42); store = MessageStore(database, clock)
+            installFacts(incoming("target", message("wire")))
+            return requireNotNull(store.prepareOutgoingReaction(ACCOUNT, PEER, "target", SELF, "👍"))
+        }
+        fun deleteAlias() = database.openHelper.writableDatabase.execSQL(
+            "DELETE FROM trusted_identity_aliases WHERE accountId = ? AND kind = 'MESSAGE_ID' AND authority = ? AND value = ?",
+            arrayOf(ACCOUNT, PEER, "wire"))
+        val cases: List<Pair<String, suspend () -> Unit>> = listOf(
+            "missing account" to { database.openHelper.writableDatabase.execSQL(
+                "DELETE FROM accounts WHERE id = ?", arrayOf(ACCOUNT)); assertNull(database.messageDao().accountBareJid(ACCOUNT)) },
+            "account bare-JID drift" to { database.accountDao().upsert(
+                AccountEntity(ACCOUNT, "changed@example.org", ACCOUNT, null, "example.org", null, null)) },
+            "canonical deletion" to { database.openHelper.writableDatabase.execSQL(
+                "DELETE FROM messages WHERE accountId = ? AND localMessageId = ?", arrayOf(ACCOUNT, "target")) },
+            "canonical peer drift" to { database.messageDao().insertPeer(PeerEntity(ACCOUNT, OTHER_PEER));
+                val row = requireNotNull(database.messageDao().message(ACCOUNT, "target"));
+                database.messageDao().updateMessage(row.copy(peerJid = OTHER_PEER)) },
+            "canonical kind drift" to { val row = requireNotNull(database.messageDao().message(ACCOUNT, "target"));
+                database.messageDao().updateMessage(row.copy(messageKind = MessageKind.GROUPCHAT)) },
+            "canonical sender drift" to { val row = requireNotNull(database.messageDao().message(ACCOUNT, "target"));
+                database.messageDao().updateMessage(row.copy(senderJid = SELF)) },
+            "alias loss" to { deleteAlias(); assertTrue(database.messageDao().trustedAliasesForMessage(ACCOUNT, "target").isEmpty()) },
+            "alias quarantine" to { assertEquals(1, database.messageDao().quarantineAlias(
+                ACCOUNT, IdentityAliasKind.MESSAGE_ID, PEER, "wire")) },
+            "alias duplication" to { insertAliasFact(TrustedIdentityAliasEntity(ACCOUNT, IdentityAliasKind.MESSAGE_ID,
+                PEER, "other-wire", "target", IdentityAliasStatus.TRUSTED)) },
+            "alias authority drift" to { deleteAlias(); insertAliasFact(TrustedIdentityAliasEntity(ACCOUNT,
+                IdentityAliasKind.MESSAGE_ID, SELF, "wire", "target", IdentityAliasStatus.TRUSTED)) },
+            "alias value drift" to { deleteAlias(); insertAliasFact(TrustedIdentityAliasEntity(ACCOUNT,
+                IdentityAliasKind.MESSAGE_ID, PEER, "changed-wire", "target", IdentityAliasStatus.TRUSTED)) },
+        )
+        for ((case, mutate) in cases) {
+            val command = prepared(); mutate()
+            assertCommitRejected(case, clock) { store.commitOutgoingReaction(command) }
+        }
+    }
+
+    @Test
+    fun outgoingReactionCommitHandlesAcceptedSupersededReuseAbaMismatchAndLongBounds() = runBlocking {
+        lateinit var clock: CountingFixedClock
+        suspend fun prepared(row: MessageReactionEntity? = null): OutgoingReactionCommand {
+            resetStore(); clock = CountingFixedClock(42); store = MessageStore(database, clock)
+            installFacts(incoming("target", message("wire"))); row?.let(::insertReactionUnchecked)
+            return requireNotNull(store.prepareOutgoingReaction(ACCOUNT, PEER, "target", SELF, "👍"))
+        }
+        var command = prepared()
+        assertTrue("first use", store.commitOutgoingReaction(command))
+        assertCommitRejected("successful command reuse", clock) { store.commitOutgoingReaction(command) }
+
+        command = prepared(); insertReactionUnchecked(MessageReactionEntity(
+            ACCOUNT, PEER, SELF, "target", "target", "wire", "❤️", 20, 1))
+        assertCommitRejected("direct finite revision mismatch", clock) { store.commitOutgoingReaction(command) }
+
+        val p = MessageReactionEntity(ACCOUNT, PEER, SELF, "target", "target", "wire", "👍", 10, 1)
+        command = prepared(p); insertReactionUnchecked(p.copy(emojis = "❤️", revision = 2)); insertReactionUnchecked(p.copy(revision = 3))
+        assertCommitRejected("ABA P-Q-P", clock) { store.commitOutgoingReaction(command) }
+
+        command = prepared(); insertReactionUnchecked(p.copy(revision = Long.MAX_VALUE - 1))
+        assertCommitRejected("exhausted revision", clock) { store.commitOutgoingReaction(command) }
+
+        command = prepared()
+        assertEquals("accepted own event", ReactionApplyOutcome.APPLIED,
+            store.applyIncomingReaction(react("wire", listOf("❤️"), sender = SELF)))
+        assertEquals("accepted own event revision", 1L,
+            database.messageDao().messageReaction(ACCOUNT, PEER, SELF, "target")?.revision)
+        assertCommitRejected("command superseded by accepted own event", clock) { store.commitOutgoingReaction(command) }
+
+        command = prepared(p.copy(updatedAtMs = 2_000))
+        val beforeEvent = state()
+        assertEquals("superseded delayed event", ReactionApplyOutcome.IGNORED, store.applyIncomingReaction(
+            react("wire", listOf("❤️"), sender = SELF, receivedAtMs = 3_000, delayedAtMs = 1_000)))
+        assertEquals("superseded delayed event exact state and total_changes", beforeEvent, state())
+        clock.resetCount(); assertTrue("commit after superseded delayed event", store.commitOutgoingReaction(command))
+        assertEquals("commit after superseded delayed event clock", 1, clock.calls)
+        assertEquals("commit after superseded delayed event exact row", p.copy(emojis = "", updatedAtMs = 42, revision = 2),
+            database.messageDao().messageReaction(ACCOUNT, PEER, SELF, "target"))
+    }
+
+    @Test
+    fun outgoingReactionCommitPropagatesMalformedStateAndRollsBackClockAndPostClockFailures() = runBlocking {
+        val valid = MessageReactionEntity(ACCOUNT, PEER, SELF, "target", "target", "wire", "👍", 10, 1)
+        val malformed = listOf(
+            "revision -1" to valid.copy(revision = -1), "revision 0" to valid.copy(revision = 0),
+            "revision max" to valid.copy(revision = Long.MAX_VALUE),
+            "identity" to valid.copy(wireTargetId = ""), "emoji encoding" to valid.copy(emojis = "👍\u001f👍"),
+        )
+        for ((case, row) in malformed) {
+            resetStore(); val clock = CountingFixedClock(42); store = MessageStore(database, clock)
+            installFacts(incoming("target", message("wire")))
+            val command = requireNotNull(store.prepareOutgoingReaction(ACCOUNT, PEER, "target", SELF, "👍"))
+            insertReactionUnchecked(row); val before = state(); clock.resetCount()
+            assertThrows(case, IllegalStateException::class.java) { runBlocking { store.commitOutgoingReaction(command) } }
+            assertEquals("$case rollback", before, state()); assertEquals("$case clock", 0, clock.calls)
+        }
+
+        resetStore(); var calls = 0
+        installFacts(incoming("target", message("wire")))
+        store = MessageStore(database) { calls++; error("clock fault") }
+        var command = requireNotNull(store.prepareOutgoingReaction(ACCOUNT, PEER, "target", SELF, "👍"))
+        assertEquals("throwing clock preparation", 0, calls)
+        val beforeClock = state()
+        assertThrows("throwing clock exception", IllegalStateException::class.java) {
+            runBlocking { store.commitOutgoingReaction(command) }
+        }
+        assertEquals("throwing clock rollback and total_changes", beforeClock, state())
+        assertEquals("throwing clock call count", 1, calls)
+
+        resetStore(); val clock = CountingFixedClock(42); store = MessageStore(database, clock)
+        installFacts(incoming("target", message("wire")))
+        command = requireNotNull(store.prepareOutgoingReaction(ACCOUNT, PEER, "target", SELF, "👍"))
+        database.openHelper.writableDatabase.execSQL(
+            "CREATE TRIGGER fail_reaction_commit BEFORE INSERT ON message_reactions BEGIN SELECT RAISE(ABORT, 'fault'); END")
+        val beforeWrite = state(); clock.resetCount()
+        try {
+            assertThrows("post-clock central-writer exception", Exception::class.java) {
+                runBlocking { store.commitOutgoingReaction(command) }
+            }
+            assertEquals("post-clock central-writer rollback and total_changes", beforeWrite, state())
+            assertEquals("post-clock central-writer clock count", 1, clock.calls)
+        } finally {
+            database.openHelper.writableDatabase.execSQL("DROP TRIGGER fail_reaction_commit")
+        }
+    }
+
 }

@@ -1667,7 +1667,7 @@ private class PreparedOutgoingReaction(
     val ownSender: String,
     val target: DirectReactionTarget,
     val expectedRevision: Long,
-    private val encodedEmojis: String,
+    val encodedEmojis: String,
 ) : OutgoingReactionCommand {
     override val wireTargetId: String get() = target.wireTargetId
     override val emojis: List<String> get() = decodeReactionEmojis(encodedEmojis).toMutableList()
@@ -2179,6 +2179,39 @@ class MessageStore private constructor(
         val encoded = encodeReactionEmojis(toggleReaction(emoji, current?.let { decodeReactionEmojis(it.emojis) }.orEmpty()))
         PreparedOutgoingReaction(this, accountId, peerJid, ownSenderBareJid, target, current?.revision ?: 0, encoded)
     }
+
+    internal suspend fun commitOutgoingReaction(command: OutgoingReactionCommand): Boolean =
+        database.withTransaction {
+            val prepared = command as? PreparedOutgoingReaction
+                ?: return@withTransaction false
+            if (prepared.owner !== this) return@withTransaction false
+            val dao = database.messageDao()
+            if (dao.accountBareJid(prepared.accountId) != prepared.ownSender) return@withTransaction false
+            val target = resolveDirectReactionTarget(
+                prepared.target.accountId,
+                prepared.target.peerJid,
+                prepared.target.canonicalLocalId,
+            )
+            if (target != prepared.target) return@withTransaction false
+            dao.writeReactionFullSetIfRevision(
+                prepared.target.accountId,
+                prepared.target.peerJid,
+                prepared.ownSender,
+                prepared.target.canonicalLocalId,
+                prepared.expectedRevision,
+            ) {
+                MessageReactionEntity(
+                    accountId = prepared.target.accountId,
+                    peerJid = prepared.target.peerJid,
+                    senderBareJid = prepared.ownSender,
+                    targetKey = prepared.target.canonicalLocalId,
+                    localMessageId = prepared.target.canonicalLocalId,
+                    wireTargetId = prepared.target.wireTargetId,
+                    emojis = prepared.encodedEmojis,
+                    updatedAtMs = clock(),
+                )
+            }
+        }
 
     suspend fun ownReactionEmojis(
         accountId: String,
