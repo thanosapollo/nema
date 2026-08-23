@@ -240,6 +240,28 @@ abstract class MessageDao {
     }
 
     @Transaction
+    internal open suspend fun writeReactionFullSetIfRevision(
+        accountId: String,
+        peerJid: String,
+        senderBareJid: String,
+        targetKey: String,
+        expectedRevision: Long,
+        candidateFactory: () -> MessageReactionEntity,
+    ): Boolean {
+        val current = messageReaction(accountId, peerJid, senderBareJid, targetKey)
+        current?.let { requireValidReaction(it) }
+        val observedRevision = current?.revision ?: 0
+        if (expectedRevision !in 0L..Long.MAX_VALUE - 2) return false
+        if (observedRevision == Long.MAX_VALUE - 1) return false
+        if (observedRevision != expectedRevision) return false
+        val candidate = candidateFactory()
+        check(candidate.accountId == accountId && candidate.peerJid == peerJid &&
+            candidate.senderBareJid == senderBareJid && candidate.targetKey == targetKey)
+        check(writeReactionFullSet(candidate) == ReactionMutationOutcome.WRITTEN)
+        return true
+    }
+
+    @Transaction
     open suspend fun writeReactionFullSet(
         candidate: MessageReactionEntity,
         keepNewest: Boolean = false,

@@ -591,4 +591,152 @@ internal class MessageReactionStoreTest : ReactionStoreTestFixture() {
         Unit
     }
 
+    @Test
+    fun reactionRevisionCasOwnsTransactionAndCommitsCompleteSetSemantics() = runBlocking {
+        suspend fun commits(
+            case: String,
+            current: MessageReactionEntity?,
+            candidate: MessageReactionEntity,
+            expected: Long,
+        ) {
+            resetStore()
+            current?.let(::insertReactionUnchecked)
+            var calls = 0
+            assertTrue(case, database.messageDao().writeReactionFullSetIfRevision(
+                candidate.accountId, candidate.peerJid, candidate.senderBareJid, candidate.targetKey, expected,
+            ) {
+                calls++
+                check(database.inTransaction()) { "$case factory must run inside the helper transaction" }
+                candidate
+            })
+            assertEquals("$case factory count", 1, calls)
+            assertEquals("$case exact committed entity", candidate.copy(revision = expected + 1),
+                database.messageDao().messageReaction(
+                    candidate.accountId, candidate.peerJid, candidate.senderBareJid, candidate.targetKey,
+                ))
+        }
+        val original = pending("cas", "👍", 1)
+        commits("absent destination", null, original.copy(updatedAtMs = 11), 0)
+        commits("different set", original, original.copy(emojis = "❤️", updatedAtMs = 12), 1)
+        commits("same encoded set", original.copy(revision = 2), original.copy(updatedAtMs = 13), 2)
+        commits("nonempty to empty tombstone", original.copy(revision = 3),
+            original.copy(emojis = "", updatedAtMs = 14), 3)
+        commits("empty to empty tombstone", original.copy(emojis = "", revision = 4),
+            original.copy(emojis = "", updatedAtMs = 15), 4)
+    }
+
+    @Test
+    fun reactionRevisionCasRejectsInvalidExpectedObservedMismatchExhaustionAndCandidateIdentityMismatch() = runBlocking {
+        val row = pending("cas", "👍", 2)
+        suspend fun rejected(case: String, expected: Long) {
+            val before = state()
+            var calls = 0
+            val order = mutableListOf<String>()
+            assertFalse(case, database.messageDao().writeReactionFullSetIfRevision(
+                row.accountId, row.peerJid, row.senderBareJid, row.targetKey, expected,
+            ) {
+                calls++
+                order += "factory"
+                check(database.inTransaction())
+                row.copy(emojis = "❤️")
+            })
+            assertEquals("$case factory count", 0, calls)
+            assertEquals("$case evaluation order", emptyList<String>(), order)
+            assertEquals("$case exact state and total_changes", before, state())
+        }
+        for (expected in listOf(-1L, Long.MAX_VALUE - 1, Long.MAX_VALUE)) {
+            resetStore()
+            rejected("invalid expected $expected against absence", expected)
+            insertReactionUnchecked(row)
+            rejected("invalid expected $expected against valid row", expected)
+        }
+        rejected("valid expected behind observed", 1)
+        rejected("valid expected ahead of observed", 3)
+        resetStore()
+        insertReactionUnchecked(row.copy(revision = Long.MAX_VALUE - 1))
+        rejected("observed revision exhaustion", Long.MAX_VALUE - 2)
+
+        val suppliedKeys = listOf(row.accountId, row.peerJid, row.senderBareJid, row.targetKey)
+        val mismatches = listOf(
+            "account key" to row.copy(accountId = OTHER_ACCOUNT),
+            "peer key" to row.copy(peerJid = OTHER_PEER),
+            "sender key" to row.copy(senderBareJid = SELF),
+            "target key" to row.copy(targetKey = "pending:other", wireTargetId = "other"),
+        )
+        for ((case, candidate) in mismatches) {
+            resetStore()
+            insertReactionUnchecked(row)
+            val candidateKeys = listOf(
+                candidate.accountId, candidate.peerJid, candidate.senderBareJid, candidate.targetKey,
+            )
+            assertEquals("$case changes exactly one helper key", 1,
+                suppliedKeys.zip(candidateKeys).count { (supplied, replacement) -> supplied != replacement })
+            assertTrue("$case replacement remains a nonblank key", candidateKeys.all(String::isNotBlank))
+            val before = state()
+            var calls = 0
+            val order = mutableListOf<String>()
+            assertThrows("$case mismatch", IllegalStateException::class.java) {
+                runBlocking {
+                    database.messageDao().writeReactionFullSetIfRevision(
+                        row.accountId, row.peerJid, row.senderBareJid, row.targetKey, row.revision,
+                    ) {
+                        calls++
+                        order += "factory"
+                        check(database.inTransaction())
+                        candidate
+                    }
+                }
+            }
+            assertEquals("$case factory count", 1, calls)
+            assertEquals("$case evaluation order", listOf("factory"), order)
+            assertEquals("$case exact state and total_changes", before, state())
+        }
+    }
+
+    @Test
+    fun reactionRevisionCasValidatesDurableStateBeforeExpectedOrFactory() = runBlocking {
+        suspend fun malformed(
+            case: String,
+            row: MessageReactionEntity,
+            setup: suspend () -> Unit = {},
+        ) {
+            resetStore()
+            setup()
+            insertReactionUnchecked(row)
+            val before = state()
+            var calls = 0
+            val expectedCases = listOf(
+                "matching-looking" to row.revision,
+                "mismatching" to if (row.revision == 1L) 0L else 1L,
+            )
+            for ((expectedCase, expected) in expectedCases) {
+                assertThrows("$case with $expectedCase expected", IllegalStateException::class.java) {
+                    runBlocking {
+                        database.messageDao().writeReactionFullSetIfRevision(
+                            row.accountId, row.peerJid, row.senderBareJid, row.targetKey, expected,
+                        ) { calls++; pending("unused", "👍") }
+                    }
+                }
+                assertEquals("$case with $expectedCase expected factory count", 0, calls)
+                assertEquals("$case with $expectedCase expected exact state and total_changes", before, state())
+            }
+        }
+        val valid = pending("bad", "👍")
+        malformed("blank peer", valid.copy(peerJid = ""))
+        malformed("blank sender", valid.copy(senderBareJid = ""))
+        malformed("blank wire target", valid.copy(targetKey = "pending:", wireTargetId = ""))
+        malformed("attached target key mismatch", reaction("owner", "owner-wire", "👍", 10).copy(targetKey = "wrong")) {
+            installFacts(incoming("owner", message("owner-wire")))
+        }
+        malformed("attached owner absent", reaction("missing", "missing-wire", "👍", 10))
+        malformed("attached owner peer mismatch", reaction("owner", "owner-wire", "👍", 10)) {
+            installFacts(incoming("owner", message("owner-wire")).copy(peerJid = OTHER_PEER, senderJid = OTHER_PEER))
+        }
+        malformed("duplicate emoji encoding", valid.copy(emojis = "👍\u001f👍"))
+        malformed("whitespace emoji encoding", valid.copy(emojis = " 👍 "))
+        for (revision in listOf(-1L, 0L, Long.MAX_VALUE)) {
+            malformed("invalid durable revision $revision", valid.copy(revision = revision))
+        }
+    }
+
 }
