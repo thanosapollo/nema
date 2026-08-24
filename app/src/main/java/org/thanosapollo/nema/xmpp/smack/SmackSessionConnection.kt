@@ -131,6 +131,7 @@ import org.thanosapollo.nema.xmpp.transport.MessageTimeSource
 import org.thanosapollo.nema.xmpp.transport.OutgoingFailureEnvelope
 import org.thanosapollo.nema.xmpp.transport.OutgoingMessageEnvelope
 import org.thanosapollo.nema.xmpp.transport.OutgoingReactionEnvelope
+import org.thanosapollo.nema.xmpp.transport.ReactionActor
 import org.thanosapollo.nema.xmpp.transport.SendNotAttemptedException
 import org.thanosapollo.nema.xmpp.transport.SessionCapabilities
 import org.thanosapollo.nema.xmpp.transport.StanzaIdEnvelope
@@ -241,7 +242,13 @@ internal class SmackSessionConnection(
                 event(SessionEvent.RealTimeText(attempt, it))
             }
         }
-        message.message.toIncomingReaction(attempt, expectedBareJid)?.let {
+        val roomLease = room?.let { roomStableIdAuthorities.lease(attempt, it) }
+        message.message.toIncomingReaction(
+            attempt, expectedBareJid, roomLease, roomStableIdAuthorities, room?.let(roomNicks::get),
+            liveCarrier = message.isRawLive(
+                wrapper.getExtension(MamResultExtension::class.java) != null,
+            ),
+        )?.let {
             event(SessionEvent.Reaction(attempt, it))
             if (message.message.body.isNullOrEmpty()) return@StanzaListener
         }
@@ -1218,9 +1225,25 @@ internal fun Message.toIncomingRtt(
 internal fun Message.toIncomingReaction(
     attempt: SessionAttemptIdentity,
     expectedBareJid: String,
+    roomLease: RoomStableIdLease? = null,
+    roomAuthorities: RoomStableIdAuthorityRegistry? = null,
+    ownRoomNick: String? = null,
+    liveCarrier: Boolean = true,
 ): IncomingReactionEnvelope? {
-    if (type != Message.Type.chat) return null
     val parsed = parseReactions() ?: return null
+    if (type == Message.Type.groupchat) {
+        if (!liveCarrier || DelayInformation.from(this) != null) return null
+        val fromJid = from?.takeIf { it.isEntityFullJid } ?: return null
+        val room = fromJid.asBareJid().toString()
+        val nick = fromJid.resourceOrNull?.toString()?.takeIf(String::isNotEmpty) ?: return null
+        val actor = liveMucActor(attempt, room, nick, roomLease, roomAuthorities, ownRoomNick)
+            ?: return null
+        return IncomingReactionEnvelope(
+            attempt.accountId, attempt.generation, expectedBareJid, room, room,
+            parsed.targetId, parsed.emojis, actor = actor, messageKind = MessageKind.GROUPCHAT,
+        )
+    }
+    if (type != Message.Type.chat) return null
     val fromBare = from?.asBareJid()?.takeIf { it.isEntityBareJid }?.toString() ?: return null
     val toBare = to?.asBareJid()?.takeIf { it.isEntityBareJid }?.toString()
     val peer = when {
@@ -1238,6 +1261,25 @@ internal fun Message.toIncomingReaction(
         emojis = parsed.emojis,
         delayedAtMs = DelayInformation.from(this)?.stamp?.time,
     )
+}
+
+private fun Message.liveMucActor(
+    attempt: SessionAttemptIdentity,
+    room: String,
+    nick: String,
+    lease: RoomStableIdLease?,
+    registry: RoomStableIdAuthorityRegistry?,
+    ownRoomNick: String?,
+): ReactionActor? {
+    if (lease == null || registry == null) return null
+    val ownNick = ownRoomNick ?: return null
+    return synchronized(registry) {
+        if (lease.attempt != attempt || lease.authority != room || !registry.isCurrent(lease) ||
+            registry.occupantIdSupport(attempt, room) != true
+        ) return@synchronized null
+        val occupant = nemaOccupantActor() ?: return@synchronized null
+        if (nick == ownNick) ReactionActor.MucOwn else occupant
+    }
 }
 
 private fun Message.mucActorBareJid(): String? = extensions
@@ -1430,7 +1472,11 @@ internal data class TrustedIncomingStanza(
     val sentAtEpochMs: Long? = null,
     val sentTimeSource: MessageTimeSource? = null,
     val receivedAtEpochMs: Long = System.currentTimeMillis(),
+    val forwarded: Boolean = false,
 )
+
+internal fun TrustedIncomingStanza.isRawLive(mamCarrier: Boolean): Boolean =
+    !forwarded && sentTimeSource == null && !mamCarrier
 
 internal fun Message.toTrustedCarbonMessage(
     expectedBareJid: String,
@@ -1464,6 +1510,7 @@ internal fun Message.toTrustedCarbonMessage(
         sentAtEpochMs = delay?.stamp?.time ?: receivedAtEpochMs,
         sentTimeSource = MessageTimeSource.CARBON,
         receivedAtEpochMs = receivedAtEpochMs,
+        forwarded = true,
     )
 }
 

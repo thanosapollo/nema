@@ -64,6 +64,7 @@ import org.thanosapollo.nema.xmpp.transport.OutgoingMessageEnvelope
 import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
 import org.thanosapollo.nema.xmpp.transport.MessageSignalProtocol
 import org.thanosapollo.nema.xmpp.transport.OutgoingMessageSignal
+import org.thanosapollo.nema.xmpp.transport.ReactionActor
 import org.thanosapollo.nema.xmpp.transport.StanzaIdEnvelope
 
 @RunWith(RobolectricTestRunner::class)
@@ -1716,10 +1717,10 @@ class SmackDirectMessageMapperTest {
             ConnectionAttempt.require(2),
             LifecycleEpoch.require(1),
         )
-        fun reaction(from: String, to: String) = StanzaBuilder.buildMessage()
+        fun reaction(from: String, to: String, type: Message.Type = Message.Type.chat) = StanzaBuilder.buildMessage()
             .from(JidCreate.from(from))
             .to(JidCreate.from(to))
-            .ofType(Message.Type.chat)
+            .ofType(type)
             .addExtension(
                 StandardExtensionElement.builder("reactions", REACTIONS_NAMESPACE)
                     .addAttribute("id", "origin-1")
@@ -1733,6 +1734,7 @@ class SmackDirectMessageMapperTest {
         )
         assertEquals("peer@example.org", inbound.peer)
         assertEquals("peer@example.org", inbound.senderBareJid)
+        assertEquals(ReactionActor.Direct("peer@example.org"), inbound.actor)
         assertEquals("origin-1", inbound.targetId)
         assertEquals(listOf("👍"), inbound.emojis)
         val own = requireNotNull(
@@ -1741,6 +1743,7 @@ class SmackDirectMessageMapperTest {
         )
         assertEquals("peer@example.org", own.peer)
         assertEquals("account@example.org", own.senderBareJid)
+        assertEquals(ReactionActor.Direct("account@example.org"), own.actor)
         assertNull(
             StanzaBuilder.buildMessage()
                 .from(JidCreate.from("room@conference.example.org/nick"))

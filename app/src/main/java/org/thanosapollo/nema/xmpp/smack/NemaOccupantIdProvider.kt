@@ -8,6 +8,7 @@ import org.jivesoftware.smack.provider.ExtensionElementProvider
 import org.jivesoftware.smack.provider.ProviderManager
 import org.jivesoftware.smack.util.XmlStringBuilder
 import org.jivesoftware.smack.xml.XmlPullParser
+import org.thanosapollo.nema.xmpp.transport.ReactionActor
 
 private const val OCCUPANT_ID_ELEMENT = "occupant-id"
 internal const val OCCUPANT_ID_NAMESPACE = "urn:xmpp:occupant-id:0"
@@ -78,3 +79,6 @@ internal fun MessageOrPresence<*>.nemaOccupantId(): String? {
     val occupantId = matches.single() as? NemaOccupantIdElement ?: return null
     return occupantId.id.takeIf { occupantId.structurallyValid }
 }
+
+internal fun MessageOrPresence<*>.nemaOccupantActor(): ReactionActor.MucOccupant? =
+    nemaOccupantId()?.let { ReactionActor.MucOccupant(it) }

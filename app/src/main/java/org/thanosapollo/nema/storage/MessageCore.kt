@@ -24,6 +24,7 @@ import org.thanosapollo.nema.xmpp.reactions.reactionDisplaysFor
 import org.thanosapollo.nema.xmpp.reactions.toggleReaction
 import org.thanosapollo.nema.xmpp.transport.MessageTimeSource
 import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
+import org.thanosapollo.nema.xmpp.transport.ReactionActor
 
 private val REACTION_REFERENCE_KINDS = setOf(
     IdentityAliasKind.MESSAGE_ID,
@@ -1655,6 +1656,8 @@ data class IncomingReactionApply(
     val emojis: List<String>,
     val receivedAtMs: Long,
     val delayedAtMs: Long? = null,
+    val actor: ReactionActor = ReactionActor.Direct(senderBareJid),
+    val messageKind: MessageKind = MessageKind.CHAT,
 )
 
 internal data class ReactionTarget(
@@ -2435,6 +2438,11 @@ class MessageStore private constructor(
     private suspend fun applyIncomingReactionInTransaction(
         reaction: IncomingReactionApply,
     ): ReactionApplyOutcome {
+        val directActor = reaction.actor as? ReactionActor.Direct
+            ?: return ReactionApplyOutcome.IGNORED
+        if (reaction.messageKind != MessageKind.CHAT || directActor.bareJid != reaction.senderBareJid) {
+            return ReactionApplyOutcome.IGNORED
+        }
         val dao = database.messageDao()
         if (reaction.senderBareJid !in setOf(reaction.accountBareJid, reaction.peerJid)) {
             return ReactionApplyOutcome.IGNORED

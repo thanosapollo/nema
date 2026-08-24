@@ -52,6 +52,7 @@ import org.thanosapollo.nema.chat.shouldNotifyInsertedInbound
 import org.thanosapollo.nema.storage.ArchiveDirection
 import org.thanosapollo.nema.storage.IngestionResult
 import org.thanosapollo.nema.storage.IncomingReactionApply
+import org.thanosapollo.nema.xmpp.transport.ReactionActor
 import org.thanosapollo.nema.storage.InsertedInbound
 import org.thanosapollo.nema.xmpp.chatstates.ChatActivity
 import org.thanosapollo.nema.xmpp.chatstates.ChatStateHub
@@ -243,6 +244,10 @@ class SessionRuntime(
                                 emojis = event.reaction.emojis,
                                 receivedAtMs = System.currentTimeMillis(),
                                 delayedAtMs = event.reaction.delayedAtMs,
+                                actor = if (event.reaction.messageKind == org.thanosapollo.nema.thread.MessageKind.CHAT) {
+                                    ReactionActor.Direct(event.reaction.senderBareJid)
+                                } else event.reaction.actor,
+                                messageKind = event.reaction.messageKind,
                             ),
                         )
                     is org.thanosapollo.nema.session.SessionEvent.Signal ->

@@ -95,6 +95,23 @@ data class IncomingRealTimeText(
     }
 }
 
+sealed interface ReactionActor {
+    data class Direct(val bareJid: String) : ReactionActor {
+        init {
+            require(bareJid.isNotEmpty()) { "Direct actor must not be empty" }
+        }
+    }
+
+    data object MucOwn : ReactionActor
+
+    @ConsistentCopyVisibility
+    data class MucOccupant internal constructor(val occupantId: String) : ReactionActor {
+        init {
+            require(occupantId.isNotEmpty()) { "Occupant ID must not be empty" }
+        }
+    }
+}
+
 data class IncomingReactionEnvelope(
     val accountId: AccountId,
     val generation: ConnectionGeneration,
@@ -104,12 +121,16 @@ data class IncomingReactionEnvelope(
     val targetId: String,
     val emojis: List<String>,
     val delayedAtMs: Long? = null,
+    val actor: ReactionActor = ReactionActor.Direct(senderBareJid),
+    val messageKind: MessageKind = MessageKind.CHAT,
 ) {
     init {
         require(accountBareJid.isNotEmpty()) { "Account JID must not be empty" }
         require(peer.isNotEmpty()) { "Peer must not be empty" }
         require(senderBareJid.isNotEmpty()) { "Sender must not be empty" }
         require(targetId.isNotEmpty()) { "Reaction target must not be empty" }
+        require((messageKind == MessageKind.CHAT && actor is ReactionActor.Direct) ||
+            (messageKind == MessageKind.GROUPCHAT && actor !is ReactionActor.Direct))
     }
 }
 

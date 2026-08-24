@@ -3,12 +3,14 @@ package org.thanosapollo.nema.storage
 import android.app.Application
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.thanosapollo.nema.thread.MessageKind
+import org.thanosapollo.nema.xmpp.transport.ReactionActor
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
@@ -106,6 +108,26 @@ internal class LiveMucReactionStoreTest : ReactionStoreTestFixture() {
             val row = requireNotNull(database.messageDao().message(ACCOUNT, "selected"))
             database.messageDao().updateMessage(mutate(row))
             rejected(label)
+        }
+    }
+
+    @Test
+    fun closedRoomActorsCrossBoundaryButRemainDormant(): Unit = runBlocking {
+        val clock = CountingFixedClock(42L)
+        store = MessageStore(database, clock)
+        val actors = listOf(
+            ReactionActor.MucOwn,
+            ReactionActor.MucOccupant("opaque"),
+            ReactionActor.Direct("occupant-id:opaque"),
+        )
+        actors.forEach { actor ->
+            val apply = IncomingReactionApply(
+                ACCOUNT, SELF, ROOM, ROOM, "room-id", listOf("👍"), 1L,
+                actor = actor, messageKind = MessageKind.GROUPCHAT,
+            )
+            assertFalse(assertRejectedWithoutMutation(clock) {
+                store.applyIncomingReaction(apply) != ReactionApplyOutcome.IGNORED
+            })
         }
     }
 
