@@ -119,6 +119,13 @@ enum class ConnectionCommandOutcome {
     STALE,
 }
 
+private data class ReactionCommandKey(
+    val accountId: String,
+    val peerJid: String,
+    val ownSender: String,
+    val canonicalLocalId: String,
+)
+
 class SessionRuntime(
     private val accounts: AccountRepository,
     private val credentials: CredentialVault,
@@ -130,6 +137,7 @@ class SessionRuntime(
     private val scope = runtimeScope
     private val accountCommands = Mutex()
     private val bookmarkMutations = Mutex()
+    private val reactionMutexes = mutableMapOf<ReactionCommandKey, Mutex>()
     private val automaticConnectionClaimed = AtomicBoolean(false)
     private val pendingActivation = PendingActivationAuthority()
     private lateinit var controller: ActiveSessionController
@@ -179,6 +187,10 @@ class SessionRuntime(
         get() = archive.state
     val configuredAccounts: Flow<List<AccountConfiguration>> = accounts.configuredAccounts
     val activeAccount: Flow<AccountConfiguration?> = accounts.activeAccount
+
+    private fun reactionCommandLock(key: ReactionCommandKey) = synchronized(reactionMutexes) {
+        reactionMutexes.getOrPut(key) { Mutex() }
+    }
 
     init {
         controller = ActiveSessionController(
@@ -743,32 +755,39 @@ class SessionRuntime(
         val lease = controller.lifecycle.value.dispatchLease() ?: return false
         val account = accounts.activeAccount.first() ?: return false
         if (lease.identity.accountId != account.id) return false
-        val command = messages.prepareOutgoingReaction(
-            account.id.value,
-            peerJid,
-            localMessageId,
-            account.bareJid.value,
-            emoji,
+        val target = messages.resolveDirectReactionTarget(
+            account.id.value, peerJid, localMessageId,
         ) ?: return false
-        try {
-            controller.sendReaction(
-                org.thanosapollo.nema.xmpp.transport.OutgoingReactionEnvelope(
-                    accountId = lease.identity.accountId,
-                    generation = lease.identity.generation,
-                    recipient = command.peerJid,
-                    targetId = command.wireTargetId,
-                    emojis = command.emojis,
-                ),
-            )
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            return false
+        val key = ReactionCommandKey(
+            account.id.value, peerJid, account.bareJid.value, target.canonicalLocalId,
+        )
+        return reactionCommandLock(key).withLock {
+            val innerLease = controller.lifecycle.value.dispatchLease() ?: return@withLock false
+            val innerAccount = accounts.activeAccount.first() ?: return@withLock false
+            if (innerLease.identity.accountId != innerAccount.id ||
+                innerAccount.id.value != key.accountId || innerAccount.bareJid.value != key.ownSender
+            ) return@withLock false
+            val command = messages.prepareOutgoingReaction(
+                key.accountId, key.peerJid, localMessageId, key.ownSender, emoji,
+            ) ?: return@withLock false
+            if (command.canonicalLocalMessageId != key.canonicalLocalId) return@withLock false
+            try {
+                controller.sendReaction(
+                    org.thanosapollo.nema.xmpp.transport.OutgoingReactionEnvelope(
+                        innerLease.identity.accountId, innerLease.identity.generation,
+                        command.peerJid, command.wireTargetId, command.emojis,
+                    ),
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                return@withLock false
+            }
+            controller.commitIfConnected(
+                innerLease.identity,
+                { controller.lifecycle.value.dispatchLease() == innerLease },
+            ) { messages.commitOutgoingReaction(command) } != null
         }
-        return controller.commitIfConnected(
-            lease.identity,
-            { controller.lifecycle.value.dispatchLease() == lease },
-        ) { messages.commitOutgoingReaction(command) } != null
     }
 
     fun reportComposer(peer: String, composingNow: Boolean) {

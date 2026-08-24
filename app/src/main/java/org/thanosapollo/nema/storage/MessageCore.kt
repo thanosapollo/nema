@@ -1656,6 +1656,7 @@ internal data class DirectReactionTarget(
 internal interface OutgoingReactionCommand {
     val accountId: String
     val peerJid: String
+    val canonicalLocalMessageId: String
     val wireTargetId: String
     val emojis: List<String>
 }
@@ -1669,6 +1670,7 @@ private class PreparedOutgoingReaction(
     val expectedRevision: Long,
     val encodedEmojis: String,
 ) : OutgoingReactionCommand {
+    override val canonicalLocalMessageId: String get() = target.canonicalLocalId
     override val wireTargetId: String get() = target.wireTargetId
     override val emojis: List<String> get() = decodeReactionEmojis(encodedEmojis).toMutableList()
 }

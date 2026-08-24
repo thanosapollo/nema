@@ -536,6 +536,7 @@ internal class MessageReactionStoreTest : ReactionStoreTestFixture() {
         val prepared = requireNotNull(assertReadOnlyState {
             store.prepareOutgoingReaction(ACCOUNT, PEER, "outbound", SELF, "👍")
         })
+        assertEquals("outbound", prepared.canonicalLocalMessageId)
         assertEquals(listOf(ACCOUNT, PEER, "self-wire"),
             listOf(prepared.accountId, prepared.peerJid, prepared.wireTargetId))
         val exposed = prepared.emojis
@@ -772,6 +773,7 @@ internal class MessageReactionStoreTest : ReactionStoreTestFixture() {
         resetStore(); store = MessageStore(database, clock); install(); clock.resetCount()
         val forged = object : OutgoingReactionCommand {
             override val accountId = ACCOUNT; override val peerJid = PEER
+            override val canonicalLocalMessageId = "forged-target"
             override val wireTargetId = "wire"; override val emojis = listOf("👍")
         }
         assertCommitRejected("forged command", clock) { store.commitOutgoingReaction(forged) }

@@ -888,6 +888,112 @@ class SessionRuntimeTest {
     }
 
     @Test
+    fun `reactTo uses the keyed mutex and rejects canonical drift before send`() {
+        val source = reactToSource()
+        assertTrue(source.contains("reactionCommandLock(key).withLock"))
+        val guard = source.indexOf("command.canonicalLocalMessageId != key.canonicalLocalId")
+        val send = source.indexOf("controller.sendReaction(")
+        assertTrue(guard >= 0 && guard < send)
+    }
+
+    @Test
+    fun `same canonical reaction commands accumulate in serial order`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "same-key")
+        installDirectTarget(fixture, DIRECT_TARGET.localId, DIRECT_TARGET.wireId)
+        installAcceptedCorrection(fixture)
+        val steps = listOf(fixture.connection.queueReaction(), fixture.connection.queueReaction())
+
+        val first = async { fixture.runtime.reactTo(REACTION_PEER, DIRECT_TARGET.localId, "🔥") }
+        steps[0].entered.await()
+        val second = async { fixture.runtime.reactTo(REACTION_PEER, CORRECTION.localId, "👍") }
+        runCurrent()
+        steps[0].release.complete(Unit)
+        steps[1].entered.await()
+        assertTrue(first.await())
+        assertEquals(listOf(
+            outgoingReaction(fixture, listOf("🔥"), DIRECT_TARGET.wireId),
+            outgoingReaction(fixture, listOf("🔥", "👍"), DIRECT_TARGET.wireId),
+        ), fixture.connection.sentReactions)
+        steps[1].release.complete(Unit)
+        assertTrue(second.await())
+        assertEquals(expectedOwnReaction(fixture, DIRECT_TARGET, "🔥\u001f👍", REACTION_NOW).copy(revision = 2),
+            ownReactionSnapshot(fixture, DIRECT_TARGET.localId))
+    }
+
+    @Test
+    fun `different canonical reaction commands send concurrently`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "different-keys")
+        installDirectTarget(fixture, DIRECT_TARGET.localId, DIRECT_TARGET.wireId)
+        installSecondTarget(fixture)
+        val steps = listOf(fixture.connection.queueReaction(), fixture.connection.queueReaction())
+
+        val first = async { fixture.runtime.reactTo(REACTION_PEER, DIRECT_TARGET.localId, "🔥") }
+        val second = async { fixture.runtime.reactTo(REACTION_PEER, SECOND_TARGET.localId, "👍") }
+        steps.forEach { it.entered.await() }
+        steps.forEach { it.release.complete(Unit) }
+        assertEquals(setOf(
+            outgoingReaction(fixture, listOf("🔥"), DIRECT_TARGET.wireId),
+            outgoingReaction(fixture, listOf("👍"), SECOND_TARGET.wireId),
+        ), fixture.connection.sentReactions.toSet())
+        assertTrue(first.await())
+        assertTrue(second.await())
+        assertEquals(expectedOwnReaction(fixture, DIRECT_TARGET, "🔥", REACTION_NOW),
+            ownReactionSnapshot(fixture, DIRECT_TARGET.localId))
+        assertEquals(expectedOwnReaction(fixture, SECOND_TARGET, "👍", REACTION_NOW),
+            ownReactionSnapshot(fixture, SECOND_TARGET.localId))
+    }
+
+    @Test
+    fun `queued correction rejects canonical drift after production merge`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "canonical-drift")
+        suspend fun ingest(localId: String, aliases: List<TrustedIdentityAlias>) = fixture.store.ingest(IncomingMessage(
+            fixture.account.id.value, localId, REACTION_PEER, REACTION_PEER,
+            MessageDirection.INBOUND, MessageKind.CHAT, null, null, DIRECT_TARGET.localId, null, aliases,
+        ))
+        val origin = TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, REACTION_PEER, SECOND_TARGET.wireId)
+        val message = TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, REACTION_PEER, DIRECT_TARGET.wireId)
+        ingest(SECOND_TARGET.localId, listOf(origin))
+        ingest(DIRECT_TARGET.localId, listOf(message))
+        installAcceptedCorrection(fixture)
+        val callback = incomingReaction(fixture, fixture.connection.attemptIdentity,
+            DIRECT_TARGET.wireId, listOf("❤️"), SECOND_TARGET.delayedAtMs)
+            .copy(senderBareJid = fixture.account.bareJid.value)
+        val firstStep = fixture.connection.queueReaction(callback = ReactionCallback(
+            fixture.connection.attemptIdentity, callback))
+        fixture.connection.queueReaction(released = true)
+        val first = async { fixture.runtime.reactTo(REACTION_PEER, CORRECTION.localId, "🔥") }
+        firstStep.entered.await()
+        runCurrent()
+        assertEquals(expectedOwnReaction(fixture, DIRECT_TARGET, "❤️", SECOND_TARGET.delayedAtMs!!),
+            ownReactionSnapshot(fixture, DIRECT_TARGET.localId))
+        val queued = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            fixture.runtime.reactTo(REACTION_PEER, CORRECTION.localId, "👍")
+        }
+        fixture.runtime.activeAccount.first()
+        runCurrent()
+        requireNotNull(fixture.store.resolveDirectReactionTarget(
+            fixture.account.id.value, REACTION_PEER, CORRECTION.localId))
+        runCurrent()
+
+        assertEquals(1, ingest("bridge", listOf(origin, message)).mergedRows)
+        val dao = database.messageDao()
+        assertNull(dao.message(fixture.account.id.value, DIRECT_TARGET.localId))
+        assertEquals(SECOND_TARGET.localId, dao.trustedAlias(fixture.account.id.value,
+            IdentityAliasKind.MESSAGE_ID, REACTION_PEER, DIRECT_TARGET.wireId)?.messageId)
+        assertEquals(SECOND_TARGET.localId, fixture.store.resolveDirectReactionTarget(
+            fixture.account.id.value, REACTION_PEER, CORRECTION.localId)?.canonicalLocalId)
+        firstStep.release.complete(Unit)
+        assertTrue(first.await())
+        assertFalse(queued.await())
+        assertEquals(listOf(outgoingReaction(fixture, listOf("🔥"), DIRECT_TARGET.wireId)),
+            fixture.connection.sentReactions)
+        assertEquals(MessageReactionEntity(fixture.account.id.value, REACTION_PEER,
+            fixture.account.bareJid.value, SECOND_TARGET.localId, SECOND_TARGET.localId,
+            DIRECT_TARGET.wireId, "❤️", SECOND_TARGET.delayedAtMs!!, 1),
+            ownReactionSnapshot(fixture, SECOND_TARGET.localId))
+    }
+
+    @Test
     fun `reactTo preserves durable state and exact throwable behavior`() = runTest {
         val fixture = connectedRuntime(backgroundScope, "send-failure")
         installDirectTarget(fixture, DIRECT_TARGET.localId, DIRECT_TARGET.wireId)
@@ -1028,6 +1134,10 @@ class SessionRuntimeTest {
         "peer@example.org", "wire", listOf("🔥"),
     )
 
+    private fun reactToSource() = java.io.File(
+        "src/main/java/org/thanosapollo/nema/service/XmppConnectionService.kt",
+    ).readText().substringAfter("suspend fun reactTo(").substringBefore("fun reportComposer")
+
     private suspend fun connectedRuntime(scope: CoroutineScope, id: String): RuntimeFixture {
         val accounts = AccountRepository(database.accountDao())
         val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
@@ -1155,8 +1265,10 @@ class SessionRuntimeTest {
             ConnectionState.ReconnectWait(oldAttempt.accountId, oldAttempt.generation),
             fixture.runtime.state.first { it is ConnectionState.ReconnectWait },
         )
-        runCurrent()
-        advanceTimeBy(1_000L)
+        repeat(3) {
+            runCurrent()
+            advanceTimeBy(1_000L)
+        }
         runCurrent()
         val currentAttempt = fixture.connection.attemptIdentity
         assertEquals(oldAttempt.generation.value + 1, currentAttempt.generation.value)
