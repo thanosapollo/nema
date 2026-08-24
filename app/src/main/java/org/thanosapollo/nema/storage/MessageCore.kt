@@ -984,13 +984,17 @@ abstract class MessageDao {
           ) AS edited,
           CASE
             WHEN messages.messageKind = 'GROUPCHAT' THEN (
-              SELECT CASE WHEN COUNT(*) = 1 THEN MIN(alias.value) END
+              SELECT CASE
+                WHEN COUNT(*) = 1
+                  AND MIN(alias.authority) = messages.peerJid
+                  AND MIN(alias.value) <> ''
+                THEN MIN(alias.value)
+              END
               FROM trusted_identity_aliases AS alias
               WHERE alias.accountId = messages.accountId
                 AND alias.messageId = messages.localMessageId
                 AND alias.status = 'TRUSTED'
                 AND alias.kind = 'STANZA_ID'
-                AND alias.authority = messages.peerJid
             )
             ELSE (
               SELECT alias.value
