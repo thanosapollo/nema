@@ -5,6 +5,7 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import java.util.UUID
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -15,6 +16,7 @@ import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -41,7 +43,9 @@ import org.thanosapollo.nema.storage.ArchiveCursorKey
 import org.thanosapollo.nema.storage.ArchiveDirection
 import org.thanosapollo.nema.storage.ArchivePage
 import org.thanosapollo.nema.storage.ArchivedIncomingMessage
+import org.thanosapollo.nema.storage.DirectReactionTarget
 import org.thanosapollo.nema.storage.IncomingMessage
+import org.thanosapollo.nema.storage.IdentityAliasKind
 import org.thanosapollo.nema.storage.NemaDatabase
 import org.thanosapollo.nema.storage.MessageDirection
 import org.thanosapollo.nema.storage.MessageWriteBoundary
@@ -50,6 +54,7 @@ import org.thanosapollo.nema.storage.OutboundIntent
 import org.thanosapollo.nema.storage.OutboxStatus
 import org.thanosapollo.nema.storage.PeerIdentityStore
 import org.thanosapollo.nema.storage.ReconciliationRepairStatus
+import org.thanosapollo.nema.storage.TrustedIdentityAlias
 import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmark
 import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmarkSnapshot
@@ -718,6 +723,98 @@ class SessionRuntimeTest {
     }
 
     @Test
+    fun `direct reaction fixture resolves exact target with absent snapshot`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "reaction-account")
+
+        installDirectTarget(fixture, DIRECT_TARGET.localId, DIRECT_TARGET.wireId)
+
+        assertEquals(
+            DirectReactionTarget(
+                fixture.account.id.value,
+                REACTION_PEER,
+                DIRECT_TARGET.localId,
+                DIRECT_TARGET.wireId,
+            ),
+            fixture.store.resolveDirectReactionTarget(
+                fixture.account.id.value,
+                REACTION_PEER,
+                DIRECT_TARGET.localId,
+            ),
+        )
+        assertNull(ownReactionSnapshot(fixture, DIRECT_TARGET.localId))
+    }
+
+    @Test
+    fun `correction fixture resolves original while second target stays independent`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "reaction-account")
+        installDirectTarget(fixture, DIRECT_TARGET.localId, DIRECT_TARGET.wireId)
+
+        installAcceptedCorrection(fixture)
+        installSecondTarget(fixture)
+
+        val expectedOriginal = DirectReactionTarget(
+            fixture.account.id.value,
+            REACTION_PEER,
+            DIRECT_TARGET.localId,
+            DIRECT_TARGET.wireId,
+        )
+        assertEquals(
+            expectedOriginal,
+            fixture.store.resolveDirectReactionTarget(
+                fixture.account.id.value,
+                REACTION_PEER,
+                CORRECTION.localId,
+            ),
+        )
+        assertEquals(
+            DirectReactionTarget(
+                fixture.account.id.value,
+                REACTION_PEER,
+                SECOND_TARGET.localId,
+                SECOND_TARGET.wireId,
+            ),
+            fixture.store.resolveDirectReactionTarget(
+                fixture.account.id.value,
+                REACTION_PEER,
+                SECOND_TARGET.localId,
+            ),
+        )
+    }
+
+    @Test
+    fun `reaction envelope helpers preserve exact runtime and event fields`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "reaction-account")
+        val attempt = fixture.connection.attemptIdentity
+        val emojis = listOf("🔥", "👍")
+
+        assertEquals(
+            OutgoingReactionEnvelope(
+                fixture.account.id,
+                attempt.generation,
+                REACTION_PEER,
+                DIRECT_TARGET.wireId,
+                emojis,
+            ),
+            outgoingReaction(fixture, emojis, DIRECT_TARGET.wireId),
+        )
+        listOf(DIRECT_TARGET, SECOND_TARGET).forEach { event ->
+            assertEquals(
+                IncomingReactionEnvelope(
+                    fixture.account.id,
+                    attempt.generation,
+                    fixture.account.bareJid.value,
+                    REACTION_PEER,
+                    REACTION_PEER,
+                    event.wireId,
+                    emojis,
+                    event.delayedAtMs,
+                ),
+                incomingReaction(fixture, attempt, event.wireId, emojis, event.delayedAtMs),
+            )
+        }
+    }
+
+    @Test
     fun `reaction fake captures exact envelope before entry and waits for release`() = runTest {
         val connection = RecordingConnection(AccountId.require("account"), null, null) {}
         val reaction = outgoingReaction(reactionAttempt())
@@ -777,6 +874,91 @@ class SessionRuntimeTest {
     private fun incomingReaction(attempt: SessionAttemptIdentity) = IncomingReactionEnvelope(
         attempt.accountId, attempt.generation, "account@example.org", "peer@example.org",
         "peer@example.org", "wire", listOf("🔥"),
+    )
+
+    private suspend fun connectedRuntime(scope: CoroutineScope, id: String): RuntimeFixture {
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val store = MessageStore(database)
+        val connections = RecordingConnectionFactory()
+        val runtime = SessionRuntime(
+            accounts, credentials, store, PeerIdentityStore(database.messageDao()), scope, connections,
+        )
+        val account = account(id)
+        accounts.save(account)
+        accounts.activate(account.id)
+        credentials.store(account.id, "secret".toCharArray())
+        check(runtime.connectActive() == ConnectionCommandOutcome.RUNNING)
+        return RuntimeFixture(
+            accounts, credentials, store, connections, runtime, account, connections.created.single(),
+        )
+    }
+
+    private suspend fun installDirectTarget(
+        fixture: RuntimeFixture,
+        localId: String,
+        wireId: String,
+    ) {
+        fixture.store.ingest(
+            IncomingMessage(
+                fixture.account.id.value, localId, REACTION_PEER, REACTION_PEER,
+                MessageDirection.INBOUND, MessageKind.CHAT, null, null, localId, null,
+                listOf(TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, REACTION_PEER, wireId)),
+            ),
+        )
+    }
+
+    private suspend fun installAcceptedCorrection(fixture: RuntimeFixture) {
+        val original = requireNotNull(fixture.store.resolveDirectReactionTarget(
+            fixture.account.id.value, REACTION_PEER, DIRECT_TARGET.localId,
+        ))
+        fixture.store.ingest(
+            IncomingMessage(
+                fixture.account.id.value, CORRECTION.localId, REACTION_PEER, REACTION_PEER,
+                MessageDirection.INBOUND, MessageKind.CHAT, null, null, "corrected", null,
+                listOf(TrustedIdentityAlias(
+                    IdentityAliasKind.MESSAGE_ID, REACTION_PEER, CORRECTION.wireId,
+                )),
+                replaceId = DIRECT_TARGET.wireId,
+            ),
+        )
+        val stored = fixture.store.messages(fixture.account.id.value)
+            .single { it.localMessageId == CORRECTION.localId }
+        assertEquals(DIRECT_TARGET.wireId, stored.replaceId)
+        assertEquals(original, fixture.store.resolveDirectReactionTarget(
+            fixture.account.id.value, REACTION_PEER, CORRECTION.localId,
+        ))
+    }
+
+    private suspend fun installSecondTarget(fixture: RuntimeFixture) =
+        installDirectTarget(fixture, SECOND_TARGET.localId, SECOND_TARGET.wireId)
+
+    private suspend fun ownReactionSnapshot(fixture: RuntimeFixture, canonicalLocalId: String) =
+        database.messageDao().messageReaction(
+            fixture.account.id.value,
+            REACTION_PEER,
+            fixture.account.bareJid.value,
+            canonicalLocalId,
+        )
+
+    private fun outgoingReaction(
+        fixture: RuntimeFixture,
+        emojis: List<String>,
+        wireId: String,
+    ) = OutgoingReactionEnvelope(
+        fixture.account.id, fixture.connection.attemptIdentity.generation,
+        REACTION_PEER, wireId, emojis,
+    )
+
+    private fun incomingReaction(
+        fixture: RuntimeFixture,
+        attempt: SessionAttemptIdentity,
+        wireId: String,
+        emojis: List<String>,
+        delayedAtMs: Long?,
+    ) = IncomingReactionEnvelope(
+        attempt.accountId, attempt.generation, fixture.account.bareJid.value,
+        REACTION_PEER, REACTION_PEER, wireId, emojis, delayedAtMs,
     )
 
     private fun account(id: String, bareJid: String = "$id@example.org") = AccountConfiguration.create(
@@ -848,6 +1030,25 @@ class SessionRuntimeTest {
         val attempt: SessionAttemptIdentity,
         val reaction: IncomingReactionEnvelope,
     )
+
+    private data class RuntimeFixture(
+        val accounts: AccountRepository,
+        val credentials: CredentialVault,
+        val store: MessageStore,
+        val connections: RecordingConnectionFactory,
+        val runtime: SessionRuntime,
+        val account: AccountConfiguration,
+        val connection: RecordingConnection,
+    )
+
+    private data class ReactionEventCase(val localId: String, val wireId: String, val delayedAtMs: Long?)
+
+    private companion object {
+        const val REACTION_PEER = "peer@example.org"
+        val DIRECT_TARGET = ReactionEventCase("reaction-local", "reaction-wire", null)
+        val CORRECTION = ReactionEventCase("correction-local", "correction-wire", null)
+        val SECOND_TARGET = ReactionEventCase("second-local", "second-wire", 4_200L)
+    }
 
     private data class ReactionSendStep(
         val entered: CompletableDeferred<Unit> = CompletableDeferred(),
