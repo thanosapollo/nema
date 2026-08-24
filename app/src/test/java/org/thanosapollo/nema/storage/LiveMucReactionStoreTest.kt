@@ -17,6 +17,97 @@ import org.thanosapollo.nema.xmpp.transport.ReactionActor
 @Config(sdk = [34], application = Application::class)
 internal class LiveMucReactionStoreTest : ReactionStoreTestFixture() {
     @Test
+    fun unknownRoomActionSurvivesRestartAndAttachesAfterTarget(): Unit = runBlocking {
+        val actor = ReactionActor.MucOccupant("opaque")
+        assertEquals(ReactionApplyOutcome.PENDING, store.applyIncomingReaction(apply(actor)))
+        assertEquals(1, database.messageDao().messageReactions(ACCOUNT, ROOM).size)
+        assertNull(database.messageDao().message(ACCOUNT, "selected"))
+        store = MessageStore(database)
+        installFacts(group("selected", sid(ROOM, "room-id")))
+
+        assertEquals(
+            MessageReactionEntity(
+                ACCOUNT, ROOM, "occupant-id:opaque", "selected", "selected", "room-id", "👍", 1, 1,
+            ),
+            database.messageDao().messageReaction(ACCOUNT, ROOM, "occupant-id:opaque", "selected"),
+        )
+        assertEquals(1, database.messageDao().messageReactions(ACCOUNT, ROOM).size)
+    }
+
+    @Test
+    fun opaquePendingRoomSidsAttachByExactValue(): Unit = runBlocking {
+        for (value in listOf("ordinary", " \t\n\r", "\u2003", "\u0000x")) {
+            resetStore()
+            assertEquals(ReactionApplyOutcome.PENDING,
+                store.applyIncomingReaction(apply(ReactionActor.MucOwn, target = value)))
+            assertEquals("groupchat-pending:$value",
+                database.messageDao().messageReactions(ACCOUNT, ROOM).single().targetKey)
+            store = MessageStore(database)
+            installFacts(group("selected", sid(ROOM, value)))
+            assertEquals(value,
+                database.messageDao().messageReaction(ACCOUNT, ROOM, SELF, "selected")?.wireTargetId)
+            assertEquals(1, database.messageDao().messageReactions(ACCOUNT, ROOM).size)
+        }
+    }
+
+    @Test
+    fun pendingRoomActionsKeepNewestAndReplaysAreIdempotent(): Unit = runBlocking {
+        val actor = ReactionActor.MucOccupant("opaque")
+        assertEquals(ReactionApplyOutcome.PENDING, store.applyIncomingReaction(apply(actor, time = 10)))
+        for (time in listOf(9L, 10L)) {
+            assertEquals(ReactionApplyOutcome.IGNORED,
+                store.applyIncomingReaction(apply(actor, emojis = listOf("stale"), time = time)))
+        }
+        assertEquals(ReactionApplyOutcome.PENDING,
+            store.applyIncomingReaction(apply(actor, emojis = listOf("😂"), time = 12)))
+        val pending = database.messageDao().messageReactions(ACCOUNT, ROOM).single()
+        assertEquals(listOf("😂", 12L, 2L), listOf(pending.emojis, pending.updatedAtMs, pending.revision))
+        installFacts(group("selected", sid(ROOM, "room-id")))
+        val attached = database.messageDao().messageReactions(ACCOUNT, ROOM).single()
+        assertEquals(ReactionApplyOutcome.IGNORED,
+            store.applyIncomingReaction(apply(actor, emojis = listOf("duplicate"), time = 12)))
+        installFacts(group("selected", sid(ROOM, "room-id")))
+        assertEquals(attached, database.messageDao().messageReactions(ACCOUNT, ROOM).single())
+        resetStore()
+        installFacts(group("selected", sid(ROOM, "room-id")))
+        assertEquals(ReactionApplyOutcome.APPLIED,
+            store.applyIncomingReaction(apply(actor, emojis = listOf("😂"), time = 12)))
+        assertEquals(attached, database.messageDao().messageReactions(ACCOUNT, ROOM).single())
+    }
+
+    @Test
+    fun typedDirectAndRoomPendingRowsCannotCrossAttach(): Unit = runBlocking {
+        val ownDirect = apply(ReactionActor.MucOwn, target = "groupchat:x", kind = MessageKind.CHAT)
+            .copy(senderBareJid = SELF, actor = ReactionActor.Direct(SELF))
+        assertEquals(ReactionApplyOutcome.PENDING, store.applyIncomingReaction(ownDirect))
+        assertEquals(ReactionApplyOutcome.PENDING,
+            store.applyIncomingReaction(apply(ReactionActor.MucOwn, target = "x")))
+        assertEquals(setOf("pending:groupchat:x", "groupchat-pending:x"),
+            database.messageDao().messageReactions(ACCOUNT, ROOM).map { it.targetKey }.toSet())
+        installFacts(incoming("direct", TrustedIdentityAlias(
+            IdentityAliasKind.MESSAGE_ID, ROOM, "groupchat:x")).copy(peerJid = ROOM, senderJid = ROOM))
+        assertEquals(setOf("direct", "groupchat-pending:x"),
+            database.messageDao().messageReactions(ACCOUNT, ROOM).map { it.targetKey }.toSet())
+        installFacts(group("group", sid(ROOM, "x")))
+        assertEquals(setOf("direct", "group"),
+            database.messageDao().messageReactions(ACCOUNT, ROOM).map { it.targetKey }.toSet())
+    }
+
+    @Test
+    fun pendingRoomScopeAmbiguityAndAccountCascadeStayClosed(): Unit = runBlocking {
+        installFacts(group("foreign", sid(OTHER_PEER, "shared")).copy(
+            peerJid = OTHER_PEER, senderJid = "$OTHER_PEER/alice"))
+        assertEquals(ReactionApplyOutcome.PENDING,
+            store.applyIncomingReaction(apply(ReactionActor.MucOwn, target = "shared")))
+        installFacts(group("missing"))
+        installFacts(group("ambiguous", sid(ROOM, "shared"), sid(OTHER_PEER, "other-shared")))
+        assertEquals("groupchat-pending:shared",
+            database.messageDao().messageReactions(ACCOUNT, ROOM).single().targetKey)
+        database.openHelper.writableDatabase.execSQL("DELETE FROM accounts WHERE id = ?", arrayOf(ACCOUNT))
+        assertTrue(database.messageDao().messageReactions(ACCOUNT, ROOM).isEmpty())
+    }
+
+    @Test
     fun exactRoomTargetPreparesReadOnlyCommand(): Unit = runBlocking {
         val clock = CountingFixedClock(42L)
         store = MessageStore(database, clock)
@@ -136,13 +227,13 @@ internal class LiveMucReactionStoreTest : ReactionStoreTestFixture() {
     }
 
     @Test
-    fun unknownInvalidAndMismatchedApplicationsStayInert(): Unit = runBlocking {
+    fun invalidAndMismatchedApplicationsStayInert(): Unit = runBlocking {
         val clock = CountingFixedClock(42L)
         suspend fun rejected(value: IncomingReactionApply) = assertFalse(assertRejectedWithoutMutation(clock) {
             store.applyIncomingReaction(value) != ReactionApplyOutcome.IGNORED
         })
         store = MessageStore(database, clock)
-        rejected(apply(ReactionActor.MucOccupant("opaque"), target = "unknown"))
+        rejected(apply(ReactionActor.MucOccupant("opaque"), target = ""))
         installFacts(group("selected", sid(ROOM, "room-id")))
         listOf(
             apply(ReactionActor.Direct("occupant-id:opaque")),
@@ -152,8 +243,6 @@ internal class LiveMucReactionStoreTest : ReactionStoreTestFixture() {
             apply(ReactionActor.MucOwn, kind = MessageKind.HEADLINE),
             apply(ReactionActor.MucOwn).copy(accountBareJid = "foreign@example.org"),
             apply(ReactionActor.MucOwn).copy(accountId = OTHER_ACCOUNT),
-            apply(ReactionActor.MucOwn).copy(peerJid = OTHER_PEER),
-            apply(ReactionActor.MucOwn, target = "missing"),
         ).forEach { rejected(it) }
         assertTrue(database.messageDao().messageReactions(ACCOUNT, ROOM).none { it.localMessageId == null })
     }
@@ -161,7 +250,6 @@ internal class LiveMucReactionStoreTest : ReactionStoreTestFixture() {
     @Test
     fun roomTargetAuthorityRejectsIncomingApplication(): Unit = runBlocking {
         val cases = listOf(
-            "missing" to emptyArray(),
             "foreign" to arrayOf(sid(OTHER_PEER, "room-id")),
             "mixed" to arrayOf(sid(ROOM, "room-id"), sid(OTHER_PEER, "foreign")),
             "duplicate" to arrayOf(sid(ROOM, "room-id"), sid(ROOM, "other")),

@@ -130,6 +130,16 @@ abstract class MessageDao {
     ): List<MessageEntity>
 
     @Query(
+        """SELECT EXISTS(SELECT 1 FROM trusted_identity_aliases AS alias
+          LEFT JOIN messages AS message
+            ON message.accountId = alias.accountId AND message.localMessageId = alias.messageId
+          WHERE alias.accountId = :accountId AND alias.kind = 'STANZA_ID'
+            AND alias.value = :targetId AND (alias.authority = :peerJid OR
+              (message.peerJid = :peerJid AND message.messageKind = 'GROUPCHAT')))""",
+    )
+    abstract suspend fun hasKnownGroupAlias(accountId: String, peerJid: String, targetId: String): Boolean
+
+    @Query(
         """
         SELECT * FROM message_reactions
         WHERE accountId = :accountId AND peerJid = :peerJid
@@ -171,11 +181,20 @@ abstract class MessageDao {
           AND alias.kind IN ('MESSAGE_ID', 'ORIGIN_ID', 'STANZA_ID')
         """,
     )
-    abstract suspend fun pendingReactionsForMessageAliases(
+    protected abstract suspend fun pendingReactionCandidatesForMessageAliases(
         accountId: String,
         peerJid: String,
         messageId: String,
     ): List<MessageReactionEntity>
+
+    suspend fun pendingReactionsForMessageAliases(
+        accountId: String,
+        peerJid: String,
+        messageId: String,
+        messageKind: MessageKind,
+    ): List<MessageReactionEntity> = pendingReactionCandidatesForMessageAliases(accountId, peerJid, messageId)
+        .filter { row -> row.pendingMessageKind().let { it == null || it == messageKind } }
+        .onEach { requireValidReaction(it) }
 
     @Query(
         """
@@ -213,12 +232,15 @@ abstract class MessageDao {
 
     private suspend fun requireValidReaction(row: MessageReactionEntity) {
         check(row.accountId.isNotBlank() && row.peerJid.isNotBlank() && row.senderBareJid.isNotBlank())
-        check(row.targetKey == reactionTargetKey(row.localMessageId, row.wireTargetId))
         if (row.localMessageId == null) {
-            check(row.wireTargetId.isNotBlank())
+            check(row.pendingMessageKind() != null)
+            check(if (row.pendingMessageKind() == MessageKind.CHAT) {
+                row.wireTargetId.isNotBlank()
+            } else row.wireTargetId.isNotEmpty())
         } else {
             val owner = message(row.accountId, row.localMessageId)
             check(owner != null && owner.peerJid == row.peerJid)
+            check(row.targetKey == reactionTargetKey(row.localMessageId, row.wireTargetId, owner.messageKind))
             check(when (owner.messageKind) {
                 MessageKind.CHAT -> row.wireTargetId.isNotBlank()
                 MessageKind.GROUPCHAT -> row.wireTargetId.isNotEmpty()
@@ -316,8 +338,7 @@ abstract class MessageDao {
         messageId: String,
     ): PendingReactionSelection? {
         val aliases = trustedAliasesForMessage(accountId, messageId).filter { it.kind in REACTION_REFERENCE_KINDS }
-        val candidates = pendingReactionsForMessageAliases(accountId, peerJid, messageId)
-        candidates.forEach { requireValidReaction(it) }
+        val candidates = pendingReactionsForMessageAliases(accountId, peerJid, messageId, MessageKind.CHAT)
         val messageAliases = aliases.filter { it.kind == IdentityAliasKind.MESSAGE_ID }
         if (messageAliases.size != 1) return null
         val acceptedValue = messageAliases.single().value
@@ -1694,8 +1715,21 @@ private class PreparedOutgoingReaction(
     override val emojis: List<String> get() = decodeReactionEmojis(encodedEmojis).toMutableList()
 }
 
-internal fun reactionTargetKey(localMessageId: String?, wireTargetId: String): String =
-    localMessageId ?: "pending:$wireTargetId"
+internal fun reactionTargetKey(
+    localMessageId: String?,
+    wireTargetId: String,
+    messageKind: MessageKind = MessageKind.CHAT,
+): String = localMessageId ?: when (messageKind) {
+    MessageKind.CHAT -> "pending:$wireTargetId"
+    MessageKind.GROUPCHAT -> "groupchat-pending:$wireTargetId"
+    MessageKind.NORMAL, MessageKind.HEADLINE -> error("Unsupported pending reaction kind")
+}
+
+private fun MessageReactionEntity.pendingMessageKind(): MessageKind? = when (targetKey) {
+    reactionTargetKey(null, wireTargetId, MessageKind.CHAT) -> MessageKind.CHAT
+    reactionTargetKey(null, wireTargetId, MessageKind.GROUPCHAT) -> MessageKind.GROUPCHAT
+    else -> null
+}
 
 private fun MessageReactionEntity.toApply(accountBare: String) = IncomingReactionApply(
     accountId, accountBare, peerJid, senderBareJid, wireTargetId, decodeReactionEmojis(emojis), updatedAtMs,
@@ -2140,7 +2174,8 @@ class MessageStore private constructor(
     }
 
     suspend fun applyIncomingReaction(reaction: IncomingReactionApply): ReactionApplyOutcome =
-        database.withTransaction { applyIncomingReactionInTransaction(reaction) }
+        if (reaction.targetId.isEmpty()) ReactionApplyOutcome.IGNORED
+        else database.withTransaction { applyIncomingReactionInTransaction(reaction) }
 
     suspend fun reactionWireTarget(accountId: String, peerJid: String, localMessageId: String): String? =
         database.withTransaction {
@@ -2477,9 +2512,15 @@ class MessageStore private constructor(
     ): ReactionApplyOutcome {
         val actorKey = reaction.groupActorKey(dao.accountBareJid(reaction.accountId))
             ?: return ReactionApplyOutcome.IGNORED
-        val localId = dao.trustedAlias(
+        val known = dao.trustedAlias(
             reaction.accountId, IdentityAliasKind.STANZA_ID, reaction.peerJid, reaction.targetId,
-        )?.messageId ?: return ReactionApplyOutcome.IGNORED
+        )
+        if (known == null) {
+            return if (dao.hasKnownGroupAlias(reaction.accountId, reaction.peerJid, reaction.targetId)) {
+                ReactionApplyOutcome.IGNORED
+            } else writeReactionRow(dao, reaction, null, actorKey, strictlyNewer = true)
+        }
+        val localId = known.messageId ?: return ReactionApplyOutcome.IGNORED
         val target = resolveReactionTarget(reaction.accountId, reaction.peerJid, localId)
             ?: return ReactionApplyOutcome.IGNORED
         if (target.messageKind != MessageKind.GROUPCHAT || target.wireTargetId != reaction.targetId) {
@@ -2512,7 +2553,7 @@ class MessageStore private constructor(
         strictlyNewer: Boolean = false,
     ): ReactionApplyOutcome {
         val eventTime = reaction.delayedAtMs ?: reaction.receivedAtMs
-        val key = reactionTargetKey(localMessageId, reaction.targetId)
+        val key = reactionTargetKey(localMessageId, reaction.targetId, reaction.messageKind)
         if (strictlyNewer && dao.validatedReaction(
                 reaction.accountId, reaction.peerJid, actorKey, key,
             )?.updatedAtMs?.let { it >= eventTime } == true
@@ -2535,6 +2576,20 @@ class MessageStore private constructor(
     }
 
     private suspend fun attachPendingReactions(dao: MessageDao, winner: MessageEntity) {
+        if (winner.messageKind == MessageKind.GROUPCHAT) {
+            val target = resolveReactionTarget(
+                winner.accountId, winner.peerJid, winner.localMessageId,
+            ) ?: return
+            dao.pendingReactionsForMessageAliases(
+                winner.accountId, winner.peerJid, winner.localMessageId, MessageKind.GROUPCHAT,
+            ).filter { it.wireTargetId == target.wireTargetId }.forEach { row ->
+                dao.moveMessageReaction(
+                    row,
+                    row.copy(targetKey = target.canonicalLocalId, localMessageId = target.canonicalLocalId),
+                )
+            }
+            return
+        }
         if (winner.messageKind != MessageKind.CHAT) return
         val pending = dao.classifyPendingReactions(
             winner.accountId, winner.peerJid, winner.localMessageId,
