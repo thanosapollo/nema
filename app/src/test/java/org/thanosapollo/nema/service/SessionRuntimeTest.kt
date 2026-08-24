@@ -11,6 +11,8 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -815,6 +817,56 @@ class SessionRuntimeTest {
     }
 
     @Test
+    fun `switch account replaces exact runtime owner and attempt`() = runTest {
+        val original = connectedRuntime(backgroundScope, "original")
+
+        val replacement = switchAccount(original, "replacement")
+
+        assertEquals(account("replacement"), replacement.runtime.activeAccount.first())
+        assertEquals(replacement.account.id, replacement.connection.accountId)
+        assertEquals(replacement.account.id, replacement.connection.attemptIdentity.accountId)
+        assertEquals(
+            ConnectionState.Connected(
+                replacement.account.id,
+                replacement.connection.attemptIdentity.generation,
+            ),
+            replacement.runtime.state.value,
+        )
+        assertFalse(original.connection.isUsable)
+        assertEquals(1, original.connection.disconnectCalls)
+    }
+
+    @Test
+    fun `complete reconnect advances generation and returns exact current attempt`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "reconnect")
+        val oldAttempt = fixture.connection.attemptIdentity
+
+        val currentAttempt = completeReconnect(fixture, oldAttempt)
+
+        assertEquals(oldAttempt.accountId, currentAttempt.accountId)
+        assertEquals(oldAttempt.generation.value + 1, currentAttempt.generation.value)
+        assertEquals(oldAttempt.attempt.value + 1, currentAttempt.attempt.value)
+        assertEquals(currentAttempt, fixture.connection.attemptIdentity)
+        assertEquals(
+            ConnectionState.Connected(currentAttempt.accountId, currentAttempt.generation),
+            fixture.runtime.state.value,
+        )
+    }
+
+    @Test
+    fun `old attempt reaction stays rejected after switch and reconnect`() = runTest {
+        val original = connectedRuntime(backgroundScope, "original")
+        val fixture = switchAccount(original, "replacement")
+        installDirectTarget(fixture, DIRECT_TARGET.localId, DIRECT_TARGET.wireId)
+        val oldAttempt = fixture.connection.attemptIdentity
+
+        completeReconnect(fixture, oldAttempt)
+        emitOldAttemptReaction(fixture, oldAttempt, delayedAtMs = 7_000L)
+
+        assertNull(ownReactionSnapshot(fixture, DIRECT_TARGET.localId))
+    }
+
+    @Test
     fun `reaction fake captures exact envelope before entry and waits for release`() = runTest {
         val connection = RecordingConnection(AccountId.require("account"), null, null) {}
         val reaction = outgoingReaction(reactionAttempt())
@@ -960,6 +1012,46 @@ class SessionRuntimeTest {
         attempt.accountId, attempt.generation, fixture.account.bareJid.value,
         REACTION_PEER, REACTION_PEER, wireId, emojis, delayedAtMs,
     )
+
+    private suspend fun switchAccount(fixture: RuntimeFixture, id: String): RuntimeFixture {
+        val replacement = account(id)
+        fixture.accounts.save(replacement)
+        fixture.credentials.store(replacement.id, "secret".toCharArray())
+        assertEquals(ConnectionCommandOutcome.RUNNING, fixture.runtime.activate(replacement.id))
+        return fixture.copy(
+            account = replacement,
+            connection = fixture.connections.created.last(),
+        )
+    }
+
+    private fun emitOldAttemptReaction(
+        fixture: RuntimeFixture,
+        attempt: SessionAttemptIdentity,
+        delayedAtMs: Long,
+    ) {
+        val reaction = incomingReaction(
+            fixture, attempt, DIRECT_TARGET.wireId, listOf("🔥"), delayedAtMs,
+        ).copy(senderBareJid = fixture.account.bareJid.value)
+        fixture.connection.emitReaction(attempt, reaction)
+    }
+
+    private fun TestScope.completeReconnect(
+        fixture: RuntimeFixture,
+        oldAttempt: SessionAttemptIdentity,
+    ): SessionAttemptIdentity {
+        assertEquals(oldAttempt, fixture.connection.attemptIdentity)
+        fixture.connection.emitLoss(SessionFailureReason.NETWORK)
+        runCurrent()
+        advanceTimeBy(1_000L)
+        runCurrent()
+        val currentAttempt = fixture.connection.attemptIdentity
+        assertEquals(oldAttempt.generation.value + 1, currentAttempt.generation.value)
+        assertEquals(
+            ConnectionState.Connected(currentAttempt.accountId, currentAttempt.generation),
+            fixture.runtime.state.value,
+        )
+        return currentAttempt
+    }
 
     private fun account(id: String, bareJid: String = "$id@example.org") = AccountConfiguration.create(
         id = AccountId.require(id),
