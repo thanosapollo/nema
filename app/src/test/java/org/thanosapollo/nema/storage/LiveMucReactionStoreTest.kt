@@ -5,6 +5,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -112,23 +113,91 @@ internal class LiveMucReactionStoreTest : ReactionStoreTestFixture() {
     }
 
     @Test
-    fun closedRoomActorsCrossBoundaryButRemainDormant(): Unit = runBlocking {
+    fun knownRoomTargetAppliesClosedActorsAndOrdersFullSets(): Unit = runBlocking {
         val clock = CountingFixedClock(42L)
         store = MessageStore(database, clock)
-        val actors = listOf(
-            ReactionActor.MucOwn,
-            ReactionActor.MucOccupant("opaque"),
-            ReactionActor.Direct("occupant-id:opaque"),
+        installFacts(group("selected", sid(ROOM, "room-id")))
+        clock.resetCount()
+        val remote = ReactionActor.MucOccupant(" \topaque ")
+        assertEquals(ReactionApplyOutcome.APPLIED, store.applyIncomingReaction(apply(remote, emojis = listOf("👍", "❤️"), time = 10)))
+        val first = MessageReactionEntity(
+            ACCOUNT, ROOM, "occupant-id: \topaque ", "selected", "selected", "room-id", "👍\u001f❤️", 10, 1,
         )
-        actors.forEach { actor ->
-            val apply = IncomingReactionApply(
-                ACCOUNT, SELF, ROOM, ROOM, "room-id", listOf("👍"), 1L,
-                actor = actor, messageKind = MessageKind.GROUPCHAT,
-            )
-            assertFalse(assertRejectedWithoutMutation(clock) {
-                store.applyIncomingReaction(apply) != ReactionApplyOutcome.IGNORED
-            })
+        assertEquals(first, database.messageDao().messageReaction(ACCOUNT, ROOM, first.senderBareJid, "selected"))
+        assertEquals(ReactionApplyOutcome.IGNORED, store.applyIncomingReaction(apply(remote, emojis = listOf("❤️", "👍"), time = 10)))
+        assertEquals(ReactionApplyOutcome.IGNORED, store.applyIncomingReaction(apply(remote, emojis = listOf("⚠️"), time = 9)))
+        assertEquals(ReactionApplyOutcome.APPLIED, store.applyIncomingReaction(apply(ReactionActor.MucOwn, emojis = listOf("🙏"), time = 11)))
+        assertEquals(ReactionApplyOutcome.APPLIED, store.applyIncomingReaction(apply(remote, emojis = listOf("😂"), time = 12)))
+        assertEquals(setOf(SELF to 1L, first.senderBareJid to 2L),
+            database.messageDao().messageReactions(ACCOUNT, ROOM).map { it.senderBareJid to it.revision }.toSet())
+        assertEquals("😂", requireNotNull(
+            database.messageDao().messageReaction(ACCOUNT, ROOM, first.senderBareJid, "selected")).emojis)
+        assertEquals(0, clock.calls)
+    }
+
+    @Test
+    fun unknownInvalidAndMismatchedApplicationsStayInert(): Unit = runBlocking {
+        val clock = CountingFixedClock(42L)
+        suspend fun rejected(value: IncomingReactionApply) = assertFalse(assertRejectedWithoutMutation(clock) {
+            store.applyIncomingReaction(value) != ReactionApplyOutcome.IGNORED
+        })
+        store = MessageStore(database, clock)
+        rejected(apply(ReactionActor.MucOccupant("opaque"), target = "unknown"))
+        installFacts(group("selected", sid(ROOM, "room-id")))
+        listOf(
+            apply(ReactionActor.Direct("occupant-id:opaque")),
+            apply(ReactionActor.MucOwn, kind = MessageKind.CHAT),
+            apply(ReactionActor.MucOccupant("opaque"), kind = MessageKind.CHAT),
+            apply(ReactionActor.MucOwn, kind = MessageKind.NORMAL),
+            apply(ReactionActor.MucOwn, kind = MessageKind.HEADLINE),
+            apply(ReactionActor.MucOwn).copy(accountBareJid = "foreign@example.org"),
+            apply(ReactionActor.MucOwn).copy(accountId = OTHER_ACCOUNT),
+            apply(ReactionActor.MucOwn).copy(peerJid = OTHER_PEER),
+            apply(ReactionActor.MucOwn, target = "missing"),
+        ).forEach { rejected(it) }
+        assertTrue(database.messageDao().messageReactions(ACCOUNT, ROOM).none { it.localMessageId == null })
+    }
+
+    @Test
+    fun roomTargetAuthorityRejectsIncomingApplication(): Unit = runBlocking {
+        val cases = listOf(
+            "missing" to emptyArray(),
+            "foreign" to arrayOf(sid(OTHER_PEER, "room-id")),
+            "mixed" to arrayOf(sid(ROOM, "room-id"), sid(OTHER_PEER, "foreign")),
+            "duplicate" to arrayOf(sid(ROOM, "room-id"), sid(ROOM, "other")),
+        )
+        for ((label, aliases) in cases) {
+            resetStore()
+            installFacts(group("selected", *aliases))
+            assertEquals(label, ReactionApplyOutcome.IGNORED,
+                assertReadOnlyState { store.applyIncomingReaction(apply(ReactionActor.MucOwn)) })
         }
+        resetStore()
+        installFacts(group("selected"))
+        insertAliasFact(aliasEntity("selected", ROOM, "room-id", IdentityAliasStatus.QUARANTINED))
+        assertEquals("quarantined", ReactionApplyOutcome.IGNORED,
+            assertReadOnlyState { store.applyIncomingReaction(apply(ReactionActor.MucOwn)) })
+    }
+
+    @Test
+    fun equalOccupantIdsRemainScopedByAccountAndRoom(): Unit = runBlocking {
+        val otherBare = "other-account@example.org"
+        database.accountDao().upsert(AccountEntity(
+            OTHER_ACCOUNT, otherBare, OTHER_ACCOUNT, null, "example.org", null, null,
+        ))
+        installFacts(
+            group("selected", sid(ROOM, "one")),
+            group("other-room", sid(OTHER_PEER, "two")).copy(peerJid = OTHER_PEER, senderJid = "$OTHER_PEER/alice"),
+            group("selected", sid(ROOM, "three")).copy(accountId = OTHER_ACCOUNT),
+        )
+        val actor = ReactionActor.MucOccupant("same")
+        store.applyIncomingReaction(apply(actor, target = "one"))
+        store.applyIncomingReaction(apply(actor, target = "two").copy(peerJid = OTHER_PEER))
+        store.applyIncomingReaction(apply(actor, target = "three").copy(
+            accountId = OTHER_ACCOUNT, accountBareJid = otherBare))
+        val dao = database.messageDao()
+        assertEquals(listOf(1, 1, 1), listOf(dao.messageReactions(ACCOUNT, ROOM).size,
+            dao.messageReactions(ACCOUNT, OTHER_PEER).size, dao.messageReactions(OTHER_ACCOUNT, ROOM).size))
     }
 
     private fun group(localId: String, vararg aliases: TrustedIdentityAlias) =
@@ -139,4 +208,12 @@ internal class LiveMucReactionStoreTest : ReactionStoreTestFixture() {
 
     private fun aliasEntity(localId: String, authority: String, value: String, status: IdentityAliasStatus) =
         TrustedIdentityAliasEntity(ACCOUNT, IdentityAliasKind.STANZA_ID, authority, value, localId, status)
+
+    private fun apply(
+        actor: ReactionActor,
+        target: String = "room-id",
+        emojis: List<String> = listOf("👍"),
+        time: Long = 1,
+        kind: MessageKind = MessageKind.GROUPCHAT,
+    ) = IncomingReactionApply(ACCOUNT, SELF, ROOM, ROOM, target, emojis, time, actor = actor, messageKind = kind)
 }

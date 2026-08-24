@@ -2438,12 +2438,15 @@ class MessageStore private constructor(
     private suspend fun applyIncomingReactionInTransaction(
         reaction: IncomingReactionApply,
     ): ReactionApplyOutcome {
+        val dao = database.messageDao()
+        if (reaction.messageKind == MessageKind.GROUPCHAT) {
+            return applyIncomingGroupReaction(dao, reaction)
+        }
         val directActor = reaction.actor as? ReactionActor.Direct
             ?: return ReactionApplyOutcome.IGNORED
         if (reaction.messageKind != MessageKind.CHAT || directActor.bareJid != reaction.senderBareJid) {
             return ReactionApplyOutcome.IGNORED
         }
-        val dao = database.messageDao()
         if (reaction.senderBareJid !in setOf(reaction.accountBareJid, reaction.peerJid)) {
             return ReactionApplyOutcome.IGNORED
         }
@@ -2468,6 +2471,34 @@ class MessageStore private constructor(
         }
     }
 
+    private suspend fun applyIncomingGroupReaction(
+        dao: MessageDao,
+        reaction: IncomingReactionApply,
+    ): ReactionApplyOutcome {
+        val actorKey = reaction.groupActorKey(dao.accountBareJid(reaction.accountId))
+            ?: return ReactionApplyOutcome.IGNORED
+        val localId = dao.trustedAlias(
+            reaction.accountId, IdentityAliasKind.STANZA_ID, reaction.peerJid, reaction.targetId,
+        )?.messageId ?: return ReactionApplyOutcome.IGNORED
+        val target = resolveReactionTarget(reaction.accountId, reaction.peerJid, localId)
+            ?: return ReactionApplyOutcome.IGNORED
+        if (target.messageKind != MessageKind.GROUPCHAT || target.wireTargetId != reaction.targetId) {
+            return ReactionApplyOutcome.IGNORED
+        }
+        return writeReactionRow(
+            dao, reaction, target.canonicalLocalId, actorKey = actorKey, strictlyNewer = true,
+        )
+    }
+
+    private fun IncomingReactionApply.groupActorKey(activeAccountBareJid: String?): String? {
+        if (accountBareJid != activeAccountBareJid) return null
+        return when (val closedActor = actor) {
+            ReactionActor.MucOwn -> accountBareJid
+            is ReactionActor.MucOccupant -> "occupant-id:${closedActor.occupantId}"
+            is ReactionActor.Direct -> null
+        }
+    }
+
     private suspend fun MessageDao.hasKnownAliasForReactionTarget(reaction: IncomingReactionApply): Boolean =
         inboundChatByAliasValue(reaction.accountId, reaction.peerJid, reaction.targetId).isNotEmpty() ||
             outboundChatByAliasValue(reaction.accountId, reaction.peerJid, reaction.targetId).isNotEmpty()
@@ -2476,15 +2507,21 @@ class MessageStore private constructor(
         dao: MessageDao,
         reaction: IncomingReactionApply,
         localMessageId: String?,
+        actorKey: String = reaction.senderBareJid,
         keepNewest: Boolean = false,
+        strictlyNewer: Boolean = false,
     ): ReactionApplyOutcome {
         val eventTime = reaction.delayedAtMs ?: reaction.receivedAtMs
         val key = reactionTargetKey(localMessageId, reaction.targetId)
+        if (strictlyNewer && dao.validatedReaction(
+                reaction.accountId, reaction.peerJid, actorKey, key,
+            )?.updatedAtMs?.let { it >= eventTime } == true
+        ) return ReactionApplyOutcome.IGNORED
         val outcome = dao.writeReactionFullSet(
             MessageReactionEntity(
                 accountId = reaction.accountId,
                 peerJid = reaction.peerJid,
-                senderBareJid = reaction.senderBareJid,
+                senderBareJid = actorKey,
                 targetKey = key,
                 localMessageId = localMessageId,
                 wireTargetId = reaction.targetId,
