@@ -130,6 +130,7 @@ import org.thanosapollo.nema.xmpp.transport.OutgoingMessageSignal
 import org.thanosapollo.nema.xmpp.transport.MessageTimeSource
 import org.thanosapollo.nema.xmpp.transport.OutgoingFailureEnvelope
 import org.thanosapollo.nema.xmpp.transport.OutgoingMessageEnvelope
+import org.thanosapollo.nema.xmpp.transport.OutgoingReactionEnvelope
 import org.thanosapollo.nema.xmpp.transport.SendNotAttemptedException
 import org.thanosapollo.nema.xmpp.transport.SessionCapabilities
 import org.thanosapollo.nema.xmpp.transport.StanzaIdEnvelope
@@ -312,17 +313,26 @@ internal class SmackSessionConnection(
     }
 
     override suspend fun sendReaction(
-        reaction: org.thanosapollo.nema.xmpp.transport.OutgoingReactionEnvelope,
+        reaction: OutgoingReactionEnvelope,
     ) = runInterruptible(Dispatchers.IO) {
-        val stanza = StanzaBuilder.buildMessage()
-            .to(JidCreate.entityBareFrom(reaction.recipient))
-            .ofType(Message.Type.chat)
-            .addReactions(reaction.targetId, reaction.emojis)
-            .build()
+        val attempt = connectionListener.currentAttempt()
+        val roomLease = if (reaction.messageKind == MessageKind.GROUPCHAT) {
+            attempt?.let { roomStableIdAuthorities.lease(it, reaction.recipient) }
+        } else null
+        val stanza = reaction.toSmackReaction()
         synchronized(entryGate) {
             requireExactAttemptLocked(reaction.accountId, reaction.generation)
+            val current = requireNotNull(connectionListener.currentAttempt())
+            if (reaction.messageKind == MessageKind.GROUPCHAT) {
+                synchronized(roomStableIdAuthorities) {
+                    if (!reactionSendAuthorized(reaction, current, roomLease, roomStableIdAuthorities)) {
+                        throw SendNotAttemptedException()
+                    }
+                    connection.sendStanza(stanza)
+                }
+            }
         }
-        connection.sendStanza(stanza)
+        if (reaction.messageKind == MessageKind.CHAT) connection.sendStanza(stanza)
     }
 
     override suspend fun sendChatState(
@@ -1015,6 +1025,23 @@ internal fun shouldResetSmackTransport(
     connected: Boolean,
     authenticated: Boolean,
 ): Boolean = connected && !authenticated
+
+internal fun OutgoingReactionEnvelope.toSmackReaction(): Message = StanzaBuilder.buildMessage()
+    .to(JidCreate.entityBareFrom(recipient))
+    .ofType(if (messageKind == MessageKind.GROUPCHAT) Message.Type.groupchat else Message.Type.chat)
+    .addReactions(targetId, emojis)
+    .build()
+
+internal fun reactionSendAuthorized(
+    reaction: OutgoingReactionEnvelope,
+    attempt: SessionAttemptIdentity,
+    roomLease: RoomStableIdLease?,
+    roomAuthorities: RoomStableIdAuthorityRegistry,
+): Boolean = reaction.accountId == attempt.accountId &&
+    reaction.generation == attempt.generation &&
+    (reaction.messageKind == MessageKind.CHAT ||
+        (roomLease?.attempt == attempt && roomLease.authority == reaction.recipient &&
+            roomAuthorities.isCurrent(roomLease)))
 
 internal fun OutgoingMessageSignal.toSmackMessage(): Message {
     val builder = StanzaBuilder.buildMessage()

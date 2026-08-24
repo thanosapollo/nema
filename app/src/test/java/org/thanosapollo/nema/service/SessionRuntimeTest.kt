@@ -888,6 +888,75 @@ class SessionRuntimeTest {
     }
 
     @Test
+    fun `group reaction sends exact immutable command before commit`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "group-effect-first")
+        installGroupTarget(fixture, GROUP_TARGET)
+        val step = fixture.connection.queueReaction()
+
+        val result = async { fixture.runtime.reactTo(REACTION_ROOM, GROUP_TARGET.localId, "🔥") }
+        step.entered.await()
+
+        assertNull(ownReactionSnapshot(fixture, GROUP_TARGET.localId, REACTION_ROOM))
+        assertEquals(
+            listOf(outgoingReaction(
+                fixture, listOf("🔥"), GROUP_TARGET.wireId, REACTION_ROOM, MessageKind.GROUPCHAT,
+            )),
+            fixture.connection.sentReactions,
+        )
+        assertFalse(result.isCompleted)
+        step.release.complete(Unit)
+        assertTrue(result.await())
+        assertEquals(
+            expectedOwnReaction(fixture, GROUP_TARGET, "🔥", REACTION_NOW, REACTION_ROOM),
+            ownReactionSnapshot(fixture, GROUP_TARGET.localId, REACTION_ROOM),
+        )
+    }
+
+    @Test
+    fun `group reaction locks same target while another target progresses`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "group-keys")
+        installGroupTarget(fixture, GROUP_TARGET)
+        installGroupTarget(fixture, SECOND_GROUP_TARGET)
+        val steps = List(3) { fixture.connection.queueReaction() }
+
+        val first = async { fixture.runtime.reactTo(REACTION_ROOM, GROUP_TARGET.localId, "🔥") }
+        steps[0].entered.await()
+        val same = async { fixture.runtime.reactTo(REACTION_ROOM, GROUP_TARGET.localId, "👍") }
+        val other = async { fixture.runtime.reactTo(REACTION_ROOM, SECOND_GROUP_TARGET.localId, "❤️") }
+        steps[1].entered.await()
+        assertFalse(same.isCompleted)
+        steps[1].release.complete(Unit)
+        assertTrue(other.await())
+        steps[0].release.complete(Unit)
+        assertTrue(first.await())
+        steps[2].entered.await()
+        steps[2].release.complete(Unit)
+        assertTrue(same.await())
+        assertEquals(
+            listOf("🔥", "🔥\u001f👍"),
+            fixture.connection.sentReactions
+                .filter { it.targetId == GROUP_TARGET.wireId }
+                .map { it.emojis.joinToString("\u001f") },
+        )
+    }
+
+    @Test
+    fun `group reaction completion after reconnect cannot commit`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "group-reconnect")
+        installGroupTarget(fixture, GROUP_TARGET)
+        val oldAttempt = fixture.connection.attemptIdentity
+        val step = fixture.connection.queueReaction()
+        val result = async { fixture.runtime.reactTo(REACTION_ROOM, GROUP_TARGET.localId, "🔥") }
+        step.entered.await()
+
+        completeReconnect(fixture, oldAttempt)
+        step.release.complete(Unit)
+
+        assertFalse(result.await())
+        assertNull(ownReactionSnapshot(fixture, GROUP_TARGET.localId, REACTION_ROOM))
+    }
+
+    @Test
     fun `reactTo uses the keyed mutex and rejects canonical drift before send`() {
         val source = reactToSource()
         assertTrue(source.contains("reactionCommandLock(key).withLock"))
@@ -1195,10 +1264,14 @@ class SessionRuntimeTest {
     private suspend fun installSecondTarget(fixture: RuntimeFixture) =
         installDirectTarget(fixture, SECOND_TARGET.localId, SECOND_TARGET.wireId)
 
-    private suspend fun ownReactionSnapshot(fixture: RuntimeFixture, canonicalLocalId: String) =
+    private suspend fun ownReactionSnapshot(
+        fixture: RuntimeFixture,
+        canonicalLocalId: String,
+        peer: String = REACTION_PEER,
+    ) =
         database.messageDao().messageReaction(
             fixture.account.id.value,
-            REACTION_PEER,
+            peer,
             fixture.account.bareJid.value,
             canonicalLocalId,
         )
@@ -1208,8 +1281,9 @@ class SessionRuntimeTest {
         target: ReactionEventCase,
         emojis: String,
         updatedAtMs: Long,
+        peer: String = REACTION_PEER,
     ) = MessageReactionEntity(
-        fixture.account.id.value, REACTION_PEER, fixture.account.bareJid.value,
+        fixture.account.id.value, peer, fixture.account.bareJid.value,
         target.localId, target.localId, target.wireId, emojis, updatedAtMs, 1,
     )
 
@@ -1217,10 +1291,20 @@ class SessionRuntimeTest {
         fixture: RuntimeFixture,
         emojis: List<String>,
         wireId: String,
+        peer: String = REACTION_PEER,
+        kind: MessageKind = MessageKind.CHAT,
     ) = OutgoingReactionEnvelope(
         fixture.account.id, fixture.connection.attemptIdentity.generation,
-        REACTION_PEER, wireId, emojis,
+        peer, wireId, emojis, kind,
     )
+
+    private suspend fun installGroupTarget(fixture: RuntimeFixture, target: ReactionEventCase) {
+        fixture.store.ingest(IncomingMessage(
+            fixture.account.id.value, target.localId, REACTION_ROOM, "$REACTION_ROOM/alice",
+            MessageDirection.INBOUND, MessageKind.GROUPCHAT, null, null, target.localId, null,
+            listOf(TrustedIdentityAlias(IdentityAliasKind.STANZA_ID, REACTION_ROOM, target.wireId)),
+        ))
+    }
 
     private fun incomingReaction(
         fixture: RuntimeFixture,
@@ -1363,10 +1447,13 @@ class SessionRuntimeTest {
 
     private companion object {
         const val REACTION_PEER = "peer@example.org"
+        const val REACTION_ROOM = "room@conference.example.org"
         const val REACTION_NOW = 8_000L
         val DIRECT_TARGET = ReactionEventCase("reaction-local", "reaction-wire", null)
         val CORRECTION = ReactionEventCase("correction-local", "correction-wire", null)
         val SECOND_TARGET = ReactionEventCase("second-local", "second-wire", 4_200L)
+        val GROUP_TARGET = ReactionEventCase("group-local", "room-sid", null)
+        val SECOND_GROUP_TARGET = ReactionEventCase("group-second", "room-sid-2", null)
     }
 
     private data class ReactionSendStep(

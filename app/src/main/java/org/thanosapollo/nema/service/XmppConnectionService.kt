@@ -755,7 +755,7 @@ class SessionRuntime(
         val lease = controller.lifecycle.value.dispatchLease() ?: return false
         val account = accounts.activeAccount.first() ?: return false
         if (lease.identity.accountId != account.id) return false
-        val target = messages.resolveDirectReactionTarget(
+        val target = messages.resolveReactionTarget(
             account.id.value, peerJid, localMessageId,
         ) ?: return false
         val key = ReactionCommandKey(
@@ -770,12 +770,14 @@ class SessionRuntime(
             val command = messages.prepareOutgoingReaction(
                 key.accountId, key.peerJid, localMessageId, key.ownSender, emoji,
             ) ?: return@withLock false
-            if (command.canonicalLocalMessageId != key.canonicalLocalId) return@withLock false
+            if (command.canonicalLocalMessageId != key.canonicalLocalId ||
+                command.messageKind != target.messageKind
+            ) return@withLock false
             try {
                 controller.sendReaction(
                     org.thanosapollo.nema.xmpp.transport.OutgoingReactionEnvelope(
                         innerLease.identity.accountId, innerLease.identity.generation,
-                        command.peerJid, command.wireTargetId, command.emojis,
+                        command.peerJid, command.wireTargetId, command.emojis, command.messageKind,
                     ),
                 )
             } catch (cancelled: CancellationException) {

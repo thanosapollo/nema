@@ -119,10 +119,14 @@ data class OutgoingReactionEnvelope(
     val recipient: String,
     val targetId: String,
     val emojis: List<String>,
+    val messageKind: MessageKind = MessageKind.CHAT,
 ) {
     init {
         require(recipient.isNotEmpty()) { "Recipient must not be empty" }
         require(targetId.isNotEmpty()) { "Reaction target must not be empty" }
+        require(messageKind == MessageKind.CHAT || messageKind == MessageKind.GROUPCHAT) {
+            "Reaction kind must be chat or groupchat"
+        }
     }
 }
 
