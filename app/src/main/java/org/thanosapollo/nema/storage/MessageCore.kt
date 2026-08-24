@@ -212,13 +212,20 @@ abstract class MessageDao {
 
     private suspend fun requireValidReaction(row: MessageReactionEntity) {
         check(row.accountId.isNotBlank() && row.peerJid.isNotBlank() && row.senderBareJid.isNotBlank())
-        check(row.wireTargetId.isNotBlank() && row.targetKey == reactionTargetKey(row.localMessageId, row.wireTargetId))
+        check(row.targetKey == reactionTargetKey(row.localMessageId, row.wireTargetId))
+        if (row.localMessageId == null) {
+            check(row.wireTargetId.isNotBlank())
+        } else {
+            val owner = message(row.accountId, row.localMessageId)
+            check(owner != null && owner.peerJid == row.peerJid)
+            check(when (owner.messageKind) {
+                MessageKind.CHAT -> row.wireTargetId.isNotBlank()
+                MessageKind.GROUPCHAT -> row.wireTargetId.isNotEmpty()
+                MessageKind.NORMAL, MessageKind.HEADLINE -> false
+            })
+        }
         check(encodeReactionEmojis(decodeReactionEmojis(row.emojis)) == row.emojis)
         check(row.revision in 1 until Long.MAX_VALUE)
-        row.localMessageId?.let { id ->
-            val owner = message(row.accountId, id)
-            check(owner != null && owner.peerJid == row.peerJid)
-        }
     }
 
     suspend fun validatedReaction(
@@ -2223,7 +2230,7 @@ class MessageStore private constructor(
             if (prepared.owner !== this) return@withTransaction false
             val dao = database.messageDao()
             if (dao.accountBareJid(prepared.accountId) != prepared.ownSender) return@withTransaction false
-            val target = resolveDirectReactionTarget(
+            val target = resolveReactionTarget(
                 prepared.target.accountId,
                 prepared.target.peerJid,
                 prepared.target.canonicalLocalId,

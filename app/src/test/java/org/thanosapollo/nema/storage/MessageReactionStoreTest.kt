@@ -727,6 +727,10 @@ internal class MessageReactionStoreTest : ReactionStoreTestFixture() {
         malformed("blank peer", valid.copy(peerJid = ""))
         malformed("blank sender", valid.copy(senderBareJid = ""))
         malformed("blank wire target", valid.copy(targetKey = "pending:", wireTargetId = ""))
+        malformed("pending whitespace wire target", pending(" \t\n\r", "👍"))
+        malformed("attached CHAT whitespace wire target", reaction("owner", " \t\n\r", "👍", 10)) {
+            installFacts(incoming("owner"))
+        }
         malformed("attached target key mismatch", reaction("owner", "owner-wire", "👍", 10).copy(targetKey = "wrong")) {
             installFacts(incoming("owner", message("owner-wire")))
         }
@@ -818,8 +822,16 @@ internal class MessageReactionStoreTest : ReactionStoreTestFixture() {
             "canonical peer drift" to { database.messageDao().insertPeer(PeerEntity(ACCOUNT, OTHER_PEER));
                 val row = requireNotNull(database.messageDao().message(ACCOUNT, "target"));
                 database.messageDao().updateMessage(row.copy(peerJid = OTHER_PEER)) },
-            "canonical kind drift" to { val row = requireNotNull(database.messageDao().message(ACCOUNT, "target"));
-                database.messageDao().updateMessage(row.copy(messageKind = MessageKind.GROUPCHAT)) },
+            "canonical kind drift" to {
+                val row = requireNotNull(database.messageDao().message(ACCOUNT, "target"))
+                database.messageDao().updateMessage(row.copy(messageKind = MessageKind.GROUPCHAT))
+                insertAliasFact(TrustedIdentityAliasEntity(ACCOUNT, IdentityAliasKind.STANZA_ID,
+                    PEER, "wire", "target", IdentityAliasStatus.TRUSTED))
+                assertEquals(
+                    ReactionTarget(ACCOUNT, PEER, "target", "wire", MessageKind.GROUPCHAT),
+                    store.resolveReactionTarget(ACCOUNT, PEER, "target"),
+                )
+            },
             "canonical sender drift" to { val row = requireNotNull(database.messageDao().message(ACCOUNT, "target"));
                 database.messageDao().updateMessage(row.copy(senderJid = SELF)) },
             "alias loss" to { deleteAlias(); assertTrue(database.messageDao().trustedAliasesForMessage(ACCOUNT, "target").isEmpty()) },

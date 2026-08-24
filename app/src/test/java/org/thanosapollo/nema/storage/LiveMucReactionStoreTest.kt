@@ -14,7 +14,7 @@ import org.thanosapollo.nema.thread.MessageKind
 @Config(sdk = [34], application = Application::class)
 internal class LiveMucReactionStoreTest : ReactionStoreTestFixture() {
     @Test
-    fun exactRoomTargetPreparesReadOnlyCommandAndCommitStaysInert(): Unit = runBlocking {
+    fun exactRoomTargetPreparesReadOnlyCommand(): Unit = runBlocking {
         val clock = CountingFixedClock(42L)
         store = MessageStore(database, clock)
         installFacts(group("selected", sid(ROOM, "room-id")))
@@ -31,7 +31,6 @@ internal class LiveMucReactionStoreTest : ReactionStoreTestFixture() {
             listOf(command.accountId, command.peerJid, command.canonicalLocalMessageId,
                 command.wireTargetId, command.messageKind, command.emojis),
         )
-        assertRejectedWithoutMutation(clock) { store.commitOutgoingReaction(command) }
     }
 
     @Test
