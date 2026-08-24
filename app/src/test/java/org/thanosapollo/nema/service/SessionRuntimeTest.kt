@@ -14,6 +14,8 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -27,10 +29,13 @@ import org.thanosapollo.nema.credentials.CredentialCipher
 import org.thanosapollo.nema.credentials.CredentialVault
 import org.thanosapollo.nema.credentials.WrappedCredential
 import org.thanosapollo.nema.session.ConnectionState
+import org.thanosapollo.nema.session.ConnectionAttempt
+import org.thanosapollo.nema.session.LifecycleEpoch
 import org.thanosapollo.nema.session.SessionAttemptIdentity
 import org.thanosapollo.nema.session.SessionConnection
 import org.thanosapollo.nema.session.SessionConnectionFactory
 import org.thanosapollo.nema.session.SessionEvent
+import org.thanosapollo.nema.session.SessionFailureReason
 import org.thanosapollo.nema.storage.AccountRepository
 import org.thanosapollo.nema.storage.ArchiveCursorKey
 import org.thanosapollo.nema.storage.ArchiveDirection
@@ -49,13 +54,16 @@ import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmark
 import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmarkSnapshot
 import org.thanosapollo.nema.xmpp.transport.AccountId
+import org.thanosapollo.nema.xmpp.transport.ConnectionGeneration
 import org.thanosapollo.nema.xmpp.transport.IncomingMessageEnvelope
+import org.thanosapollo.nema.xmpp.transport.IncomingReactionEnvelope
 import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
 import org.thanosapollo.nema.xmpp.transport.MessageSignalProtocol
 import org.thanosapollo.nema.xmpp.transport.MessageTimeSource
 import org.thanosapollo.nema.xmpp.transport.OutgoingFailureEnvelope
 import org.thanosapollo.nema.xmpp.transport.OutgoingMessageEnvelope
 import org.thanosapollo.nema.xmpp.transport.OutgoingMessageSignal
+import org.thanosapollo.nema.xmpp.transport.OutgoingReactionEnvelope
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
@@ -709,6 +717,68 @@ class SessionRuntimeTest {
         )
     }
 
+    @Test
+    fun `reaction fake captures exact envelope before entry and waits for release`() = runTest {
+        val connection = RecordingConnection(AccountId.require("account"), null, null) {}
+        val reaction = outgoingReaction(reactionAttempt())
+        val step = connection.queueReaction(released = false)
+        var capturedBeforeEntry = false
+        step.entered.invokeOnCompletion {
+            capturedBeforeEntry = connection.sentReactions.singleOrNull() == reaction
+        }
+        val sending = async { connection.sendReaction(reaction) }
+        runCurrent()
+        assertTrue(capturedBeforeEntry)
+        assertEquals(listOf(reaction), connection.sentReactions)
+        assertFalse(sending.isCompleted)
+        step.release.complete(Unit)
+        sending.await()
+    }
+
+    @Test
+    fun `reaction fake invokes synchronous callback before send returns`() = runTest {
+        val events = mutableListOf<SessionEvent>()
+        var returned = false
+        val connection = RecordingConnection(AccountId.require("account"), null, null) {
+            assertFalse(returned)
+            events += it
+        }
+        val attempt = reactionAttempt()
+        val incoming = incomingReaction(attempt)
+        connection.queueReaction(callback = ReactionCallback(attempt, incoming), released = true)
+        connection.sendReaction(outgoingReaction(attempt))
+        returned = true
+        assertEquals(listOf(SessionEvent.Reaction(attempt, incoming)), events)
+    }
+
+    @Test
+    fun `reaction fake propagates each exact configured throwable`() = runTest {
+        val connection = RecordingConnection(AccountId.require("account"), null, null) {}
+        val reaction = outgoingReaction(reactionAttempt())
+        suspend fun caught(failure: Throwable): Throwable? {
+            connection.queueReaction(failure = failure, released = true)
+            return runCatching { connection.sendReaction(reaction) }.exceptionOrNull()
+        }
+        val ordinary = IllegalStateException("ordinary")
+        val cancelled = kotlinx.coroutines.CancellationException("cancelled")
+        val fatal = object : Throwable("fatal") {}
+        assertSame(ordinary, caught(ordinary))
+        assertSame(cancelled, caught(cancelled))
+        assertSame(fatal, caught(fatal))
+    }
+
+    private fun reactionAttempt() = SessionAttemptIdentity(
+        AccountId.require("account"), ConnectionGeneration.require(1),
+        ConnectionAttempt.require(1), LifecycleEpoch.require(1),
+    )
+    private fun outgoingReaction(attempt: SessionAttemptIdentity) = OutgoingReactionEnvelope(
+        attempt.accountId, attempt.generation, "peer@example.org", "wire", listOf("🔥"),
+    )
+    private fun incomingReaction(attempt: SessionAttemptIdentity) = IncomingReactionEnvelope(
+        attempt.accountId, attempt.generation, "account@example.org", "peer@example.org",
+        "peer@example.org", "wire", listOf("🔥"),
+    )
+
     private fun account(id: String, bareJid: String = "$id@example.org") = AccountConfiguration.create(
         id = AccountId.require(id),
         bareJid = bareJid,
@@ -774,6 +844,18 @@ class SessionRuntimeTest {
         override fun deleteKey(accountId: AccountId) = Unit
     }
 
+    private data class ReactionCallback(
+        val attempt: SessionAttemptIdentity,
+        val reaction: IncomingReactionEnvelope,
+    )
+
+    private data class ReactionSendStep(
+        val entered: CompletableDeferred<Unit> = CompletableDeferred(),
+        val release: CompletableDeferred<Unit> = CompletableDeferred(),
+        val failure: Throwable? = null,
+        val callback: ReactionCallback? = null,
+    )
+
     private class RecordingConnectionFactory(
         private val connectionStarted: CompletableDeferred<Unit>? = null,
         private val releaseConnection: CompletableDeferred<Unit>? = null,
@@ -805,6 +887,8 @@ class SessionRuntimeTest {
         var nextBookmarkReadGate: CompletableDeferred<Unit>? = null
         val publishedBookmarks = mutableListOf<RoomBookmark>()
         val sentSignals = mutableListOf<OutgoingMessageSignal>()
+        val sentReactions = mutableListOf<OutgoingReactionEnvelope>()
+        val reactionSteps = ArrayDeque<ReactionSendStep>()
 
         override fun revoke() {
             isUsable = false
@@ -830,6 +914,24 @@ class SessionRuntimeTest {
 
         override suspend fun sendSignal(signal: OutgoingMessageSignal) {
             sentSignals += signal
+        }
+
+        override suspend fun sendReaction(reaction: OutgoingReactionEnvelope) {
+            val step = reactionSteps.removeFirst()
+            sentReactions += reaction
+            step.entered.complete(Unit)
+            step.callback?.let { emitReaction(it.attempt, it.reaction) }
+            step.release.await()
+            step.failure?.let { throw it }
+        }
+
+        fun queueReaction(
+            failure: Throwable? = null,
+            callback: ReactionCallback? = null,
+            released: Boolean = false,
+        ): ReactionSendStep = ReactionSendStep(failure = failure, callback = callback).also {
+            if (released) it.release.complete(Unit)
+            reactionSteps.addLast(it)
         }
 
         override suspend fun joinMuc(
@@ -876,6 +978,14 @@ class SessionRuntimeTest {
                     OutgoingFailureEnvelope(operationId, peer, "remote-server-timeout"),
                 ),
             )
+        }
+
+        fun emitLoss(reason: SessionFailureReason) {
+            event(SessionEvent.ConnectionLost(attemptIdentity, reason))
+        }
+
+        fun emitReaction(attempt: SessionAttemptIdentity, reaction: IncomingReactionEnvelope) {
+            event(SessionEvent.Reaction(attempt, reaction))
         }
 
         fun emitRoom(view: org.thanosapollo.nema.xmpp.muc.RoomView) {
