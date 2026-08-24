@@ -1035,12 +1035,16 @@ class SessionRuntimeTest {
         fixture.connection.emitReaction(attempt, reaction)
     }
 
-    private fun TestScope.completeReconnect(
+    private suspend fun TestScope.completeReconnect(
         fixture: RuntimeFixture,
         oldAttempt: SessionAttemptIdentity,
     ): SessionAttemptIdentity {
         assertEquals(oldAttempt, fixture.connection.attemptIdentity)
         fixture.connection.emitLoss(SessionFailureReason.NETWORK)
+        assertEquals(
+            ConnectionState.ReconnectWait(oldAttempt.accountId, oldAttempt.generation),
+            fixture.runtime.state.first { it is ConnectionState.ReconnectWait },
+        )
         runCurrent()
         advanceTimeBy(1_000L)
         runCurrent()
