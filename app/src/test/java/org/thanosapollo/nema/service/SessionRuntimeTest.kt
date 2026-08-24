@@ -50,6 +50,7 @@ import org.thanosapollo.nema.storage.IncomingMessage
 import org.thanosapollo.nema.storage.IdentityAliasKind
 import org.thanosapollo.nema.storage.NemaDatabase
 import org.thanosapollo.nema.storage.MessageDirection
+import org.thanosapollo.nema.storage.MessageReactionEntity
 import org.thanosapollo.nema.storage.MessageWriteBoundary
 import org.thanosapollo.nema.storage.MessageStore
 import org.thanosapollo.nema.storage.OutboundIntent
@@ -867,6 +868,105 @@ class SessionRuntimeTest {
     }
 
     @Test
+    fun `reactTo sends before committing exact own reaction`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "effect-first")
+        installDirectTarget(fixture, DIRECT_TARGET.localId, DIRECT_TARGET.wireId)
+        val before = ownReactionSnapshot(fixture, DIRECT_TARGET.localId)
+        val step = fixture.connection.queueReaction()
+
+        val result = async {
+            fixture.runtime.reactTo(REACTION_PEER, DIRECT_TARGET.localId, "🔥")
+        }
+        step.entered.await()
+
+        assertEquals(before, ownReactionSnapshot(fixture, DIRECT_TARGET.localId))
+        assertEquals(listOf(outgoingReaction(fixture, listOf("🔥"), DIRECT_TARGET.wireId)), fixture.connection.sentReactions)
+        assertFalse(result.isCompleted)
+        step.release.complete(Unit)
+        assertTrue(result.await())
+        assertEquals(expectedOwnReaction(fixture, DIRECT_TARGET, "🔥", REACTION_NOW), ownReactionSnapshot(fixture, DIRECT_TARGET.localId))
+    }
+
+    @Test
+    fun `reactTo preserves durable state and exact throwable behavior`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "send-failure")
+        installDirectTarget(fixture, DIRECT_TARGET.localId, DIRECT_TARGET.wireId)
+        val before = ownReactionSnapshot(fixture, DIRECT_TARGET.localId)
+        suspend fun result(failure: Throwable) = runCatching {
+            fixture.connection.queueReaction(failure = failure, released = true)
+            fixture.runtime.reactTo(REACTION_PEER, DIRECT_TARGET.localId, "🔥")
+        }
+
+        val ordinary = Exception("ordinary")
+        assertFalse(result(ordinary).getOrThrow())
+        assertEquals(before, ownReactionSnapshot(fixture, DIRECT_TARGET.localId))
+        val cancelled = kotlinx.coroutines.CancellationException("cancelled")
+        assertSame(cancelled, result(cancelled).exceptionOrNull())
+        assertEquals(before, ownReactionSnapshot(fixture, DIRECT_TARGET.localId))
+        val fatal = object : Throwable("fatal") {}
+        assertSame(fatal, result(fatal).exceptionOrNull())
+        assertEquals(before, ownReactionSnapshot(fixture, DIRECT_TARGET.localId))
+    }
+
+    @Test
+    fun `reactTo accepts trusted synchronous own reaction as submission winner`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "reentry")
+        listOf(DIRECT_TARGET, SECOND_TARGET).forEach { target ->
+            installDirectTarget(fixture, target.localId, target.wireId)
+            val attempt = fixture.connection.attemptIdentity
+            val callback = incomingReaction(
+                fixture, attempt, target.wireId, listOf("❤️"), target.delayedAtMs,
+            ).copy(senderBareJid = fixture.account.bareJid.value)
+            fixture.connection.queueReaction(
+                callback = ReactionCallback(attempt, callback),
+                released = true,
+            )
+
+            assertTrue(fixture.runtime.reactTo(REACTION_PEER, target.localId, "🔥"))
+            val row = requireNotNull(ownReactionSnapshot(fixture, target.localId))
+            val eventTime = target.delayedAtMs ?: row.updatedAtMs
+            assertEquals(expectedOwnReaction(fixture, target, "❤️", eventTime), row)
+            if (target.delayedAtMs == null) assertTrue(row.updatedAtMs > 0L)
+        }
+    }
+
+    @Test
+    fun `reactTo rejects completion after account switch`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "switch-old")
+        installDirectTarget(fixture, DIRECT_TARGET.localId, DIRECT_TARGET.wireId)
+        val oldAttempt = fixture.connection.attemptIdentity
+        val step = fixture.connection.queueReaction()
+        val result = async { fixture.runtime.reactTo(REACTION_PEER, DIRECT_TARGET.localId, "🔥") }
+        step.entered.await()
+
+        switchAccount(fixture, "switch-new")
+        step.release.complete(Unit)
+
+        assertFalse(result.await())
+        assertNull(ownReactionSnapshot(fixture, DIRECT_TARGET.localId))
+        emitOldAttemptReaction(fixture, oldAttempt, delayedAtMs = 7_000L)
+        assertNull(ownReactionSnapshot(fixture, DIRECT_TARGET.localId))
+    }
+
+    @Test
+    fun `reactTo rejects completion after reconnect`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "reconnect-send")
+        installDirectTarget(fixture, DIRECT_TARGET.localId, DIRECT_TARGET.wireId)
+        val oldAttempt = fixture.connection.attemptIdentity
+        val step = fixture.connection.queueReaction()
+        val result = async { fixture.runtime.reactTo(REACTION_PEER, DIRECT_TARGET.localId, "🔥") }
+        step.entered.await()
+
+        completeReconnect(fixture, oldAttempt)
+        step.release.complete(Unit)
+
+        assertFalse(result.await())
+        assertNull(ownReactionSnapshot(fixture, DIRECT_TARGET.localId))
+        emitOldAttemptReaction(fixture, oldAttempt, delayedAtMs = 7_000L)
+        assertNull(ownReactionSnapshot(fixture, DIRECT_TARGET.localId))
+    }
+
+    @Test
     fun `reaction fake captures exact envelope before entry and waits for release`() = runTest {
         val connection = RecordingConnection(AccountId.require("account"), null, null) {}
         val reaction = outgoingReaction(reactionAttempt())
@@ -931,7 +1031,7 @@ class SessionRuntimeTest {
     private suspend fun connectedRuntime(scope: CoroutineScope, id: String): RuntimeFixture {
         val accounts = AccountRepository(database.accountDao())
         val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
-        val store = MessageStore(database)
+        val store = MessageStore(database) { REACTION_NOW }
         val connections = RecordingConnectionFactory()
         val runtime = SessionRuntime(
             accounts, credentials, store, PeerIdentityStore(database.messageDao()), scope, connections,
@@ -992,6 +1092,16 @@ class SessionRuntimeTest {
             fixture.account.bareJid.value,
             canonicalLocalId,
         )
+
+    private fun expectedOwnReaction(
+        fixture: RuntimeFixture,
+        target: ReactionEventCase,
+        emojis: String,
+        updatedAtMs: Long,
+    ) = MessageReactionEntity(
+        fixture.account.id.value, REACTION_PEER, fixture.account.bareJid.value,
+        target.localId, target.localId, target.wireId, emojis, updatedAtMs, 1,
+    )
 
     private fun outgoingReaction(
         fixture: RuntimeFixture,
@@ -1141,6 +1251,7 @@ class SessionRuntimeTest {
 
     private companion object {
         const val REACTION_PEER = "peer@example.org"
+        const val REACTION_NOW = 8_000L
         val DIRECT_TARGET = ReactionEventCase("reaction-local", "reaction-wire", null)
         val CORRECTION = ReactionEventCase("correction-local", "correction-wire", null)
         val SECOND_TARGET = ReactionEventCase("second-local", "second-wire", 4_200L)

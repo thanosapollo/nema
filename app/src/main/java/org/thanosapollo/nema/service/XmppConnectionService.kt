@@ -740,50 +740,35 @@ class SessionRuntime(
     suspend fun stop() = accountCommands.withLock { controller.stop() }
 
     suspend fun reactTo(peerJid: String, localMessageId: String, emoji: String): Boolean {
-        val connected = state.value as? ConnectionState.Connected ?: return false
+        val lease = controller.lifecycle.value.dispatchLease() ?: return false
         val account = accounts.activeAccount.first() ?: return false
-        if (connected.accountId != account.id) return false
-        val targetId = messages.reactionWireTarget(account.id.value, peerJid, localMessageId) ?: return false
-        val previous = messages.ownReactionEmojis(account.id.value, peerJid, localMessageId, account.bareJid.value)
-        val next = org.thanosapollo.nema.xmpp.reactions.toggleReaction(emoji, previous)
-        messages.applyIncomingReaction(
-            IncomingReactionApply(
-                accountId = account.id.value,
-                accountBareJid = account.bareJid.value,
-                peerJid = peerJid,
-                senderBareJid = account.bareJid.value,
-                targetId = targetId,
-                emojis = next,
-                receivedAtMs = System.currentTimeMillis(),
-            ),
-        )
-        return try {
+        if (lease.identity.accountId != account.id) return false
+        val command = messages.prepareOutgoingReaction(
+            account.id.value,
+            peerJid,
+            localMessageId,
+            account.bareJid.value,
+            emoji,
+        ) ?: return false
+        try {
             controller.sendReaction(
                 org.thanosapollo.nema.xmpp.transport.OutgoingReactionEnvelope(
-                    accountId = connected.accountId,
-                    generation = connected.generation,
-                    recipient = peerJid,
-                    targetId = targetId,
-                    emojis = next,
+                    accountId = lease.identity.accountId,
+                    generation = lease.identity.generation,
+                    recipient = command.peerJid,
+                    targetId = command.wireTargetId,
+                    emojis = command.emojis,
                 ),
             )
-            true
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
-            messages.applyIncomingReaction(
-                IncomingReactionApply(
-                    accountId = account.id.value,
-                    accountBareJid = account.bareJid.value,
-                    peerJid = peerJid,
-                    senderBareJid = account.bareJid.value,
-                    targetId = targetId,
-                    emojis = previous,
-                    receivedAtMs = System.currentTimeMillis(),
-                ),
-            )
-            false
+            return false
         }
+        return controller.commitIfConnected(
+            lease.identity,
+            { controller.lifecycle.value.dispatchLease() == lease },
+        ) { messages.commitOutgoingReaction(command) } != null
     }
 
     fun reportComposer(peer: String, composingNow: Boolean) {
