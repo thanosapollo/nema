@@ -1650,32 +1650,37 @@ data class IncomingReactionApply(
     val delayedAtMs: Long? = null,
 )
 
-internal data class DirectReactionTarget(
+internal data class ReactionTarget(
     val accountId: String,
     val peerJid: String,
     val canonicalLocalId: String,
     val wireTargetId: String,
+    val messageKind: MessageKind = MessageKind.CHAT,
 )
+
+internal typealias DirectReactionTarget = ReactionTarget
 
 internal interface OutgoingReactionCommand {
     val accountId: String
     val peerJid: String
     val canonicalLocalMessageId: String
     val wireTargetId: String
+    val messageKind: MessageKind
     val emojis: List<String>
 }
 
 private class PreparedOutgoingReaction(
     val owner: MessageStore,
-    override val accountId: String,
-    override val peerJid: String,
     val ownSender: String,
-    val target: DirectReactionTarget,
+    val target: ReactionTarget,
     val expectedRevision: Long,
     val encodedEmojis: String,
 ) : OutgoingReactionCommand {
+    override val accountId: String get() = target.accountId
+    override val peerJid: String get() = target.peerJid
     override val canonicalLocalMessageId: String get() = target.canonicalLocalId
     override val wireTargetId: String get() = target.wireTargetId
+    override val messageKind: MessageKind get() = target.messageKind
     override val emojis: List<String> get() = decodeReactionEmojis(encodedEmojis).toMutableList()
 }
 
@@ -2170,6 +2175,31 @@ class MessageStore private constructor(
         DirectReactionTarget(accountId, peerJid, canonical.localMessageId, alias.value)
     }
 
+    internal suspend fun resolveReactionTarget(
+        accountId: String,
+        peerJid: String,
+        localMessageId: String,
+    ): ReactionTarget? = database.withTransaction {
+        val dao = database.messageDao()
+        val selected = dao.message(accountId, localMessageId)
+            ?.takeIf { it.peerJid == peerJid }
+            ?: return@withTransaction null
+        if (selected.messageKind == MessageKind.CHAT) {
+            return@withTransaction resolveDirectReactionTarget(accountId, peerJid, localMessageId)
+        }
+        if (selected.messageKind != MessageKind.GROUPCHAT ||
+            selected.replaceId != null || selected.correctionTargetMessageId != null
+        ) {
+            return@withTransaction null
+        }
+        val alias = dao.trustedAliasesForMessage(accountId, selected.localMessageId)
+            .filter { it.kind == IdentityAliasKind.STANZA_ID }
+            .singleOrNull()
+            ?.takeIf { it.authority == peerJid && it.value.isNotEmpty() }
+            ?: return@withTransaction null
+        ReactionTarget(accountId, peerJid, selected.localMessageId, alias.value, selected.messageKind)
+    }
+
     internal suspend fun prepareOutgoingReaction(
         accountId: String,
         peerJid: String,
@@ -2179,11 +2209,11 @@ class MessageStore private constructor(
     ): OutgoingReactionCommand? = database.withTransaction {
         val dao = database.messageDao()
         if (emoji.trim().isEmpty() || dao.accountBareJid(accountId) != ownSenderBareJid) return@withTransaction null
-        val target = resolveDirectReactionTarget(accountId, peerJid, localMessageId) ?: return@withTransaction null
+        val target = resolveReactionTarget(accountId, peerJid, localMessageId) ?: return@withTransaction null
         val current = dao.validatedReaction(accountId, peerJid, ownSenderBareJid, target.canonicalLocalId)
         if (current?.revision == Long.MAX_VALUE - 1) return@withTransaction null
         val encoded = encodeReactionEmojis(toggleReaction(emoji, current?.let { decodeReactionEmojis(it.emojis) }.orEmpty()))
-        PreparedOutgoingReaction(this, accountId, peerJid, ownSenderBareJid, target, current?.revision ?: 0, encoded)
+        PreparedOutgoingReaction(this, ownSenderBareJid, target, current?.revision ?: 0, encoded)
     }
 
     internal suspend fun commitOutgoingReaction(command: OutgoingReactionCommand): Boolean =
