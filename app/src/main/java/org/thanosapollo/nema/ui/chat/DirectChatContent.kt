@@ -1727,6 +1727,10 @@ internal fun TimelineMessage.correctionTargetOrNull(conversationGroupChat: Boole
     return DraftCorrection(id, referenceId, body)
 }
 
+internal fun canReact(conversationIsGroupChat: Boolean, message: TimelineMessage): Boolean =
+    conversationIsGroupChat == message.groupChat &&
+        (!conversationIsGroupChat || message.replyReferenceId != null)
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun MessageTimeline(
@@ -1902,6 +1906,7 @@ fun MessageTimeline(
                 contentType = { message -> if (message.outgoing) 1 else 0 },
             ) { message ->
                 var messageActionsOpen by remember(message.id) { mutableStateOf(false) }
+                val reactable = canReact(conversationGroupChat, message)
                 val (bubbleContainerColor, bubbleContentColor) = messageBubbleColors(message.outgoing)
                 val visibleBody = remember(message.body, message.attachmentUrl) {
                     if (message.attachmentUrl == null) {
@@ -2051,12 +2056,14 @@ fun MessageTimeline(
                                         style = MaterialTheme.typography.labelMedium,
                                         modifier = Modifier
                                             .testTag("reaction-chip-${message.id}-${chip.emoji}")
-                                            .clickable { scope.launch { onReact(message, chip.emoji) } },
+                                            .clickable(enabled = reactable) {
+                                                scope.launch { onReact(message, chip.emoji) }
+                                            },
                                     )
                                 }
                             }
                         }
-                        if (reactionPickerMessageId == message.id && !conversationGroupChat && !message.groupChat) {
+                        if (reactionPickerMessageId == message.id && reactable) {
                             Popup(
                                 onDismissRequest = { reactionPickerShown = false },
                                 properties = PopupProperties(
@@ -2139,7 +2146,7 @@ fun MessageTimeline(
                                     onQuote(message)
                                 },
                             )
-                            if (!conversationGroupChat && !message.groupChat) {
+                            if (reactable) {
                                 DropdownMenuItem(
                                     text = { Text("Reactions") },
                                     onClick = {

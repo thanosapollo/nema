@@ -60,6 +60,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -3053,6 +3054,98 @@ class DirectChatContentTest {
             }
         }
         composeRule.onNodeWithTag("reaction-chip-reacted-👍").assertIsDisplayed()
+    }
+
+    @Test
+    fun reactionPolicyRequiresAuthoritativeMatchingRoomMessageAndPreservesDirect() {
+        val direct = message("direct", outgoing = false)
+        val authorizedRoom = direct.copy(groupChat = true, replyReferenceId = "room-sid")
+
+        assertTrue(canReact(conversationIsGroupChat = false, direct))
+        assertTrue(canReact(conversationIsGroupChat = true, authorizedRoom))
+        assertFalse(canReact(conversationIsGroupChat = true, authorizedRoom.copy(replyReferenceId = null)))
+        assertFalse(canReact(conversationIsGroupChat = true, direct))
+        assertFalse(canReact(conversationIsGroupChat = false, authorizedRoom))
+    }
+
+    @Test
+    fun authorizedRoomReactionChipAndPickerInvokeLocalMessageCallback() {
+        val message = message("room-local", outgoing = false).copy(
+            groupChat = true,
+            replyReferenceId = "room-sid",
+            reactions = listOf(
+                org.thanosapollo.nema.xmpp.reactions.ReactionDisplay(
+                    "room-local",
+                    "❤️",
+                    1,
+                    false,
+                    listOf(PEER_A),
+                ),
+            ),
+        )
+        var reacted = emptyList<Pair<String, String>>()
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(message),
+                    conversationGroupChat = true,
+                    onReact = { selected, emoji ->
+                        reacted = reacted + (selected.id to emoji)
+                        true
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("reaction-chip-room-local-❤️").assertIsEnabled().performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("message-bubble-room-local")
+            .performSemanticsAction(SemanticsActions.OnClick)
+        composeRule.onNodeWithText("Reactions").performClick()
+        composeRule.onNodeWithTag("reaction-picker").assertIsDisplayed()
+        composeRule.onNodeWithText("👍").performClick()
+        composeRule.runOnIdle {
+            assertEquals(listOf("room-local" to "❤️", "room-local" to "👍"), reacted)
+        }
+    }
+
+    @Test
+    fun roomReactionWithoutAuthorityIsReadOnlyAndHidden() {
+        val message = message("room-untrusted", outgoing = false).copy(
+            groupChat = true,
+            reactions = listOf(
+                org.thanosapollo.nema.xmpp.reactions.ReactionDisplay(
+                    "room-untrusted",
+                    "👍",
+                    1,
+                    false,
+                    listOf(PEER_A),
+                ),
+            ),
+        )
+        var reacted = emptyList<String>()
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(message),
+                    conversationGroupChat = true,
+                    onReact = { _, emoji ->
+                        reacted = reacted + emoji
+                        true
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("reaction-chip-room-untrusted-👍")
+            .assertIsDisplayed()
+            .assertIsNotEnabled()
+            .performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("message-bubble-room-untrusted")
+            .performSemanticsAction(SemanticsActions.OnClick)
+        composeRule.onNodeWithText("Reactions").assertDoesNotExist()
+        composeRule.runOnIdle { assertEquals(emptyList<String>(), reacted) }
     }
 
     @Test

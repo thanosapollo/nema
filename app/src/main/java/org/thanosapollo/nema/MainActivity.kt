@@ -50,6 +50,7 @@ import org.thanosapollo.nema.ui.PrimaryDestination
 import org.thanosapollo.nema.ui.selectSessionDestination
 import org.thanosapollo.nema.ui.SessionBottomBar
 import org.thanosapollo.nema.ui.chat.DirectChatContent
+import org.thanosapollo.nema.ui.chat.canReact
 import org.thanosapollo.nema.ui.showLoginSessionChrome
 import org.thanosapollo.nema.ui.theme.AppearanceScope
 import org.thanosapollo.nema.ui.theme.AppearanceSpec
@@ -414,7 +415,7 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean, activityRe
                             },
                             onReact = { message, emoji ->
                                 val peer = chatState.selectedPeer
-                                if (peer == null || message.groupChat) {
+                                if (peer == null || !canReact(chatState.selectedPeerGroupChat, message)) {
                                     false
                                 } else {
                                     application.sessionRuntime.reactTo(peer, message.id, emoji)
