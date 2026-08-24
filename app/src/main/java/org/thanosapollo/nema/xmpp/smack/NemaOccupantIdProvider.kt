@@ -5,11 +5,13 @@ import org.jivesoftware.smack.packet.ExtensionElement
 import org.jivesoftware.smack.packet.MessageOrPresence
 import org.jivesoftware.smack.packet.XmlEnvironment
 import org.jivesoftware.smack.provider.ExtensionElementProvider
+import org.jivesoftware.smack.provider.ProviderManager
 import org.jivesoftware.smack.util.XmlStringBuilder
 import org.jivesoftware.smack.xml.XmlPullParser
 
 private const val OCCUPANT_ID_ELEMENT = "occupant-id"
-private const val OCCUPANT_ID_NAMESPACE = "urn:xmpp:occupant-id:0"
+internal const val OCCUPANT_ID_NAMESPACE = "urn:xmpp:occupant-id:0"
+private val occupantIdProviderLock = Any()
 
 internal data class NemaOccupantIdElement(
     val id: String?,
@@ -53,6 +55,20 @@ internal object NemaOccupantIdProvider : ExtensionElementProvider<NemaOccupantId
                 else -> Unit
             }
         }
+    }
+}
+
+internal fun installNemaOccupantIdProvider() = synchronized(occupantIdProviderLock) {
+    val current = ProviderManager.getExtensionProvider(OCCUPANT_ID_ELEMENT, OCCUPANT_ID_NAMESPACE)
+    check(current == null || current === NemaOccupantIdProvider) {
+        "Unexpected occupant ID provider owner"
+    }
+    if (current == null) {
+        ProviderManager.addExtensionProvider(
+            OCCUPANT_ID_ELEMENT,
+            OCCUPANT_ID_NAMESPACE,
+            NemaOccupantIdProvider,
+        )
     }
 }
 

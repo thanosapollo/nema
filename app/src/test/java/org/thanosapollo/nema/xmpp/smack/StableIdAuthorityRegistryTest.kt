@@ -47,16 +47,34 @@ class StableIdAuthorityRegistryTest {
         val registry = RoomStableIdAuthorityRegistry()
         registry.begin(first)
         join(registry, first, room)
-        assertEquals(true, registry.support(first, room))
+        assertEquals(true, registry.stableIdSupport(first, room))
 
         registry.begin(second)
 
-        assertNull(registry.support(second, room))
+        assertNull(registry.stableIdSupport(second, room))
         assertNull(registry.beginJoin(first, room))
         val denied = requireNotNull(registry.beginJoin(second, room))
-        assertTrue(registry.publish(denied, supported = false))
-        assertEquals(false, registry.support(second, room))
-        assertNull(registry.support(first, room))
+        assertTrue(registry.publish(denied, stableIds = false, occupantIds = false))
+        assertEquals(false, registry.stableIdSupport(second, room))
+        assertNull(registry.stableIdSupport(first, room))
+    }
+
+    @Test
+    fun `room feature facts preserve unknown negative and positive independently`() {
+        val registry = RoomStableIdAuthorityRegistry()
+        registry.begin(first)
+        val stableOnly = requireNotNull(registry.beginJoin(first, room))
+
+        assertNull(registry.stableIdSupport(first, room))
+        assertNull(registry.occupantIdSupport(first, room))
+        assertTrue(registry.publish(stableOnly, stableIds = true, occupantIds = false))
+        assertEquals(true, registry.stableIdSupport(first, room))
+        assertEquals(false, registry.occupantIdSupport(first, room))
+
+        val occupantOnly = requireNotNull(registry.beginJoin(first, room))
+        assertTrue(registry.publish(occupantOnly, stableIds = false, occupantIds = true))
+        assertEquals(false, registry.stableIdSupport(first, room))
+        assertEquals(true, registry.occupantIdSupport(first, room))
     }
 
     @Test
@@ -66,6 +84,7 @@ class StableIdAuthorityRegistryTest {
         registry.begin(first)
         val firstRoomLease = join(registry, first, room)
         join(registry, first, other)
+        assertTrue(firstRoomLease.incarnation > 0)
         val mamLease = requireNotNull(registry.lease(first, room))
         var currentRevocations = 0
         val firstListener = RoomStableIdRevocationListener(registry, firstRoomLease) {
@@ -75,12 +94,13 @@ class StableIdAuthorityRegistryTest {
         firstListener.membershipRevoked()
 
         assertFalse(registry.isCurrent(mamLease))
-        assertNull(registry.support(first, room))
-        assertEquals(true, registry.support(first, other))
+        assertNull(registry.stableIdSupport(first, room))
+        assertEquals(true, registry.stableIdSupport(first, other))
         assertEquals(account, trustedStableIdAuthority(direct(), first, account, true, registry))
         assertEquals(1, currentRevocations)
 
         val secondRoomLease = join(registry, first, room)
+        assertTrue(secondRoomLease.incarnation > firstRoomLease.incarnation)
         assertFalse(registry.isCurrent(mamLease))
         firstListener.kicked(JidCreate.entityBareFrom("moderator@example.org"), "stale")
         assertTrue(registry.isCurrent(secondRoomLease))
@@ -91,16 +111,16 @@ class StableIdAuthorityRegistryTest {
             JidCreate.entityBareFrom("moderator@example.org"),
             "loss before listener replacement",
         )
-        assertFalse(registry.publish(unpublished, supported = true))
-        assertNull(registry.support(first, room))
+        assertFalse(registry.publish(unpublished, stableIds = true, occupantIds = true))
+        assertNull(registry.stableIdSupport(first, room))
 
         val bannedBeforePublish = requireNotNull(registry.beginJoin(first, room))
         RoomStableIdRevocationListener(registry, bannedBeforePublish) {}.banned(
             JidCreate.entityBareFrom("admin@example.org"),
             "before publish",
         )
-        assertFalse(registry.publish(bannedBeforePublish, supported = true))
-        assertNull(registry.support(first, room))
+        assertFalse(registry.publish(bannedBeforePublish, stableIds = true, occupantIds = true))
+        assertNull(registry.stableIdSupport(first, room))
     }
 
     private fun join(
@@ -109,7 +129,7 @@ class StableIdAuthorityRegistryTest {
         authority: String,
     ): RoomStableIdLease {
         val lease = requireNotNull(registry.beginJoin(attempt, authority))
-        assertTrue(registry.publish(lease, supported = true))
+        assertTrue(registry.publish(lease, stableIds = true, occupantIds = false))
         return lease
     }
 

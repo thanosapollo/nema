@@ -16,6 +16,7 @@ import org.jivesoftware.smackx.carbons.packet.CarbonExtension
 import org.jivesoftware.smackx.delay.packet.DelayInformation
 import org.jivesoftware.smackx.forward.packet.Forwarded
 import org.jivesoftware.smackx.disco.ServiceDiscoveryManager
+import org.jivesoftware.smackx.disco.packet.DiscoverInfo
 import org.jivesoftware.smackx.message_correct.element.MessageCorrectExtension
 import org.jivesoftware.smackx.receipts.DeliveryReceipt
 import org.jivesoftware.smackx.receipts.DeliveryReceiptRequest
@@ -741,10 +742,27 @@ class SmackDirectMessageMapperTest {
         )
         assertTrue(ServiceDiscoveryManager.getInstanceFor(connection).includesFeature(REACTIONS_NAMESPACE))
         assertTrue(ServiceDiscoveryManager.getInstanceFor(connection).includesFeature(RTT_NAMESPACE))
+        assertTrue(ServiceDiscoveryManager.getInstanceFor(connection).includesFeature(OCCUPANT_ID_NAMESPACE))
         assertFalse(
             ServiceDiscoveryManager.getInstanceFor(connection)
                 .includesFeature(StableUniqueStanzaIdManager.NAMESPACE),
         )
+    }
+
+    @Test
+    fun `room disco keeps stable and occupant support independent`() {
+        fun info(vararg features: String) = DiscoverInfo.builder("disco")
+            .ofType(org.jivesoftware.smack.packet.IQ.Type.result)
+            .apply { features.forEach { addFeature(it) } }
+            .build()
+
+        val stableOnly = roomFeatureSupport(info(StableUniqueStanzaIdManager.NAMESPACE))
+        val occupantOnly = roomFeatureSupport(info(OCCUPANT_ID_NAMESPACE))
+
+        assertTrue(stableOnly.stableIds)
+        assertFalse(stableOnly.occupantIds)
+        assertFalse(occupantOnly.stableIds)
+        assertTrue(occupantOnly.occupantIds)
     }
 
     @Test

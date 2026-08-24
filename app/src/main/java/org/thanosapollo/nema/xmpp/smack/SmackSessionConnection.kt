@@ -143,6 +143,7 @@ class SmackSessionConnectionFactory : SessionConnectionFactory {
     ): SessionConnection {
         requireNemaMucUserProvider()
         requireNemaMamResultProvider()
+        installNemaOccupantIdProvider()
         installNemaReplyProviders()
         installNemaChatMarkerProviders()
         installNemaChatStateProviders()
@@ -196,6 +197,7 @@ internal fun advertiseNemaFeatures(connection: XMPPConnection) {
         addFeature(MessageCorrectExtension.NAMESPACE)
         addFeature(REACTIONS_NAMESPACE)
         addFeature(RTT_NAMESPACE)
+        addFeature(OCCUPANT_ID_NAMESPACE)
     }
 }
 
@@ -576,22 +578,21 @@ internal class SmackSessionConnection(
             ?: throw SendNotAttemptedException()
         val muc = MultiUserChatManager.getInstanceFor(connection).getMultiUserChat(room)
         listenToRoom(muc, roomJid, roomLease)
-        val supportsStableIds = try {
-            ServiceDiscoveryManager.getInstanceFor(connection).supportsFeature(
-                room,
-                StableUniqueStanzaIdManager.NAMESPACE,
+        val roomFeatures = try {
+            roomFeatureSupport(
+                ServiceDiscoveryManager.getInstanceFor(connection).discoverInfo(room),
             )
         } catch (interrupted: InterruptedException) {
             throw interrupted
         } catch (_: Exception) {
-            false
+            RoomFeatureSupport(stableIds = false, occupantIds = false)
         }
         requireExactAttempt(accountId, generation)
         if (connectionListener.currentAttempt() != attempt) throw SendNotAttemptedException()
         val roomNick = preferredRoomNick(nick, expectedBareJid)
         val nickPart = Resourcepart.from(roomNick)
         if (muc.isJoined) {
-            roomStableIdAuthorities.publish(roomLease, supportsStableIds)
+            roomStableIdAuthorities.publish(roomLease, roomFeatures.stableIds, roomFeatures.occupantIds)
             rememberRoomDiscoName(room, roomJid)
             emitRoomView(muc, roomJid)
             return@runInterruptible true
@@ -605,12 +606,12 @@ internal class SmackSessionConnection(
             .build()
         try {
             muc.join(enter)
-            roomStableIdAuthorities.publish(roomLease, supportsStableIds)
+            roomStableIdAuthorities.publish(roomLease, roomFeatures.stableIds, roomFeatures.occupantIds)
             rememberRoomDiscoName(room, roomJid)
             emitRoomView(muc, roomJid)
             true
         } catch (_: MultiUserChatException.MucAlreadyJoinedException) {
-            roomStableIdAuthorities.publish(roomLease, supportsStableIds)
+            roomStableIdAuthorities.publish(roomLease, roomFeatures.stableIds, roomFeatures.occupantIds)
             rememberRoomDiscoName(room, roomJid)
             emitRoomView(muc, roomJid)
             true
@@ -979,6 +980,11 @@ internal class SmackSessionConnection(
     }
 
 }
+
+internal fun roomFeatureSupport(info: DiscoverInfo) = RoomFeatureSupport(
+    stableIds = info.containsFeature(StableUniqueStanzaIdManager.NAMESPACE),
+    occupantIds = info.containsFeature(OCCUPANT_ID_NAMESPACE),
+)
 
 private enum class BlockingCommandResult { CONFIRMED, REJECTED, NOT_ATTEMPTED, UNCERTAIN }
 

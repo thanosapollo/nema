@@ -102,6 +102,39 @@ class NemaOccupantIdProviderTest {
         } finally { ProviderManager.removeExtensionProvider(ELEMENT, NS) }
     }
 
+    @Test fun `production installation owns the exact provider and rejects replacement`() {
+        val previous = ProviderManager.getExtensionProvider(ELEMENT, NS)
+        try {
+            ProviderManager.removeExtensionProvider(ELEMENT, NS)
+            installNemaOccupantIdProvider()
+            installNemaOccupantIdProvider()
+
+            assertSame(NemaOccupantIdProvider, ProviderManager.getExtensionProvider(ELEMENT, NS))
+            val unexpected = object : ExtensionElementProvider<NemaOccupantIdElement>() {
+                override fun parse(
+                    parser: XmlPullParser,
+                    initialDepth: Int,
+                    xmlEnvironment: XmlEnvironment,
+                ) = NemaOccupantIdElement("unexpected", true)
+            }
+            ProviderManager.addExtensionProvider(ELEMENT, NS, unexpected)
+            assertThrows(IllegalStateException::class.java) {
+                installNemaOccupantIdProvider()
+            }
+        } finally {
+            if (previous == null) {
+                ProviderManager.removeExtensionProvider(ELEMENT, NS)
+            } else {
+                ProviderManager.addExtensionProvider(ELEMENT, NS, previous)
+            }
+        }
+        if (previous == null) {
+            assertNull(ProviderManager.getExtensionProvider(ELEMENT, NS))
+        } else {
+            assertSame(previous, ProviderManager.getExtensionProvider(ELEMENT, NS))
+        }
+    }
+
     private fun parseMessage(vararg children: String): Message = withProvider {
         PacketParserUtils.parseStanza("<message xmlns='jabber:client'>${children.joinToString("")}</message>")
     }

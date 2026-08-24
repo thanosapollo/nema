@@ -14,8 +14,17 @@ internal data class RoomStableIdLease(
     val incarnation: Long,
 )
 
+internal data class RoomFeatureSupport(
+    val stableIds: Boolean,
+    val occupantIds: Boolean,
+)
+
 internal class RoomStableIdAuthorityRegistry {
-    private data class Entry(val lease: RoomStableIdLease, val supported: Boolean?)
+    private data class Entry(
+        val lease: RoomStableIdLease,
+        val stableIds: Boolean?,
+        val occupantIds: Boolean?,
+    )
 
     private var attempt: SessionAttemptIdentity? = null
     private var nextIncarnation = 0L
@@ -32,34 +41,40 @@ internal class RoomStableIdAuthorityRegistry {
     fun beginJoin(current: SessionAttemptIdentity, authority: String): RoomStableIdLease? {
         if (attempt != current) return null
         val lease = RoomStableIdLease(current, authority, ++nextIncarnation)
-        entries[authority] = Entry(lease, null)
+        entries[authority] = Entry(lease, null, null)
         return lease
     }
 
     @Synchronized
-    fun publish(lease: RoomStableIdLease, supported: Boolean): Boolean {
+    fun publish(lease: RoomStableIdLease, stableIds: Boolean, occupantIds: Boolean): Boolean {
         if (attempt != lease.attempt || entries[lease.authority]?.lease != lease) return false
-        entries[lease.authority] = Entry(lease, supported)
+        entries[lease.authority] = Entry(lease, stableIds, occupantIds)
         return true
     }
 
     @Synchronized
-    fun support(current: SessionAttemptIdentity, authority: String): Boolean? =
-        entries[authority]?.supported.takeIf { attempt == current }
+    fun stableIdSupport(current: SessionAttemptIdentity, authority: String): Boolean? =
+        entries[authority]?.stableIds.takeIf { attempt == current }
+
+    @Synchronized
+    fun occupantIdSupport(current: SessionAttemptIdentity, authority: String): Boolean? =
+        entries[authority]?.occupantIds.takeIf { attempt == current }
 
     @Synchronized
     fun lease(current: SessionAttemptIdentity, authority: String): RoomStableIdLease? =
-        entries[authority]?.takeIf { attempt == current && it.supported == true }?.lease
+        entries[authority]?.takeIf { attempt == current && it.stableIds == true }?.lease
 
     @Synchronized
-    fun isCurrent(lease: RoomStableIdLease): Boolean =
-        attempt == lease.attempt && entries[lease.authority] == Entry(lease, true)
+    fun isCurrent(lease: RoomStableIdLease): Boolean {
+        val entry = entries[lease.authority]
+        return attempt == lease.attempt && entry?.lease == lease && entry?.stableIds == true
+    }
 
     @Synchronized
     fun revoke(lease: RoomStableIdLease): Boolean {
         if (attempt != lease.attempt) return false
         val entry = entries[lease.authority] ?: return false
-        if (entry.lease != lease && entry.supported != null) return false
+        if (entry.lease != lease && entry.stableIds != null) return false
         entries.remove(lease.authority)
         return true
     }
@@ -96,5 +111,5 @@ internal fun trustedStableIdAuthority(
 ): String? {
     if (message.type != Message.Type.groupchat) return expectedBareJid.takeIf { accountSupported }
     val room = message.from?.asBareJid()?.takeIf { it.isEntityBareJid }?.toString() ?: return null
-    return room.takeIf { roomAuthorities.support(attempt, room) == true }
+    return room.takeIf { roomAuthorities.stableIdSupport(attempt, room) == true }
 }
