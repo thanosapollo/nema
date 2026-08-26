@@ -5,15 +5,20 @@ import org.jivesoftware.smack.packet.Message
 import org.jivesoftware.smack.packet.StreamOpen
 import org.jivesoftware.smack.packet.XmlEnvironment
 import org.jivesoftware.smack.provider.ExtensionElementProvider
+import org.jivesoftware.smack.provider.ProviderManager
 import org.jivesoftware.smack.util.PacketParserUtils
 import org.jivesoftware.smack.util.ParserUtils
 import org.jivesoftware.smack.xml.XmlPullParser
 import org.jivesoftware.smackx.carbons.packet.CarbonExtension
+import org.jivesoftware.smackx.carbons.provider.CarbonManagerProvider
 import org.jivesoftware.smackx.delay.packet.DelayInformation
 import org.jivesoftware.smackx.delay.provider.DelayInformationProvider
 import org.jivesoftware.smackx.forward.packet.Forwarded
 
 internal class MalformedCarbonException(message: String) : IOException(message)
+
+private val carbonProviderLock = Any()
+private val carbonDirections = listOf(CarbonExtension.Direction.sent, CarbonExtension.Direction.received)
 
 internal object NemaCarbonProvider : ExtensionElementProvider<CarbonExtension>() {
     override fun parse(
@@ -127,3 +132,24 @@ internal object NemaCarbonProvider : ExtensionElementProvider<CarbonExtension>()
     private data class ParsedWrapper(val forwarded: Forwarded<Message>?, val problem: String?)
     private data class ParsedForwarded(val forwarded: Forwarded<Message>?, val problem: String?)
 }
+
+internal fun installNemaCarbonProvider() = synchronized(carbonProviderLock) {
+    val owners = carbonDirections.associateWith(::currentCarbonProvider)
+    owners.forEach { (direction, owner) ->
+        check(owner === NemaCarbonProvider || owner?.javaClass == CarbonManagerProvider::class.java) {
+            "Unexpected ${direction.name} Carbon provider owner"
+        }
+    }
+    owners.forEach { (direction, owner) ->
+        if (owner !== NemaCarbonProvider) {
+            ProviderManager.addExtensionProvider(
+                direction.name,
+                CarbonExtension.NAMESPACE,
+                NemaCarbonProvider,
+            )
+        }
+    }
+}
+
+private fun currentCarbonProvider(direction: CarbonExtension.Direction): ExtensionElementProvider<*>? =
+    ProviderManager.getExtensionProvider(direction.name, CarbonExtension.NAMESPACE)

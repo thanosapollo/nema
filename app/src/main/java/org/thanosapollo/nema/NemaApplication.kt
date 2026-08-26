@@ -14,6 +14,7 @@ import org.thanosapollo.nema.storage.PeerIdentityStore
 import org.thanosapollo.nema.ui.theme.AppearanceRepository
 import org.thanosapollo.nema.ui.MessagingPreferencesRepository
 import org.thanosapollo.nema.xmpp.smack.SmackAndroid
+import org.thanosapollo.nema.xmpp.smack.installNemaCarbonProvider
 import org.thanosapollo.nema.xmpp.smack.installNemaMamResultProvider
 import org.thanosapollo.nema.xmpp.smack.installNemaMucUserProvider
 import org.thanosapollo.nema.xmpp.smack.installNemaSidProviders
@@ -35,6 +36,7 @@ class NemaApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         SmackAndroid.initialize(applicationContext)
+        installNemaCarbonProvider()
         installNemaMucUserProvider()
         installNemaMamResultProvider()
         installNemaSidProviders()
