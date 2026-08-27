@@ -19,70 +19,81 @@ internal data class RoomFeatureSupport(
     val occupantIds: Boolean,
 )
 
-internal class RoomStableIdAuthorityRegistry {
-    private data class Entry(
-        val lease: RoomStableIdLease,
-        val stableIds: Boolean?,
-        val occupantIds: Boolean?,
-    )
+internal data class RoomMembershipSnapshot(
+    val lease: RoomStableIdLease,
+    val stableIds: Boolean,
+    val occupantIds: Boolean,
+    val ownNick: String?,
+)
 
+internal class RoomStableIdAuthorityRegistry {
     private var attempt: SessionAttemptIdentity? = null
     private var nextIncarnation = 0L
-    private val entries = mutableMapOf<String, Entry>()
+    private val snapshots = mutableMapOf<String, RoomMembershipSnapshot>()
+    private val pending = mutableMapOf<String, RoomStableIdLease>()
 
     @Synchronized
     fun begin(next: SessionAttemptIdentity) {
-        if (attempt == next) return
         attempt = next
-        entries.clear()
+        snapshots.clear()
+        pending.clear()
     }
 
     @Synchronized
     fun beginJoin(current: SessionAttemptIdentity, authority: String): RoomStableIdLease? {
         if (attempt != current) return null
         val lease = RoomStableIdLease(current, authority, ++nextIncarnation)
-        entries[authority] = Entry(lease, null, null)
+        pending[authority] = lease
         return lease
     }
 
     @Synchronized
-    fun publish(lease: RoomStableIdLease, stableIds: Boolean, occupantIds: Boolean): Boolean {
-        if (attempt != lease.attempt || entries[lease.authority]?.lease != lease) return false
-        entries[lease.authority] = Entry(lease, stableIds, occupantIds)
+    fun publish(
+        lease: RoomStableIdLease,
+        stableIds: Boolean,
+        occupantIds: Boolean,
+        ownNick: String? = null,
+    ): Boolean {
+        if (attempt != lease.attempt || pending[lease.authority] != lease) return false
+        pending.remove(lease.authority)
+        snapshots[lease.authority] = RoomMembershipSnapshot(lease, stableIds, occupantIds, ownNick)
         return true
     }
 
     @Synchronized
+    fun snapshot(current: SessionAttemptIdentity, authority: String): RoomMembershipSnapshot? =
+        snapshots[authority].takeIf { attempt == current }
+
+    @Synchronized
     fun stableIdSupport(current: SessionAttemptIdentity, authority: String): Boolean? =
-        entries[authority]?.stableIds.takeIf { attempt == current }
+        snapshot(current, authority)?.stableIds
 
     @Synchronized
     fun occupantIdSupport(current: SessionAttemptIdentity, authority: String): Boolean? =
-        entries[authority]?.occupantIds.takeIf { attempt == current }
+        snapshot(current, authority)?.occupantIds
 
     @Synchronized
     fun lease(current: SessionAttemptIdentity, authority: String): RoomStableIdLease? =
-        entries[authority]?.takeIf { attempt == current && it.stableIds == true }?.lease
+        snapshot(current, authority)?.takeIf { it.stableIds }?.lease
 
     @Synchronized
-    fun isCurrent(lease: RoomStableIdLease): Boolean {
-        val entry = entries[lease.authority]
-        return attempt == lease.attempt && entry?.lease == lease && entry?.stableIds == true
-    }
+    fun isCurrent(lease: RoomStableIdLease): Boolean =
+        snapshot(lease.attempt, lease.authority)?.let { it.lease == lease && it.stableIds } == true
 
     @Synchronized
     fun revoke(lease: RoomStableIdLease): Boolean {
         if (attempt != lease.attempt) return false
-        val entry = entries[lease.authority] ?: return false
-        if (entry.lease != lease && entry.stableIds != null) return false
-        entries.remove(lease.authority)
-        return true
+        if (pending[lease.authority] == lease) return pending.remove(lease.authority) != null
+        if (snapshots[lease.authority]?.lease != lease) return false
+        pending.remove(lease.authority)
+        return snapshots.remove(lease.authority) != null
     }
 
     @Synchronized
     fun retireAll() {
         attempt = null
-        entries.clear()
+        snapshots.clear()
+        pending.clear()
     }
 }
 

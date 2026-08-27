@@ -48,9 +48,11 @@ class StableIdAuthorityRegistryTest {
         registry.begin(first)
         join(registry, first, room)
         assertEquals(true, registry.stableIdSupport(first, room))
+        val pending = requireNotNull(registry.beginJoin(first, room))
 
         registry.begin(second)
 
+        assertFalse(registry.publish(pending, stableIds = true, occupantIds = true))
         assertNull(registry.stableIdSupport(second, room))
         assertNull(registry.beginJoin(first, room))
         val denied = requireNotNull(registry.beginJoin(second, room))
@@ -75,6 +77,56 @@ class StableIdAuthorityRegistryTest {
         assertTrue(registry.publish(occupantOnly, stableIds = false, occupantIds = true))
         assertEquals(false, registry.stableIdSupport(first, room))
         assertEquals(true, registry.occupantIdSupport(first, room))
+    }
+
+    @Test
+    fun `pending join preserves snapshot and canceled pending cannot publish`() {
+        val registry = RoomStableIdAuthorityRegistry()
+        registry.begin(first)
+        val firstLease = requireNotNull(registry.beginJoin(first, room))
+        assertTrue(registry.publish(firstLease, true, false, "nick1"))
+        val firstSnapshot = RoomMembershipSnapshot(firstLease, true, false, "nick1")
+        val pending = requireNotNull(registry.beginJoin(first, room))
+
+        assertEquals(firstSnapshot, registry.snapshot(first, room))
+        assertEquals(true, registry.stableIdSupport(first, room))
+        assertEquals(false, registry.occupantIdSupport(first, room))
+        assertEquals(firstLease, registry.lease(first, room))
+        assertTrue(registry.isCurrent(firstLease))
+
+        assertTrue(registry.revoke(pending))
+        assertFalse(registry.publish(pending, false, true, "nick2"))
+        assertEquals(firstSnapshot, registry.snapshot(first, room))
+
+        val lostPending = requireNotNull(registry.beginJoin(first, room))
+        assertTrue(registry.revoke(firstLease))
+        assertFalse(registry.publish(lostPending, false, true, "lost"))
+        assertNull(registry.snapshot(first, room))
+
+        val clearedPending = requireNotNull(registry.beginJoin(first, room))
+        registry.begin(first)
+        assertNull(registry.snapshot(first, room))
+        assertFalse(registry.publish(clearedPending, true, true, "nick3"))
+    }
+
+    @Test
+    fun `publish swaps complete snapshot and stale revoke cannot remove replacement`() {
+        val registry = RoomStableIdAuthorityRegistry()
+        registry.begin(first)
+        val firstLease = requireNotNull(registry.beginJoin(first, room))
+        assertTrue(registry.publish(firstLease, true, false, "nick1"))
+        val secondLease = requireNotNull(registry.beginJoin(first, room))
+
+        assertTrue(registry.publish(secondLease, false, true, "nick2"))
+        val secondSnapshot = RoomMembershipSnapshot(secondLease, false, true, "nick2")
+        assertEquals(secondSnapshot, registry.snapshot(first, room))
+        assertFalse(registry.publish(secondLease, true, false, "split"))
+        assertFalse(registry.revoke(firstLease))
+        assertEquals(secondSnapshot, registry.snapshot(first, room))
+        assertEquals(false, registry.stableIdSupport(first, room))
+        assertEquals(true, registry.occupantIdSupport(first, room))
+        assertNull(registry.lease(first, room))
+        assertFalse(registry.isCurrent(secondLease))
     }
 
     @Test
@@ -106,8 +158,9 @@ class StableIdAuthorityRegistryTest {
         assertTrue(registry.isCurrent(secondRoomLease))
         assertEquals(1, currentRevocations)
 
+        RoomStableIdRevocationListener(registry, secondRoomLease) {}.membershipRevoked()
         val unpublished = requireNotNull(registry.beginJoin(first, room))
-        RoomStableIdRevocationListener(registry, secondRoomLease) {}.kicked(
+        RoomStableIdRevocationListener(registry, unpublished) {}.kicked(
             JidCreate.entityBareFrom("moderator@example.org"),
             "loss before listener replacement",
         )
