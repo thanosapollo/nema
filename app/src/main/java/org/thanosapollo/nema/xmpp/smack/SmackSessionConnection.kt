@@ -46,6 +46,7 @@ import org.jivesoftware.smackx.muc.MultiUserChat
 import org.jivesoftware.smackx.muc.MultiUserChatException
 import org.jivesoftware.smackx.muc.MultiUserChatManager
 import org.jivesoftware.smackx.muc.Occupant
+import org.jivesoftware.smackx.muc.UserStatusListener
 import org.jivesoftware.smackx.pubsub.Item
 import org.jivesoftware.smackx.pubsub.PayloadItem
 import org.jivesoftware.smackx.pubsub.PubSubManager
@@ -215,8 +216,8 @@ internal class SmackSessionConnection(
     private val stableIdGate = StableIdDiscoveryGate()
     private val roomStableIdAuthorities = RoomStableIdAuthorityRegistry()
     private val watchedRooms = mutableSetOf<String>()
-    private val roomStatusListeners = ConcurrentHashMap<String, RoomStableIdRevocationListener>()
     private val roomNicks = ConcurrentHashMap<String, String>()
+    private val roomStatusHandoff = RoomStatusHandoff(entryGate, roomStableIdAuthorities, roomNicks::remove)
     private val roomDiscoNames = ConcurrentHashMap<String, String>()
     private val connectionListener = AttemptConnectionListener().also(connection::addConnectionListener)
     private val messageListener = StanzaListener { stanza ->
@@ -594,7 +595,9 @@ internal class SmackSessionConnection(
         val roomLease = roomStableIdAuthorities.beginJoin(attempt, room.toString())
             ?: throw SendNotAttemptedException()
         val muc = MultiUserChatManager.getInstanceFor(connection).getMultiUserChat(room)
-        listenToRoom(muc, roomJid, roomLease)
+        val statusCandidate = listenToRoom(muc, roomJid, roomLease)
+        var statusActivated = false
+        try {
         val roomFeatures = try {
             roomFeatureSupport(
                 ServiceDiscoveryManager.getInstanceFor(connection).discoverInfo(room),
@@ -608,8 +611,14 @@ internal class SmackSessionConnection(
         if (connectionListener.currentAttempt() != attempt) throw SendNotAttemptedException()
         val roomNick = preferredRoomNick(nick, expectedBareJid)
         val nickPart = Resourcepart.from(roomNick)
+        fun activateStatus() {
+            statusActivated = roomStatusHandoff.publish(statusCandidate, roomFeatures, validate = {
+                !revoked.get() && connectionListener.currentAttempt() == attempt && isUsable
+            })
+            if (!statusActivated) throw SendNotAttemptedException()
+        }
         if (muc.isJoined) {
-            roomStableIdAuthorities.publish(roomLease, roomFeatures.stableIds, roomFeatures.occupantIds)
+            activateStatus()
             rememberRoomDiscoName(room, roomJid)
             emitRoomView(muc, roomJid)
             return@runInterruptible true
@@ -623,15 +632,18 @@ internal class SmackSessionConnection(
             .build()
         try {
             muc.join(enter)
-            roomStableIdAuthorities.publish(roomLease, roomFeatures.stableIds, roomFeatures.occupantIds)
+            activateStatus()
             rememberRoomDiscoName(room, roomJid)
             emitRoomView(muc, roomJid)
             true
         } catch (_: MultiUserChatException.MucAlreadyJoinedException) {
-            roomStableIdAuthorities.publish(roomLease, roomFeatures.stableIds, roomFeatures.occupantIds)
+            activateStatus()
             rememberRoomDiscoName(room, roomJid)
             emitRoomView(muc, roomJid)
             true
+        }
+        } finally {
+            if (!statusActivated) roomStatusHandoff.discard(statusCandidate)
         }
     }
 
@@ -741,16 +753,18 @@ internal class SmackSessionConnection(
         }
     }
 
-    private fun listenToRoom(muc: MultiUserChat, roomJid: String, lease: RoomStableIdLease) {
-        val statusListener = RoomStableIdRevocationListener(roomStableIdAuthorities, lease) {
-            roomNicks.remove(roomJid)
-        }
-        val previous = roomStatusListeners.put(roomJid, statusListener)
-        muc.addUserStatusListener(statusListener)
-        previous?.let(muc::removeUserStatusListener)
-        if (!watchedRooms.add(roomJid)) return
+    private fun listenToRoom(
+        muc: MultiUserChat, roomJid: String, lease: RoomStableIdLease,
+    ): RoomStatusHandoff.Candidate {
+        val candidate = roomStatusHandoff.candidate(
+            lease,
+            muc::addUserStatusListener,
+            muc::removeUserStatusListener,
+        )
+        if (!watchedRooms.add(roomJid)) return candidate
         muc.addParticipantListener { emitRoomView(muc, roomJid) }
         muc.addSubjectUpdatedListener { _, _ -> emitRoomView(muc, roomJid) }
+        return candidate
     }
 
     private fun emitRoomView(muc: MultiUserChat, roomJid: String) {
@@ -996,6 +1010,65 @@ internal class SmackSessionConnection(
         fun localDisconnect() = lossNotifier.localDisconnect()
     }
 
+}
+
+internal class RoomStatusHandoff(
+    private val entryGate: Any,
+    private val registry: RoomStableIdAuthorityRegistry,
+    private val onCurrentRevoked: (String) -> Unit,
+    private val beforeRevocation: () -> Unit = {},
+) {
+    internal class Candidate(
+        val lease: RoomStableIdLease, val listener: UserStatusListener,
+        val remove: (UserStatusListener) -> Unit,
+    )
+
+    private val active = mutableMapOf<String, Candidate>()
+
+    fun candidate(lease: RoomStableIdLease, add: (UserStatusListener) -> Unit,
+                  remove: (UserStatusListener) -> Unit): Candidate {
+        lateinit var candidate: Candidate
+        val listener = RoomStatusRevocationListener { revoke(candidate) }
+        candidate = Candidate(lease, listener, remove)
+        add(listener)
+        return candidate
+    }
+
+    fun publish(candidate: Candidate, features: RoomFeatureSupport,
+                validate: () -> Boolean = { true }, afterPublished: () -> Unit = {}): Boolean =
+        synchronized(entryGate) {
+        if (!validate() || !registry.publish(candidate.lease, features.stableIds, features.occupantIds)) {
+            return@synchronized false
+        }
+        afterPublished()
+        active.put(candidate.lease.authority, candidate)?.let { previous ->
+            previous.remove(previous.listener)
+        }
+        true
+    }
+
+    fun discard(candidate: Candidate) = synchronized(entryGate) {
+        registry.revoke(candidate.lease)
+        candidate.remove(candidate.listener)
+    }
+
+    private fun revoke(candidate: Candidate) = synchronized(entryGate) {
+        beforeRevocation()
+        val revoked = registry.revoke(candidate.lease)
+        val room = candidate.lease.authority
+        val wasCurrent = revoked && active[room] === candidate
+        if (wasCurrent) active.remove(room)
+        candidate.remove(candidate.listener)
+        if (wasCurrent) onCurrentRevoked(room)
+    }
+}
+
+private class RoomStatusRevocationListener(private val revoke: () -> Unit) : UserStatusListener {
+    override fun kicked(actor: Jid?, reason: String?) = revoke()
+    override fun banned(actor: Jid?, reason: String?) = revoke()
+    override fun removed(mucUser: org.jivesoftware.smackx.muc.packet.MUCUser, presence: org.jivesoftware.smack.packet.Presence) = revoke()
+    override fun membershipRevoked() = revoke()
+    override fun roomDestroyed(multiUserChat: MultiUserChat, reason: String?) = revoke()
 }
 
 internal fun roomFeatureSupport(info: DiscoverInfo) = RoomFeatureSupport(
