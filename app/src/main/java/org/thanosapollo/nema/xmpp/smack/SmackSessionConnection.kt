@@ -216,26 +216,30 @@ internal class SmackSessionConnection(
     private val stableIdGate = StableIdDiscoveryGate()
     private val roomStableIdAuthorities = RoomStableIdAuthorityRegistry()
     private val watchedRooms = mutableSetOf<String>()
-    private val roomNicks = ConcurrentHashMap<String, String>()
-    private val roomStatusHandoff = RoomStatusHandoff(entryGate, roomStableIdAuthorities, roomNicks::remove)
+    private val roomStatusHandoff = RoomStatusHandoff(entryGate, roomStableIdAuthorities, {})
     private val roomDiscoNames = ConcurrentHashMap<String, String>()
     private val connectionListener = AttemptConnectionListener().also(connection::addConnectionListener)
     private val messageListener = StanzaListener { stanza ->
         if (revoked.get()) return@StanzaListener
         val wrapper = stanza as? Message ?: return@StanzaListener
-        val attempt = connectionListener.currentAttempt() ?: return@StanzaListener
+        val attempt = synchronized(entryGate) {
+            connectionListener.currentAttempt()
+        } ?: return@StanzaListener
         val failure = wrapper.classifyOutgoingFailure(expectedBareJid)
         if (failure.consumed) {
             failure.failure?.let { event(SessionEvent.OutgoingFailure(attempt, it)) }
             return@StanzaListener
         }
         val message = wrapper.toTrustedCarbonMessage(expectedBareJid) ?: return@StanzaListener
+        val room = message.message.from?.asBareJid()?.toString()
+        val roomFacts = copyRoomConsumerFacts(
+            entryGate, roomStableIdAuthorities, attempt, room,
+        )
         message.message.toIncomingSignal(attempt, expectedBareJid)?.let {
             event(SessionEvent.Signal(attempt, it))
             return@StanzaListener
         }
-        val room = message.message.from?.asBareJid()?.toString()
-        message.message.toIncomingChatState(attempt, expectedBareJid, room?.let(roomNicks::get))?.let {
+        message.message.toIncomingChatState(attempt, expectedBareJid, roomFacts?.ownNick)?.let {
             event(SessionEvent.ChatState(attempt, it))
         }
         if (wrapper.getExtension(MamResultExtension::class.java) == null) {
@@ -243,9 +247,8 @@ internal class SmackSessionConnection(
                 event(SessionEvent.RealTimeText(attempt, it))
             }
         }
-        val roomLease = room?.let { roomStableIdAuthorities.lease(attempt, it) }
         message.message.toIncomingReaction(
-            attempt, expectedBareJid, roomLease, roomStableIdAuthorities, room?.let(roomNicks::get),
+            attempt, expectedBareJid, roomFacts = roomFacts,
             liveCarrier = message.isRawLive(
                 wrapper.getExtension(MamResultExtension::class.java) != null,
             ),
@@ -273,7 +276,6 @@ internal class SmackSessionConnection(
             if (revoked.compareAndSet(false, true)) {
                 stableIdGate.retireAll()
                 roomStableIdAuthorities.retireAll()
-                roomNicks.clear()
                 connectionListener.localDisconnect()
             }
         }
@@ -323,21 +325,18 @@ internal class SmackSessionConnection(
     override suspend fun sendReaction(
         reaction: OutgoingReactionEnvelope,
     ) = runInterruptible(Dispatchers.IO) {
-        val attempt = connectionListener.currentAttempt()
-        val roomLease = if (reaction.messageKind == MessageKind.GROUPCHAT) {
-            attempt?.let { roomStableIdAuthorities.lease(it, reaction.recipient) }
-        } else null
         val stanza = reaction.toSmackReaction()
         synchronized(entryGate) {
             requireExactAttemptLocked(reaction.accountId, reaction.generation)
             val current = requireNotNull(connectionListener.currentAttempt())
             if (reaction.messageKind == MessageKind.GROUPCHAT) {
-                synchronized(roomStableIdAuthorities) {
-                    if (!reactionSendAuthorized(reaction, current, roomLease, roomStableIdAuthorities)) {
-                        throw SendNotAttemptedException()
-                    }
-                    connection.sendStanza(stanza)
+                val facts = copyRoomConsumerFacts(
+                    entryGate, roomStableIdAuthorities, current, reaction.recipient,
+                )
+                if (facts?.stableIdAuthority != reaction.recipient) {
+                    throw SendNotAttemptedException()
                 }
+                connection.sendStanza(stanza)
             }
         }
         if (reaction.messageKind == MessageKind.CHAT) connection.sendStanza(stanza)
@@ -387,17 +386,19 @@ internal class SmackSessionConnection(
                 require(request.scope == request.archiveAuthority) { "Room archive scope must match authority" }
                 request.archiveAuthority
             }
-            requireExactAttempt(request.accountId, request.generation)
-            val attempt = requireNotNull(connectionListener.currentAttempt())
-            val roomLease = if (request.scope == ACCOUNT_ARCHIVE_SCOPE) {
-                null
-            } else {
-                roomStableIdAuthorities.lease(attempt, archiveJid)
+            val (attempt, roomFacts) = synchronized(entryGate) {
+                requireExactAttemptLocked(request.accountId, request.generation)
+                val current = requireNotNull(connectionListener.currentAttempt())
+                current to if (request.scope == ACCOUNT_ARCHIVE_SCOPE) {
+                    null
+                } else {
+                    copyRoomConsumerFacts(entryGate, roomStableIdAuthorities, current, archiveJid)
+                }
             }
             val trustStableIdsAtStart = if (request.scope == ACCOUNT_ARCHIVE_SCOPE) {
                 stableIdGate.support(attempt) == true
             } else {
-                roomLease != null
+                roomFacts?.stableIdAuthority != null
             }
             val builder = MamManager.MamQueryArgs.builder().setResultPageSizeTo(request.pageSize)
             when (request.direction) {
@@ -414,7 +415,9 @@ internal class SmackSessionConnection(
             val trustStableIds = trustStableIdsAtStart && if (request.scope == ACCOUNT_ARCHIVE_SCOPE) {
                 stableIdGate.support(attempt) == true
             } else {
-                roomLease?.let(roomStableIdAuthorities::isCurrent) == true
+                roomFacts?.lease == copyRoomConsumerFacts(
+                    entryGate, roomStableIdAuthorities, attempt, archiveJid,
+                )?.lease
             }
             val fin = queryPage.mamFinIq
             val rsm = requireNotNull(fin.rsmSet) { "MAM response omitted RSM boundaries" }
@@ -427,7 +430,7 @@ internal class SmackSessionConnection(
                 expectedArchiveAuthority = archiveJid,
                 mappingBareJid = expectedBareJid,
                 trustStableIds = trustStableIds,
-                ownRoomNick = roomNicks[archiveJid],
+                ownRoomNick = roomFacts?.ownNick,
             )
             requireMamPageBoundaries(rsm.first, rsm.last, messages)
             ArchivePageEnvelope(
@@ -612,9 +615,14 @@ internal class SmackSessionConnection(
         val roomNick = preferredRoomNick(nick, expectedBareJid)
         val nickPart = Resourcepart.from(roomNick)
         fun activateStatus() {
-            statusActivated = roomStatusHandoff.publish(statusCandidate, roomFeatures, validate = {
+            statusActivated = roomStatusHandoff.publish(
+                statusCandidate,
+                roomFeatures,
+                ownNick = muc.nickname?.toString() ?: roomNick,
+                validate = {
                 !revoked.get() && connectionListener.currentAttempt() == attempt && isUsable
-            })
+                },
+            )
             if (!statusActivated) throw SendNotAttemptedException()
         }
         if (muc.isJoined) {
@@ -769,7 +777,6 @@ internal class SmackSessionConnection(
 
     private fun emitRoomView(muc: MultiUserChat, roomJid: String) {
         val attempt = connectionListener.currentAttempt() ?: return
-        muc.nickname?.toString()?.let { roomNicks[roomJid] = it }
         val occupants = muc.occupants.mapNotNull { occupantJid ->
             val occupant = muc.getOccupant(occupantJid) ?: return@mapNotNull null
             occupant.toRoomOccupant()
@@ -885,17 +892,19 @@ internal class SmackSessionConnection(
 
     private fun deliver(decision: StableIdMessageDecision) {
         val room = decision.message.from?.asBareJid()?.toString()
+        val roomFacts = copyRoomConsumerFacts(
+            entryGate, roomStableIdAuthorities, decision.attempt, room,
+        )
+        val trustedStableIdAuthority = if (decision.message.type == Message.Type.groupchat) {
+            roomFacts?.stableIdAuthority
+        } else {
+            expectedBareJid.takeIf { decision.trustStableIds }
+        }
         decision.message.toIncomingEnvelope(
             decision.attempt,
             expectedBareJid,
-            trustedStableIdAuthority(
-                decision.message,
-                decision.attempt,
-                expectedBareJid,
-                decision.trustStableIds,
-                roomStableIdAuthorities,
-            ),
-            room?.let(roomNicks::get),
+            trustedStableIdAuthority,
+            roomFacts?.ownNick,
             decision.sentAtEpochMs,
             decision.sentTimeSource,
             decision.receivedAtEpochMs,
@@ -989,16 +998,20 @@ internal class SmackSessionConnection(
         }
 
         fun attemptStarting(attempt: SessionAttemptIdentity) {
-            stableIdGate.begin(attempt)
-            roomStableIdAuthorities.begin(attempt)
-            this.attempt = attempt
-            lossNotifier.attemptStarting()
+            synchronized(entryGate) {
+                stableIdGate.begin(attempt)
+                beginRoomMembershipAttempt(roomStableIdAuthorities, attempt)
+                this.attempt = attempt
+                lossNotifier.attemptStarting()
+            }
         }
 
         fun updateAttempt(attempt: SessionAttemptIdentity) {
-            stableIdGate.begin(attempt)
-            roomStableIdAuthorities.begin(attempt)
-            this.attempt = attempt
+            synchronized(entryGate) {
+                stableIdGate.begin(attempt)
+                beginRoomMembershipAttempt(roomStableIdAuthorities, attempt)
+                this.attempt = attempt
+            }
         }
 
         fun currentAttempt(): SessionAttemptIdentity? = attempt
@@ -1010,6 +1023,21 @@ internal class SmackSessionConnection(
         fun localDisconnect() = lossNotifier.localDisconnect()
     }
 
+}
+
+internal data class RoomConsumerFacts(
+    val lease: RoomStableIdLease, val stableIdAuthority: String?,
+    val occupantIds: Boolean, val ownNick: String?,
+)
+
+internal fun beginRoomMembershipAttempt(registry: RoomStableIdAuthorityRegistry, attempt: SessionAttemptIdentity) = registry.begin(attempt)
+
+internal fun copyRoomConsumerFacts(
+    entryGate: Any, registry: RoomStableIdAuthorityRegistry,
+    attempt: SessionAttemptIdentity, authority: String?,
+): RoomConsumerFacts? = synchronized(entryGate) {
+    val snapshot = authority?.let { registry.snapshot(attempt, it) } ?: return@synchronized null
+    RoomConsumerFacts(snapshot.lease, snapshot.lease.authority.takeIf { snapshot.stableIds }, snapshot.occupantIds, snapshot.ownNick)
 }
 
 internal class RoomStatusHandoff(
@@ -1034,10 +1062,13 @@ internal class RoomStatusHandoff(
         return candidate
     }
 
-    fun publish(candidate: Candidate, features: RoomFeatureSupport,
+    fun publish(candidate: Candidate, features: RoomFeatureSupport, ownNick: String? = null,
                 validate: () -> Boolean = { true }, afterPublished: () -> Unit = {}): Boolean =
         synchronized(entryGate) {
-        if (!validate() || !registry.publish(candidate.lease, features.stableIds, features.occupantIds)) {
+        if (!validate() || !registry.publish(
+                candidate.lease, features.stableIds, features.occupantIds, ownNick,
+            )
+        ) {
             return@synchronized false
         }
         afterPublished()
@@ -1298,10 +1329,8 @@ internal fun Message.toIncomingRtt(
 internal fun Message.toIncomingReaction(
     attempt: SessionAttemptIdentity,
     expectedBareJid: String,
-    roomLease: RoomStableIdLease? = null,
-    roomAuthorities: RoomStableIdAuthorityRegistry? = null,
-    ownRoomNick: String? = null,
     liveCarrier: Boolean = true,
+    roomFacts: RoomConsumerFacts? = null,
 ): IncomingReactionEnvelope? {
     val parsed = parseReactions() ?: return null
     if (type == Message.Type.groupchat) {
@@ -1309,7 +1338,7 @@ internal fun Message.toIncomingReaction(
         val fromJid = from?.takeIf { it.isEntityFullJid } ?: return null
         val room = fromJid.asBareJid().toString()
         val nick = fromJid.resourceOrNull?.toString()?.takeIf(String::isNotEmpty) ?: return null
-        val actor = liveMucActor(attempt, room, nick, roomLease, roomAuthorities, ownRoomNick)
+        val actor = liveMucActor(attempt, room, nick, roomFacts)
             ?: return null
         return IncomingReactionEnvelope(
             attempt.accountId, attempt.generation, expectedBareJid, room, room,
@@ -1340,19 +1369,14 @@ private fun Message.liveMucActor(
     attempt: SessionAttemptIdentity,
     room: String,
     nick: String,
-    lease: RoomStableIdLease?,
-    registry: RoomStableIdAuthorityRegistry?,
-    ownRoomNick: String?,
+    facts: RoomConsumerFacts?,
 ): ReactionActor? {
-    if (lease == null || registry == null) return null
-    val ownNick = ownRoomNick ?: return null
-    return synchronized(registry) {
-        if (lease.attempt != attempt || lease.authority != room || !registry.isCurrent(lease) ||
-            registry.occupantIdSupport(attempt, room) != true
-        ) return@synchronized null
-        val occupant = nemaOccupantActor() ?: return@synchronized null
-        if (nick == ownNick) ReactionActor.MucOwn else occupant
-    }
+    if (facts?.lease?.attempt != attempt || facts.lease.authority != room ||
+        facts.stableIdAuthority != room || !facts.occupantIds
+    ) return null
+    val ownNick = facts.ownNick ?: return null
+    val occupant = nemaOccupantActor() ?: return null
+    return if (nick == ownNick) ReactionActor.MucOwn else occupant
 }
 
 private fun Message.mucActorBareJid(): String? = extensions

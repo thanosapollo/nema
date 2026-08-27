@@ -79,7 +79,7 @@ class LiveMucReactionMapperTest {
         val otherLease = join(registry, OTHER_ROOM)
         fun mapped(room: String, nick: String, id: String, lease: RoomStableIdLease) = requireNotNull(
             group(room, nick, NemaOccupantIdElement(id, true)).toIncomingReaction(
-                FIRST, SELF, lease, registry, ownRoomNick = "self",
+                FIRST, SELF, roomFacts = facts(registry, FIRST, lease),
             ),
         )
 
@@ -107,9 +107,9 @@ class LiveMucReactionMapperTest {
             message: Message = group(ROOM, "alice", NemaOccupantIdElement("opaque", true)),
             current: SessionAttemptIdentity = FIRST,
             roomLease: RoomStableIdLease = lease,
-            ownNick: String? = "self",
+            roomFacts: RoomConsumerFacts? = facts(registry, current, roomLease),
             live: Boolean = true,
-        ) = message.toIncomingReaction(current, SELF, roomLease, registry, ownNick, live)
+        ) = message.toIncomingReaction(current, SELF, live, roomFacts)
 
         val inner = group(ROOM, "alice", NemaOccupantIdElement("opaque", true))
         val raw = TrustedIncomingStanza(inner)
@@ -146,7 +146,7 @@ class LiveMucReactionMapperTest {
         assertNull(map(current = FIRST.copy(accountId = AccountId.require("other"))))
         assertNull(map(message = group(ROOM, "alice", NemaOccupantIdElement("opaque", true), delayed = true)))
         assertNull(map(live = false))
-        assertNull(map(ownNick = null))
+        assertNull(map(roomFacts = null))
 
         val stale = lease
         join(registry, ROOM)
@@ -163,8 +163,12 @@ class LiveMucReactionMapperTest {
         stable: Boolean = true,
         occupant: Boolean = true,
     ) = requireNotNull(registry.beginJoin(FIRST, room)).also {
-        assertTrue(registry.publish(it, stable, occupant))
+        assertTrue(registry.publish(it, stable, occupant, ownNick = "self"))
     }
+
+    private fun facts(registry: RoomStableIdAuthorityRegistry, current: SessionAttemptIdentity, lease: RoomStableIdLease) = registry.snapshot(current, lease.authority)
+        ?.takeIf { it.lease == lease }
+        ?.let { RoomConsumerFacts(it.lease, it.lease.authority.takeIf { _ -> it.stableIds }, it.occupantIds, it.ownNick) }
 
     private fun group(
         room: String,

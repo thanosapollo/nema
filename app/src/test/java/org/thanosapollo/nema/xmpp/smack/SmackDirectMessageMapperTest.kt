@@ -4,6 +4,10 @@ import android.app.Application
 import androidx.test.core.app.ApplicationProvider
 import java.time.Instant
 import java.util.Date
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.concurrent.thread
 import org.jivesoftware.smack.packet.ExtensionElement
 import org.jivesoftware.smack.packet.Message
 import org.jivesoftware.smack.packet.StandardExtensionElement
@@ -766,6 +770,60 @@ class SmackDirectMessageMapperTest {
         assertTrue(occupantOnly.occupantIds)
     }
 
+    @Test
+    fun `room consumers copy coherent old or new membership across publication`() {
+        val attempt = SessionAttemptIdentity(
+            AccountId.require("account"),
+            ConnectionGeneration.require(4),
+            ConnectionAttempt.require(2),
+            LifecycleEpoch.require(1),
+        )
+        val room = "room@conference.example.org"
+        val entryGate = Any()
+        val registry = RoomStableIdAuthorityRegistry().apply { begin(attempt) }
+        val handoff = RoomStatusHandoff(entryGate, registry, onCurrentRevoked = {})
+        fun candidate(lease: RoomStableIdLease) = handoff.candidate(lease, { _ -> }, { _ -> })
+        val firstLease = requireNotNull(registry.beginJoin(attempt, room))
+        assertTrue(handoff.publish(
+            candidate(firstLease),
+            RoomFeatureSupport(stableIds = true, occupantIds = false),
+            ownNick = "nick1",
+        ))
+        assertEquals(RoomConsumerFacts(firstLease, room, false, "nick1"), copyRoomConsumerFacts(entryGate, registry, attempt, room))
+        val published = CountDownLatch(1)
+        val releasePublication = CountDownLatch(1)
+        val copied = CountDownLatch(1)
+        val observed = AtomicReference<RoomConsumerFacts?>()
+        val secondLease = requireNotNull(registry.beginJoin(attempt, room))
+        val publisher = thread {
+            handoff.publish(
+                candidate(secondLease),
+                RoomFeatureSupport(stableIds = false, occupantIds = true),
+                ownNick = "nick2",
+                afterPublished = {
+                    published.countDown()
+                    releasePublication.await(5, TimeUnit.SECONDS)
+                },
+            )
+        }
+        assertTrue(published.await(5, TimeUnit.SECONDS))
+        val consumer = thread {
+            observed.set(copyRoomConsumerFacts(entryGate, registry, attempt, room))
+            copied.countDown()
+        }
+        try {
+            assertFalse(copied.await(200, TimeUnit.MILLISECONDS))
+        } finally {
+            releasePublication.countDown()
+        }
+        publisher.join(5_000)
+        consumer.join(5_000)
+
+        assertEquals(RoomConsumerFacts(secondLease, null, true, "nick2"), observed.get())
+        val replacement = attempt.copy(attempt = ConnectionAttempt.require(3))
+        synchronized(entryGate) { beginRoomMembershipAttempt(registry, replacement) }
+        assertTrue(listOf(replacement, attempt).all { copyRoomConsumerFacts(entryGate, registry, it, room) == null })
+    }
     @Test
     fun `groupchat ignores stanza IDs without room capability authority`() {
         val attempt = SessionAttemptIdentity(
