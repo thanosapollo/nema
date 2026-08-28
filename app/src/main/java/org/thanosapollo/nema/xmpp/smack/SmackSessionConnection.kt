@@ -228,12 +228,14 @@ internal class SmackSessionConnection(
         val attempt = synchronized(entryGate) {
             connectionListener.currentAttempt()
         } ?: return@StanzaListener
-        val failure = wrapper.classifyOutgoingFailure(expectedBareJid)
+        val boundFullJid = connection.user?.toString() ?: return@StanzaListener
+        val carrier = wrapper.classifyCarrier(expectedBareJid, boundFullJid)
+        val failure = carrier.classifyOutgoingFailure(expectedBareJid)
         if (failure.consumed) {
             failure.failure?.let { event(SessionEvent.OutgoingFailure(attempt, it)) }
             return@StanzaListener
         }
-        val message = wrapper.toTrustedCarbonMessage(expectedBareJid) ?: return@StanzaListener
+        val message = carrier.toTrustedCarbonMessage(expectedBareJid) ?: return@StanzaListener
         val room = message.message.from?.asBareJid()?.toString()
         val roomFacts = copyRoomConsumerFacts(
             entryGate, roomStableIdAuthorities, attempt, room,
@@ -1475,35 +1477,18 @@ internal data class OutgoingFailureMapping(
     }
 }
 
-internal fun Message.classifyOutgoingFailure(expectedBareJid: String): OutgoingFailureMapping {
-    val received = getExtensionElement(
-        CarbonExtension.Direction.received.name,
-        CarbonExtension.NAMESPACE,
-    ) as? CarbonExtension
-    val sent = getExtensionElement(
-        CarbonExtension.Direction.sent.name,
-        CarbonExtension.NAMESPACE,
-    ) as? CarbonExtension
-    if (received == null && sent == null) {
-        return if (type == Message.Type.error) {
-            OutgoingFailureMapping(true, directFailure(expectedBareJid))
-        } else {
-            OutgoingFailureMapping(false, null)
-        }
+internal fun MessageCarrier.classifyOutgoingFailure(expectedBareJid: String): OutgoingFailureMapping = when (this) {
+    is MessageCarrier.Direct -> if (message.type == Message.Type.error) {
+        OutgoingFailureMapping(true, message.directFailure(expectedBareJid))
+    } else {
+        OutgoingFailureMapping(false, null)
     }
-    if (received != null && sent != null) return OutgoingFailureMapping(true, null)
-    val carbon = received ?: sent ?: return OutgoingFailureMapping(false, null)
-    val forwarded = carbon.forwarded.forwardedStanza as? Message
-        ?: return OutgoingFailureMapping(true, null)
-    if (forwarded.type != Message.Type.error) {
-        return OutgoingFailureMapping(type == Message.Type.error, null)
+    is MessageCarrier.Carbon -> if (message.type == Message.Type.error) {
+        OutgoingFailureMapping(true, message.directFailure(expectedBareJid).takeIf { direction == CarbonCarrier.Direction.RECEIVED })
+    } else {
+        OutgoingFailureMapping(false, null)
     }
-    if (carbon.direction != CarbonExtension.Direction.received ||
-        !hasExactCarbonAuthority(expectedBareJid)
-    ) {
-        return OutgoingFailureMapping(true, null)
-    }
-    return OutgoingFailureMapping(true, forwarded.directFailure(expectedBareJid))
+    MessageCarrier.Inert -> OutgoingFailureMapping(true, null)
 }
 
 private fun Message.directFailure(expectedBareJid: String): OutgoingFailureEnvelope? {
@@ -1526,33 +1511,57 @@ internal data class TrustedIncomingStanza(
 internal fun TrustedIncomingStanza.isRawLive(mamCarrier: Boolean): Boolean =
     !forwarded && sentTimeSource == null && !mamCarrier
 
-internal fun Message.toTrustedCarbonMessage(
+internal object CarbonCarrier {
+    enum class Direction { SENT, RECEIVED }
+}
+
+internal sealed interface MessageCarrier {
+    data class Direct(val message: Message) : MessageCarrier
+    data class Carbon(
+        val direction: CarbonCarrier.Direction,
+        val message: Message,
+        val delay: DelayInformation?,
+    ) : MessageCarrier
+    data object Inert : MessageCarrier
+}
+
+internal fun Message.classifyCarrier(expectedBareJid: String, boundFullJid: String): MessageCarrier {
+    val candidates = extensions.filter {
+        it.namespace == CarbonExtension.NAMESPACE &&
+            it.elementName in setOf("sent", "received")
+    }
+    if (candidates.isEmpty()) return MessageCarrier.Direct(this)
+    if (candidates.size != 1) return MessageCarrier.Inert
+    val carbon = candidates.single() as? CarbonExtension ?: return MessageCarrier.Inert
+    if (from?.takeIf { it.isEntityBareJid }?.toString() != expectedBareJid) return MessageCarrier.Inert
+    val direction = when (carbon.direction) {
+        CarbonExtension.Direction.sent -> CarbonCarrier.Direction.SENT
+        CarbonExtension.Direction.received -> CarbonCarrier.Direction.RECEIVED
+    }
+    if (carbon.elementName != direction.name.lowercase()) return MessageCarrier.Inert
+    if (direction == CarbonCarrier.Direction.RECEIVED && to?.toString() != boundFullJid) return MessageCarrier.Inert
+    val inner = carbon.forwarded.forwardedStanza as? Message ?: return MessageCarrier.Inert
+    return MessageCarrier.Carbon(direction, inner, carbon.forwarded.delayInformation)
+}
+
+internal fun MessageCarrier.toTrustedCarbonMessage(
     expectedBareJid: String,
     receivedAtEpochMs: Long = System.currentTimeMillis(),
 ): TrustedIncomingStanza? {
-    val received = getExtensionElement(
-        CarbonExtension.Direction.received.name,
-        CarbonExtension.NAMESPACE,
-    ) as? CarbonExtension
-    val sent = getExtensionElement(
-        CarbonExtension.Direction.sent.name,
-        CarbonExtension.NAMESPACE,
-    ) as? CarbonExtension
-    if (received != null && sent != null) return null
-    val carbon = received ?: sent ?: return TrustedIncomingStanza(this, receivedAtEpochMs = receivedAtEpochMs)
-    if (!hasExactCarbonAuthority(expectedBareJid)) return null
-    val forwarded = carbon.forwarded.forwardedStanza as? Message ?: return null
+    if (this is MessageCarrier.Inert) return null
+    if (this is MessageCarrier.Direct) return TrustedIncomingStanza(message, receivedAtEpochMs = receivedAtEpochMs)
+    this as MessageCarrier.Carbon
+    val forwarded = message
     val sender = forwarded.from?.asBareJid()?.toString() ?: return null
     val recipient = forwarded.to?.asBareJid()?.toString() ?: return null
-    val trusted = when (carbon.direction) {
-        CarbonExtension.Direction.sent -> forwarded.takeIf {
+    val trusted = when (direction) {
+        CarbonCarrier.Direction.SENT -> forwarded.takeIf {
             sender == expectedBareJid && recipient != expectedBareJid
         }
-        CarbonExtension.Direction.received -> forwarded.takeIf {
+        CarbonCarrier.Direction.RECEIVED -> forwarded.takeIf {
             sender != expectedBareJid && recipient == expectedBareJid
         }
     } ?: return null
-    val delay = carbon.forwarded.delayInformation
     return TrustedIncomingStanza(
         message = trusted,
         sentAtEpochMs = delay?.stamp?.time ?: receivedAtEpochMs,
@@ -1561,9 +1570,6 @@ internal fun Message.toTrustedCarbonMessage(
         forwarded = true,
     )
 }
-
-private fun Message.hasExactCarbonAuthority(expectedBareJid: String): Boolean =
-    from?.takeIf { it.isEntityBareJid }?.toString() == expectedBareJid
 
 internal fun List<Message>.haveArchiveAuthority(expectedArchiveAuthority: String): Boolean = all {
     it.from?.asBareJid()?.toString() == expectedArchiveAuthority

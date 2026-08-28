@@ -116,11 +116,12 @@ class LiveMucReactionMapperTest {
         requireNotNull(map(inner, live = raw.isRawLive(mamCarrier = false)))
         val carbonCarrier = StanzaBuilder.buildMessage()
             .from(JidCreate.entityBareFrom(SELF))
+            .to(JidCreate.entityFullFrom("$SELF/test"))
             .addExtension(CarbonExtension(
                 CarbonExtension.Direction.received, Forwarded(inner, null),
             ))
             .build()
-        val carbon = requireNotNull(carbonCarrier.toTrustedCarbonMessage(SELF))
+        val carbon = requireNotNull(carbonCarrier.classifyCarrier(SELF, "$SELF/test").toTrustedCarbonMessage(SELF))
         assertTrue(carbon.forwarded)
         assertNull(map(carbon.message, live = carbon.isRawLive(mamCarrier = false)))
         val delaylessForwarded = carbon.copy(sentAtEpochMs = null, sentTimeSource = null)

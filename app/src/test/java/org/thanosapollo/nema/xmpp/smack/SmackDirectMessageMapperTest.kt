@@ -1002,8 +1002,10 @@ class SmackDirectMessageMapperTest {
             forwardedDelay: DelayInformation? = null,
         ) = StanzaBuilder.buildMessage()
             .from(JidCreate.from(from))
+            .to(JidCreate.entityFullFrom("account@example.org/device"))
             .addExtension(CarbonExtension(direction, Forwarded(forwarded, forwardedDelay)))
             .build()
+            .classifyCarrier("account@example.org", "account@example.org/device")
 
         assertEquals(
             sent,
@@ -1062,7 +1064,10 @@ class SmackDirectMessageMapperTest {
             .addExtension(CarbonExtension(CarbonExtension.Direction.sent, Forwarded(sent)))
             .addExtension(CarbonExtension(CarbonExtension.Direction.received, Forwarded(received)))
             .build()
-        assertNull(dual.toTrustedCarbonMessage("account@example.org"))
+        assertNull(
+            dual.classifyCarrier("account@example.org", "account@example.org/device")
+                .toTrustedCarbonMessage("account@example.org"),
+        )
     }
 
     @Test
@@ -1141,10 +1146,13 @@ class SmackDirectMessageMapperTest {
             forwarded: Message,
         ) = StanzaBuilder.buildMessage()
             .from(JidCreate.from(from))
+            .to(JidCreate.entityFullFrom("account@example.org/device"))
             .addExtension(CarbonExtension(direction, Forwarded(forwarded)))
             .build()
+            .classifyCarrier("account@example.org", "account@example.org/device")
 
-        val mappedDirect = direct.classifyOutgoingFailure("account@example.org")
+        val mappedDirect = direct.classifyCarrier("account@example.org", "account@example.org/device")
+            .classifyOutgoingFailure("account@example.org")
         val mappedCarbon = wrapper(
             "account@example.org",
             CarbonExtension.Direction.received,
@@ -1178,6 +1186,7 @@ class SmackDirectMessageMapperTest {
                 .ofType(Message.Type.error)
                 .setError(StanzaError.getBuilder(StanzaError.Condition.forbidden).build())
                 .build()
+                .classifyCarrier("account@example.org", "account@example.org/device")
                 .classifyOutgoingFailure("account@example.org")
         assertTrue(wrongRoute.consumed)
         assertNull(wrongRoute.failure)
