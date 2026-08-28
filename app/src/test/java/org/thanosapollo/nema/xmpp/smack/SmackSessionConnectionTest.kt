@@ -28,6 +28,7 @@ import org.jivesoftware.smackx.forward.packet.Forwarded
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -233,6 +234,15 @@ class SmackSessionConnectionTest {
         assertFalse(asyncListeners.containsKey(messageListener))
         assertTrue((connection.privateField("stanzaAcknowledgedListeners") as Collection<*>).isEmpty())
         assertTrue((connection.privateField("stanzaDroppedListeners") as Collection<*>).isEmpty())
+    }
+
+    @Test
+    fun `room lifecycle routes only through room view handoff`() {
+        val session = session(RecordingXmppConnection())
+
+        assertTrue(session.privateField("roomViewHandoff") is RoomViewHandoff<*, *, *, *>)
+        assertThrows(NoSuchFieldException::class.java) { session.privateField("watchedRooms") }
+        assertThrows(NoSuchFieldException::class.java) { session.privateField("roomStatusHandoff") }
     }
 
     @Test

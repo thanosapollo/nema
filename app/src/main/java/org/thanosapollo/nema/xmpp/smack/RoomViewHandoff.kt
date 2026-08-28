@@ -1,5 +1,7 @@
 package org.thanosapollo.nema.xmpp.smack
 
+import kotlinx.coroutines.CancellationException
+
 internal class RoomViewHandoff<S, P, U, V>(
     private val entryGate: Any,
     private val registry: RoomStableIdAuthorityRegistry,
@@ -51,9 +53,15 @@ internal class RoomViewHandoff<S, P, U, V>(
                 return@locked false
             }
             previous?.triple?.cleanup()
-            deliver(view)
+            try {
+                deliver(view)
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {}
             true
         }
+
+        fun isActive(): Boolean = synchronized(entryGate) { current() }
 
         private fun install(): RoomListenerTriple<S, P, U>? = RoomListenerTriple.install(
             status = listeners.status({ refresh() }, { revokeCurrent() }),
@@ -108,9 +116,32 @@ internal class RoomViewHandoff<S, P, U, V>(
     ) = Candidate(lease, mucMonitor, joined, listeners, buildView, deliver, stableIds, occupantIds, ownNick)
 
     fun beginAttempt(attempt: org.thanosapollo.nema.session.SessionAttemptIdentity) =
-        reset { registry.begin(attempt) }
+        beginAttemptIf(attempt) { true }
 
-    fun retireAll() = reset(registry::retireAll)
+    fun beginAttemptIf(
+        attempt: org.thanosapollo.nema.session.SessionAttemptIdentity,
+        entered: () -> Boolean,
+    ): Boolean {
+        val retired = synchronized(entryGate) {
+            if (!entered()) return@synchronized null
+            registry.begin(attempt)
+            active.values.toList().also { active.clear() }
+        } ?: return false
+        retired.forEach { it.triple.cleanup() }
+        return true
+    }
+
+    fun retireAll() = retireAllIf { true }
+
+    fun retireAllIf(entered: () -> Boolean): Boolean {
+        val retired = synchronized(entryGate) {
+            if (!entered()) return@synchronized null
+            registry.retireAll()
+            active.values.toList().also { active.clear() }
+        } ?: return false
+        retired.forEach { it.triple.cleanup() }
+        return true
+    }
 
     private fun reset(resetRegistry: () -> Unit) {
         val retired = synchronized(entryGate) {

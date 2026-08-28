@@ -26,9 +26,19 @@ class RoomViewHandoffTest {
         assertThrows(IllegalStateException::class.java) { viewFailure.newCandidate("bad").activate() }
         assertFalse(viewFailure.registry.publish(viewFailure.lease, true, true))
         val eventFailure = Harness(fail = RoomViewHandoffFixture.Operation.EVENT)
-        assertThrows(IllegalStateException::class.java) { eventFailure.newCandidate("accepted").activate() }
+        assertTrue(eventFailure.newCandidate("accepted").activate())
         assertNotNull(eventFailure.registry.snapshot(eventFailure.attempt, ROOM))
         eventFailure.handoff.retireAll(); assertTrue(eventFailure.live.isEmpty())
+        val cancelled = Harness(cancelEvent = true); val candidate = cancelled.newCandidate("accepted")
+        assertThrows(kotlinx.coroutines.CancellationException::class.java) { candidate.activate() }
+        assertTrue(candidate.isActive()); cancelled.handoff.retireAll()
+    }
+    @Test fun `retirement enters once and hides authority before cleanup`() {
+        val h = Harness(); h.newCandidate("one").activate(); val old = h.tokens.toList()
+        assertTrue(h.handoff.retireAllIf { assertTrue(Thread.holdsLock(h.fixture.entryLock)); true })
+        assertNull(h.registry.snapshot(h.attempt, ROOM)); assertTrue(h.live.isEmpty())
+        val events = h.log.count { it.startsWith("event") }; old.forEach { it.refresh() }
+        assertEquals(events, h.log.count { it.startsWith("event") })
     }
     @Test fun `callbacks fence stale lease including non SID and revoke exact current`() {
         val h = Harness()
@@ -65,7 +75,7 @@ class RoomViewHandoffTest {
         assertFalse(activation.isAlive); assertFalse(callback.isAlive)
         assertEquals(2, h.log.count { it.startsWith("event") })
     }
-    private class Harness(fail: RoomViewHandoffFixture.Operation? = null, val viewFailure: Boolean = false, block: Set<RoomViewHandoffFixture.Gate> = emptySet()) {
+    private class Harness(fail: RoomViewHandoffFixture.Operation? = null, val viewFailure: Boolean = false, val cancelEvent: Boolean = false, block: Set<RoomViewHandoffFixture.Gate> = emptySet()) {
         val fixture = RoomViewHandoffFixture(failAt = fail, blockAt = block); val log = fixture.log
         val attempt = attempt(1); val registry = RoomStableIdAuthorityRegistry().apply { begin(attempt) }
         val handoff = RoomViewHandoff<Token, Token, Token, String>(fixture.entryLock, registry)
@@ -79,7 +89,7 @@ class RoomViewHandoffTest {
                 status = { refresh, revoke -> token("status", refresh, revoke) }, participant = { token("participant", it) }, subject = { token("subject", it) },
                 addStatus = ::add, addParticipant = ::add, addSubject = ::add,
                 removeStatus = ::remove, removeParticipant = ::remove, removeSubject = ::remove)
-            return handoff.candidate(lease, muc, { true }, ls, { log += "view:$name"; if (viewFailure) error("view"); name }, { mucHeldDuringDelivery = mucHeldDuringDelivery || Thread.holdsLock(muc); fixture.entryProbe(); fixture.reach(RoomViewHandoffFixture.Gate.ACTIVATION); fixture.effect(RoomViewHandoffFixture.Operation.EVENT, it) }, stable, true, name)
+            return handoff.candidate(lease, muc, { true }, ls, { log += "view:$name"; if (viewFailure) error("view"); name }, { mucHeldDuringDelivery = mucHeldDuringDelivery || Thread.holdsLock(muc); fixture.entryProbe(); fixture.reach(RoomViewHandoffFixture.Gate.ACTIVATION); if (cancelEvent) throw kotlinx.coroutines.CancellationException("event"); fixture.effect(RoomViewHandoffFixture.Operation.EVENT, it) }, stable, true, name)
         }
         fun add(token: Token): Boolean { fixture.effect(RoomViewHandoffFixture.Operation.ADD, token.name); return live.add(token) }
         fun remove(token: Token) { fixture.entryProbe(); fixture.effect(RoomViewHandoffFixture.Operation.REMOVE, token.name); live.remove(token) }
