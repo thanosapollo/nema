@@ -23,6 +23,7 @@ import org.jivesoftware.smackx.blocking.BlockingCommandManager
 import org.jivesoftware.smackx.blocking.element.BlockContactsIQ
 import org.jivesoftware.smackx.blocking.element.BlockListIQ
 import org.jivesoftware.smackx.blocking.element.UnblockContactsIQ
+import org.jivesoftware.smackx.carbons.packet.Carbon
 import org.jivesoftware.smackx.carbons.packet.CarbonExtension
 import org.jivesoftware.smackx.disco.packet.DiscoverInfo
 import org.jivesoftware.smackx.forward.packet.Forwarded
@@ -44,6 +45,7 @@ import org.thanosapollo.nema.session.SessionEvent
 import org.thanosapollo.nema.session.SessionIdentity
 import org.thanosapollo.nema.xmpp.chatstates.ChatActivity
 import org.thanosapollo.nema.xmpp.transport.AccountId
+import org.thanosapollo.nema.xmpp.transport.CarbonCapabilityState
 import org.thanosapollo.nema.xmpp.transport.ConnectionGeneration
 import org.thanosapollo.nema.xmpp.transport.SendNotAttemptedException
 import org.jxmpp.jid.impl.JidCreate
@@ -51,6 +53,60 @@ import org.jxmpp.jid.impl.JidCreate
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class SmackSessionConnectionTest {
+    @Test
+    fun `capability discovery never enables carbons`() = runBlocking {
+        SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
+        val transport = RecordingXmppConnection(carbonsSupported = true)
+        val session = session(transport)
+        val attempt = attempt(1)
+        session.updateAttempt(attempt)
+        session.setPrivateField("carbonCapability", attempt to CarbonCapabilityState.ENABLED)
+
+        val capabilities = session.discoverCapabilities(attempt.accountId, attempt.generation)
+
+        assertEquals(0, transport.carbonEnableCalls)
+        assertEquals(CarbonCapabilityState.ENABLED, capabilities.carbons)
+    }
+
+    @Test
+    fun `carbon enable attempt records each terminal state`() {
+        var enables = 0
+        fun resolve(supported: () -> Boolean, enabled: () -> Boolean) =
+            resolveCarbonCapability(supported, enabled) { enables++ }
+
+        assertEquals(CarbonCapabilityState.UNSUPPORTED, resolve({ false }, { false }))
+        assertEquals(CarbonCapabilityState.DISCOVERY_FAILED, resolve({ error("disco") }, { false }))
+        assertEquals(CarbonCapabilityState.ENABLE_FAILED, resolve({ true }, { false }))
+        assertEquals(CarbonCapabilityState.ENABLED, resolve({ true }, { enables == 2 }))
+        assertEquals(2, enables)
+        assertThrows(kotlinx.coroutines.CancellationException::class.java) {
+            resolveCarbonCapability({ throw kotlinx.coroutines.CancellationException("disco") }, { false }) {}
+        }
+        assertThrows(kotlinx.coroutines.CancellationException::class.java) {
+            resolveCarbonCapability({ true }, { throw kotlinx.coroutines.CancellationException("enabled") }) {}
+        }
+        assertThrows(kotlinx.coroutines.CancellationException::class.java) {
+            resolveCarbonCapability({ true }, { false }) { throw kotlinx.coroutines.CancellationException("enable") }
+        }
+    }
+
+    @Test
+    fun `new attempt cannot read the previous carbon state`() = runBlocking {
+        SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
+        val session = session(RecordingXmppConnection())
+        val previous = attempt(1)
+        val replacement = attempt(2)
+        session.updateAttempt(previous)
+        session.setPrivateField("carbonCapability", previous to CarbonCapabilityState.ENABLED)
+
+        session.updateAttempt(replacement)
+
+        val failure = runCatching {
+            session.discoverCapabilities(replacement.accountId, replacement.generation)
+        }.exceptionOrNull()
+        assertTrue(failure is SendNotAttemptedException)
+    }
+
     @Test
     fun `sent carbon gone reaches its peer without sending a stanza`() {
         SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
@@ -412,6 +468,13 @@ class SmackSessionConnectionTest {
             field.get(this)
         }
 
+    private fun Any.setPrivateField(name: String, value: Any?) {
+        javaClass.getDeclaredField(name).let { field ->
+            field.isAccessible = true
+            field.set(this, value)
+        }
+    }
+
     private fun session(
         connection: RecordingXmppConnection,
         event: (SessionEvent) -> Unit = {},
@@ -437,6 +500,7 @@ class SmackSessionConnectionTest {
 
     private class RecordingXmppConnection(
         private val blockCommand: Boolean = false,
+        private val carbonsSupported: Boolean = false,
     ) : XMPPTCPConnection(
         XMPPTCPConnectionConfiguration.builder()
             .setXmppDomain(JidCreate.domainBareFrom("example.org"))
@@ -447,6 +511,7 @@ class SmackSessionConnectionTest {
         val commandWaiting = CountDownLatch(1)
         val releaseCommand = CountDownLatch(1)
         var blockingSupported = true
+        var carbonEnableCalls = 0
         private val blocked = mutableListOf<org.jxmpp.jid.Jid>()
 
         init {
@@ -464,11 +529,16 @@ class SmackSessionConnectionTest {
                     events += "disco"
                     DiscoverInfo.builder(request.stanzaId)
                         .ofType(IQ.Type.result)
-                        .from(xmppServiceDomain)
+                        .from(request.to ?: xmppServiceDomain)
                         .apply {
                             if (blockingSupported) addFeature(BlockingCommandManager.NAMESPACE)
+                            if (carbonsSupported) addFeature(CarbonExtension.NAMESPACE)
                         }
                         .build()
+                }
+                is Carbon.Enable -> {
+                    carbonEnableCalls++
+                    IQ.createResultIQ(request).apply { from = xmppServiceDomain }
                 }
                 is BlockListIQ -> {
                     events += "blocklist"

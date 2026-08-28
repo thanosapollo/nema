@@ -136,6 +136,7 @@ import org.thanosapollo.nema.xmpp.transport.OutgoingMessageEnvelope
 import org.thanosapollo.nema.xmpp.transport.OutgoingReactionEnvelope
 import org.thanosapollo.nema.xmpp.transport.ReactionActor
 import org.thanosapollo.nema.xmpp.transport.SendNotAttemptedException
+import org.thanosapollo.nema.xmpp.transport.CarbonCapabilityState
 import org.thanosapollo.nema.xmpp.transport.SessionCapabilities
 import org.thanosapollo.nema.xmpp.transport.StanzaIdEnvelope
 import org.thanosapollo.nema.xmpp.vcard.RemoteVCardPayload
@@ -206,6 +207,49 @@ internal fun advertiseNemaFeatures(connection: XMPPConnection) {
     }
 }
 
+internal fun resolveCarbonCapability(
+    carbonManager: CarbonManager,
+): CarbonCapabilityState = resolveCarbonCapability(
+    supported = { carbonManager.isSupportedByServer },
+    enabled = { carbonManager.carbonsEnabled },
+    enable = carbonManager::enableCarbons,
+)
+
+internal fun resolveCarbonCapability(
+    supported: () -> Boolean,
+    enabled: () -> Boolean,
+    enable: () -> Unit,
+): CarbonCapabilityState {
+    val isSupported = try {
+        supported()
+    } catch (failure: CancellationException) {
+        throw failure
+    } catch (_: Exception) {
+        return CarbonCapabilityState.DISCOVERY_FAILED
+    }
+    if (!isSupported) return CarbonCapabilityState.UNSUPPORTED
+    val alreadyEnabled = try {
+        enabled()
+    } catch (failure: CancellationException) {
+        throw failure
+    } catch (_: Exception) {
+        return CarbonCapabilityState.ENABLE_FAILED
+    }
+    if (alreadyEnabled) return CarbonCapabilityState.ENABLED
+    return try {
+        enable()
+        if (enabled()) {
+            CarbonCapabilityState.ENABLED
+        } else {
+            CarbonCapabilityState.ENABLE_FAILED
+        }
+    } catch (failure: CancellationException) {
+        throw failure
+    } catch (_: Exception) {
+        CarbonCapabilityState.ENABLE_FAILED
+    }
+}
+
 internal class SmackSessionConnection(
     private val connection: XMPPTCPConnection,
     private val authenticationId: String,
@@ -221,6 +265,7 @@ internal class SmackSessionConnection(
         entryGate, roomStableIdAuthorities,
     )
     private val roomDiscoNames = ConcurrentHashMap<String, String>()
+    private var carbonCapability: Pair<SessionAttemptIdentity, CarbonCapabilityState>? = null
     private val connectionListener = AttemptConnectionListener().also(connection::addConnectionListener)
     private val messageListener = StanzaListener { stanza ->
         if (revoked.get()) return@StanzaListener
@@ -370,10 +415,11 @@ internal class SmackSessionConnection(
     ): SessionCapabilities = runInterruptible(Dispatchers.IO) {
         requireExactAttempt(accountId, generation)
         val attempt = requireNotNull(connectionListener.currentAttempt())
+        val carbons = synchronized(entryGate) {
+            carbonCapability?.takeIf { it.first == attempt }?.second
+        } ?: throw SendNotAttemptedException()
         resolveStableIdGateOnCapabilityFailure(stableIdGate, attempt, ::deliver) {
             val mam = MamManager.getInstanceFor(connection).isSupported
-            val carbonManager = CarbonManager.getInstanceFor(connection)
-            val carbons = enableLiveCarbons(carbonManager)
             val stableIds = ServiceDiscoveryManager.getInstanceFor(connection).supportsFeature(
                 JidCreate.entityBareFrom(expectedBareJid),
                 StableUniqueStanzaIdManager.NAMESPACE,
@@ -383,7 +429,6 @@ internal class SmackSessionConnection(
             SessionCapabilities(
                 mamV2 = mam,
                 carbons = carbons,
-                carbonsEnabled = carbons && carbonManager.carbonsEnabled,
                 stableIds = stableIds,
             )
         }
@@ -957,7 +1002,13 @@ internal class SmackSessionConnection(
                 runCatching { connection.disconnect() }
                 throw SessionFailure(SessionFailureReason.AUTHENTICATION)
             }
-            enableLiveCarbons()
+            val carbons = resolveCarbonCapability(CarbonManager.getInstanceFor(connection))
+            synchronized(entryGate) {
+                if (revoked.get() || connectionListener.currentAttempt() != attempt) {
+                    throw CancellationException("Session attempt replaced")
+                }
+                carbonCapability = attempt to carbons
+            }
             if (isUsable) {
                 connectionListener.connected()
             } else {
@@ -973,18 +1024,6 @@ internal class SmackSessionConnection(
             connectionListener.attemptFailed()
             throw SessionFailure(classifySmackFailure(error), error)
         }
-    }
-
-    private fun enableLiveCarbons() {
-        enableLiveCarbons(CarbonManager.getInstanceFor(connection))
-    }
-
-    private fun enableLiveCarbons(carbonManager: CarbonManager): Boolean {
-        val supported = runCatching { carbonManager.isSupportedByServer }.getOrDefault(false)
-        if (supported && !carbonManager.carbonsEnabled) {
-            runCatching { carbonManager.enableCarbons() }
-        }
-        return supported && carbonManager.carbonsEnabled
     }
 
     private fun ensureNotRevoked() {
@@ -1009,6 +1048,7 @@ internal class SmackSessionConnection(
         fun attemptStarting(attempt: SessionAttemptIdentity) {
             roomViewHandoff.beginAttemptIf(attempt) {
                 if (revoked.get()) return@beginAttemptIf false
+                carbonCapability = null
                 stableIdGate.begin(attempt)
                 this.attempt = attempt
                 lossNotifier.attemptStarting()
@@ -1019,6 +1059,7 @@ internal class SmackSessionConnection(
         fun updateAttempt(attempt: SessionAttemptIdentity) {
             roomViewHandoff.beginAttemptIf(attempt) {
                 if (revoked.get()) return@beginAttemptIf false
+                carbonCapability = null
                 stableIdGate.begin(attempt)
                 this.attempt = attempt
                 true

@@ -36,6 +36,7 @@ import org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope
 import org.thanosapollo.nema.xmpp.transport.ArchivePageRequest
 import org.thanosapollo.nema.xmpp.transport.ConnectionGeneration
 import org.thanosapollo.nema.xmpp.transport.IncomingMessageEnvelope
+import org.thanosapollo.nema.xmpp.transport.CarbonCapabilityState
 import org.thanosapollo.nema.xmpp.transport.SessionCapabilities
 import org.thanosapollo.nema.xmpp.transport.StanzaIdEnvelope
 
@@ -388,8 +389,7 @@ class ArchiveSynchronizerTest {
         )
         private val CAPABILITIES = SessionCapabilities(
             mamV2 = true,
-            carbons = true,
-            carbonsEnabled = true,
+            carbons = CarbonCapabilityState.ENABLED,
             stableIds = true,
         )
     }

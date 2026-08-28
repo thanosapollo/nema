@@ -33,6 +33,7 @@ import org.thanosapollo.nema.xmpp.transport.OutgoingFailureEnvelope
 import org.thanosapollo.nema.xmpp.transport.OutgoingMessageEnvelope
 import org.thanosapollo.nema.xmpp.transport.OutgoingMessageSignal
 import org.thanosapollo.nema.xmpp.transport.SendNotAttemptedException
+import org.thanosapollo.nema.xmpp.transport.CarbonCapabilityState
 import org.thanosapollo.nema.xmpp.transport.SessionCapabilities
 import org.thanosapollo.nema.xmpp.blocking.PeerBlockingState
 import org.thanosapollo.nema.xmpp.blocking.PeerBlockingMutationResult
@@ -146,7 +147,7 @@ interface SessionConnection {
     suspend fun discoverCapabilities(
         accountId: AccountId,
         generation: ConnectionGeneration,
-    ): SessionCapabilities = SessionCapabilities(false, false, false, false)
+    ): SessionCapabilities = SessionCapabilities(false, CarbonCapabilityState.UNSUPPORTED, false)
     suspend fun queryArchive(request: ArchivePageRequest): ArchivePageEnvelope =
         throw UnsupportedOperationException("Archive queries are unsupported")
     // Call-time probes. Do not promote these into unused SessionCapabilities bits.

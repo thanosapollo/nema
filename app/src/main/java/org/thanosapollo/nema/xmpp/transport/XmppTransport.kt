@@ -271,10 +271,16 @@ data class StanzaIdEnvelope(
 // WIP-FOUNDATION: roster, presence, encryption, and calls get no fields until a writer exists.
 data class SessionCapabilities(
     val mamV2: Boolean,
-    val carbons: Boolean,
-    val carbonsEnabled: Boolean,
+    val carbons: CarbonCapabilityState,
     val stableIds: Boolean,
 )
+
+enum class CarbonCapabilityState {
+    UNSUPPORTED,
+    ENABLED,
+    ENABLE_FAILED,
+    DISCOVERY_FAILED,
+}
 
 enum class ArchivePageDirection {
     BOOTSTRAP,
