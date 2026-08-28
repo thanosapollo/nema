@@ -1,4 +1,5 @@
 package org.thanosapollo.nema.xmpp.smack
+import java.util.concurrent.atomic.AtomicReference
 import org.thanosapollo.nema.session.SessionAttemptIdentity
 import org.thanosapollo.nema.session.SessionEvent
 import org.thanosapollo.nema.storage.CompleteRosterSnapshot
@@ -22,18 +23,23 @@ sealed interface RosterLoadResult {
     data class Loaded(val snapshot: CompleteRosterSnapshot) : RosterLoadResult
     data object Unavailable : RosterLoadResult
 }
+internal interface RosterAttemptHandoff {
+    fun load(admitted: () -> Boolean = { true }): RosterLoadResult
+    fun retire()
+}
 class RosterHandoff(
     private val source: RosterSource,
     private val attempt: SessionAttemptIdentity,
     private val emit: (SessionEvent) -> Unit,
-) {
+) : RosterAttemptHandoff {
     private val lock = Any()
     private var active: Candidate? = null
     private var lifecycle = 0L
     @Throws(InterruptedException::class)
-    fun load(): RosterLoadResult {
+    override fun load(admitted: () -> Boolean): RosterLoadResult {
         retire()
         val loadId = synchronized(lock) { lifecycle }
+        if (!admitted()) return RosterLoadResult.Unavailable
         try {
             if (!source.reloadAndWait()) return RosterLoadResult.Unavailable
         } catch (failure: InterruptedException) {
@@ -70,7 +76,7 @@ class RosterHandoff(
         }
     }
 
-    fun retire() {
+    override fun retire() {
         val retired = synchronized(lock) {
             lifecycle++
             active?.also { it.live = false }
@@ -107,5 +113,60 @@ class RosterHandoff(
             if (!live || active !== this) return@synchronized
             if (installing) pending = true else emitCurrent()
         }
+    }
+}
+
+internal class RosterConnectionLifecycle(private val entryGate: Any) {
+    private data class Active(
+        val attempt: SessionAttemptIdentity,
+        val handoff: RosterAttemptHandoff,
+    )
+
+    private val active = AtomicReference<Active?>()
+
+    fun load(
+        attempt: SessionAttemptIdentity,
+        handoff: RosterAttemptHandoff,
+        admitted: () -> Boolean,
+    ): Boolean {
+        var installed = false
+        val previous = synchronized(entryGate) {
+            if (!admitted()) null else active.getAndSet(Active(attempt, handoff)).also { installed = true }
+        }
+        if (!installed) {
+            handoff.retire()
+            return false
+        }
+        previous?.handoff?.retire()
+        try {
+            handoff.load {
+                active.get().let { it?.attempt == attempt && it.handoff === handoff } && admitted()
+            }
+        } catch (failure: Throwable) {
+            retire(attempt, handoff)
+            throw failure
+        }
+        val current = synchronized(entryGate) {
+            active.get().let { it?.attempt == attempt && it.handoff === handoff } && admitted()
+        }
+        if (!current) retire(attempt, handoff)
+        return current
+    }
+
+    fun retire(attempt: SessionAttemptIdentity, handoff: RosterAttemptHandoff? = null) {
+        var retired = handoff
+        while (true) {
+            val current = active.get()
+            if (current?.attempt != attempt || handoff != null && current.handoff !== handoff) break
+            if (active.compareAndSet(current, null)) {
+                retired = current.handoff
+                break
+            }
+        }
+        retired?.retire()
+    }
+
+    fun retireCurrent() {
+        active.getAndSet(null)?.handoff?.retire()
     }
 }

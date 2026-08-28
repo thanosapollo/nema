@@ -25,6 +25,7 @@ import org.jivesoftware.smack.packet.StandardExtensionElement
 import org.jivesoftware.smack.packet.StanzaError
 import org.jivesoftware.smack.packet.StanzaBuilder
 import org.jivesoftware.smack.parsing.ParsingExceptionCallback
+import org.jivesoftware.smack.roster.Roster
 import org.jivesoftware.smack.sasl.SASLErrorException
 import org.jivesoftware.smack.tcp.XMPPTCPConnection
 import org.jivesoftware.smack.tcp.XMPPTCPConnectionConfiguration
@@ -255,8 +256,12 @@ internal class SmackSessionConnection(
     private val authenticationId: String,
     private val expectedBareJid: String,
     private val event: (SessionEvent) -> Unit,
+    private val rosterHandoffFactory: (SessionAttemptIdentity) -> RosterAttemptHandoff = { attempt ->
+        RosterHandoff(SmackRosterSource(Roster.getInstanceFor(connection)), attempt, event)
+    },
 ) : SessionConnection {
     private val entryGate = Any()
+    private val rosterLifecycle = RosterConnectionLifecycle(entryGate)
     private val revoked = AtomicBoolean(false)
     private val disconnectStarted = AtomicBoolean(false)
     private val stableIdGate = StableIdDiscoveryGate()
@@ -333,12 +338,12 @@ internal class SmackSessionConnection(
         )
 
     override fun revoke() {
+        if (!revoked.compareAndSet(false, true)) return
+        rosterLifecycle.retireCurrent()
         roomViewHandoff.retireAllIf {
-            if (revoked.compareAndSet(false, true)) {
-                stableIdGate.retireAll()
-                connectionListener.localDisconnect()
-                true
-            } else false
+            stableIdGate.retireAll()
+            connectionListener.localDisconnect()
+            true
         }
     }
 
@@ -1009,19 +1014,23 @@ internal class SmackSessionConnection(
                 }
                 carbonCapability = attempt to carbons
             }
+            if (!rosterLifecycle.load(attempt, rosterHandoffFactory(attempt)) {
+                    !revoked.get() && connectionListener.currentAttempt() == attempt
+                }
+            ) throw CancellationException("Session attempt replaced")
             if (isUsable) {
                 connectionListener.connected()
             } else {
-                connectionListener.attemptFailed()
+                connectionListener.attemptFailed(attempt)
             }
         } catch (failure: CancellationException) {
-            connectionListener.attemptFailed()
+            connectionListener.attemptFailed(attempt)
             throw failure
         } catch (failure: SessionFailure) {
-            connectionListener.attemptFailed()
+            connectionListener.attemptFailed(attempt)
             throw failure
         } catch (error: Exception) {
-            connectionListener.attemptFailed()
+            connectionListener.attemptFailed(attempt)
             throw SessionFailure(classifySmackFailure(error), error)
         }
     }
@@ -1038,14 +1047,17 @@ internal class SmackSessionConnection(
         }
 
         override fun connectionClosed() {
+            rosterLifecycle.retireCurrent()
             lossNotifier.remoteClosed(SessionFailureReason.NETWORK)
         }
 
         override fun connectionClosedOnError(error: Exception) {
+            rosterLifecycle.retireCurrent()
             lossNotifier.remoteClosed(classifySmackFailure(error))
         }
 
         fun attemptStarting(attempt: SessionAttemptIdentity) {
+            rosterLifecycle.retireCurrent()
             roomViewHandoff.beginAttemptIf(attempt) {
                 if (revoked.get()) return@beginAttemptIf false
                 carbonCapability = null
@@ -1057,6 +1069,7 @@ internal class SmackSessionConnection(
         }
 
         fun updateAttempt(attempt: SessionAttemptIdentity) {
+            rosterLifecycle.retireCurrent()
             roomViewHandoff.beginAttemptIf(attempt) {
                 if (revoked.get()) return@beginAttemptIf false
                 carbonCapability = null
@@ -1068,11 +1081,17 @@ internal class SmackSessionConnection(
 
         fun currentAttempt(): SessionAttemptIdentity? = attempt
 
-        fun attemptFailed() = lossNotifier.attemptFailed()
+        fun attemptFailed(attempt: SessionAttemptIdentity) {
+            rosterLifecycle.retire(attempt)
+            lossNotifier.attemptFailed()
+        }
 
         fun connected() = lossNotifier.connected()
 
-        fun localDisconnect() = lossNotifier.localDisconnect()
+        fun localDisconnect() {
+            rosterLifecycle.retireCurrent()
+            lossNotifier.localDisconnect()
+        }
     }
 
 }

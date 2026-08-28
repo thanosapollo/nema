@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
 import org.jivesoftware.smack.AbstractXMPPConnection
+import org.jivesoftware.smack.ConnectionListener
 import org.jivesoftware.smack.packet.IQ
 import org.jivesoftware.smack.packet.Message
 import org.jivesoftware.smack.packet.Stanza
@@ -53,6 +54,23 @@ import org.jxmpp.jid.impl.JidCreate
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class SmackSessionConnectionTest {
+    @Test
+    fun `connection lifecycle routes every terminal path to roster retirement`() {
+        listOf<(SmackSessionConnection) -> Unit>(
+            { it.updateAttempt(attempt(2)) },
+            SmackSessionConnection::revoke,
+            { (it.privateField("connectionListener") as ConnectionListener).connectionClosed() },
+            { (it.privateField("connectionListener") as ConnectionListener).connectionClosedOnError(IOException()) },
+        ).forEach { action ->
+            val handoff = RecordingRosterHandoff()
+            val session = session(RecordingXmppConnection(), rosterHandoffFactory = { handoff })
+            val lifecycle = session.privateField("rosterLifecycle") as RosterConnectionLifecycle
+            lifecycle.load(attempt(1), handoff) { true }
+            action(session)
+            assertTrue(handoff.retired)
+        }
+    }
+
     @Test
     fun `capability discovery never enables carbons`() = runBlocking {
         SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
@@ -478,12 +496,20 @@ class SmackSessionConnectionTest {
     private fun session(
         connection: RecordingXmppConnection,
         event: (SessionEvent) -> Unit = {},
+        rosterHandoffFactory: (SessionAttemptIdentity) -> RosterAttemptHandoff = { RecordingRosterHandoff() },
     ) = SmackSessionConnection(
         connection = connection,
         authenticationId = "account",
         expectedBareJid = ACCOUNT_BARE_JID,
         event = event,
+        rosterHandoffFactory = rosterHandoffFactory,
     )
+
+    private class RecordingRosterHandoff : RosterAttemptHandoff {
+        var retired = false
+        override fun load(admitted: () -> Boolean) = RosterLoadResult.Unavailable
+        override fun retire() { retired = true }
+    }
 
     private fun attempt(generation: Long) = SessionAttemptIdentity(
         ACCOUNT_ID,
