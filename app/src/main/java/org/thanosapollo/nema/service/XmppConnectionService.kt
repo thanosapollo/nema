@@ -143,6 +143,7 @@ class SessionRuntime(
     private val pendingActivation = PendingActivationAuthority()
     private lateinit var controller: ActiveSessionController
     private val liveMessages = LiveMessageAdapter(messages)
+    private val rosters = messages.rosterStore
     private val outbox = OutboxDispatcher(messages) { message, entered -> controller.send(message, entered) }
     private val archive = ArchiveSynchronizer(
         store = messages,
@@ -270,7 +271,8 @@ class SessionRuntime(
                         rooms.apply(event.attempt.accountId.value, event.view)
                         persistRoomDisplayName(event.attempt.accountId.value, event.view)
                     }
-                    is org.thanosapollo.nema.session.SessionEvent.RosterSnapshot -> Unit
+                    is org.thanosapollo.nema.session.SessionEvent.RosterSnapshot ->
+                        rosters.reconcile(event.snapshot)
                     is org.thanosapollo.nema.session.SessionEvent.ConnectionLost -> Unit
                 }
             },

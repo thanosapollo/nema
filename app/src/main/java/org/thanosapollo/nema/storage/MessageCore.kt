@@ -1899,6 +1899,8 @@ class MessageStore private constructor(
     private val clock: () -> Long,
     private val threadIds: ThreadIdFactory,
 ) {
+    internal val rosterStore = RosterStore(database)
+
     constructor(database: NemaDatabase) : this(database, {}, System::currentTimeMillis, UuidThreadIdFactory)
 
     internal constructor(database: NemaDatabase, clock: () -> Long) :

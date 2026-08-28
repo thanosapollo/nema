@@ -45,6 +45,7 @@ import org.thanosapollo.nema.storage.ArchiveCursorKey
 import org.thanosapollo.nema.storage.ArchiveDirection
 import org.thanosapollo.nema.storage.ArchivePage
 import org.thanosapollo.nema.storage.ArchivedIncomingMessage
+import org.thanosapollo.nema.storage.CompleteRosterSnapshot
 import org.thanosapollo.nema.storage.DirectReactionTarget
 import org.thanosapollo.nema.storage.IncomingMessage
 import org.thanosapollo.nema.storage.IdentityAliasKind
@@ -57,6 +58,8 @@ import org.thanosapollo.nema.storage.OutboundIntent
 import org.thanosapollo.nema.storage.OutboxStatus
 import org.thanosapollo.nema.storage.PeerIdentityStore
 import org.thanosapollo.nema.storage.ReconciliationRepairStatus
+import org.thanosapollo.nema.storage.RosterMember
+import org.thanosapollo.nema.storage.RosterStore
 import org.thanosapollo.nema.storage.TrustedIdentityAlias
 import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmark
@@ -419,6 +422,61 @@ class SessionRuntimeTest {
         assertEquals(OutboxStatus.FAILED, store.outbox(active.id.value, intent.operationId)?.status)
         assertEquals("remote-server-timeout", store.outbox(active.id.value, intent.operationId)?.failureReason)
         assertEquals(count, store.messages(active.id.value).size)
+    }
+
+    @Test
+    fun `roster snapshots persist only for the current account attempt`() = runTest {
+        val first = connectedRuntime(backgroundScope, "first-roster")
+        val staleAttempt = first.connection.attemptIdentity
+        val firstSnapshot = CompleteRosterSnapshot(
+            first.account.id.value,
+            listOf(RosterMember("first-peer@example.org", "First")),
+        )
+
+        first.connection.emitRoster(firstSnapshot)
+        first.connection.emitRoster(firstSnapshot)
+        assertEquals(
+            listOf("first-peer@example.org"),
+            RosterStore(database).observe(first.account.id.value).first().map { it.jid },
+        )
+
+        val second = switchAccount(first, "second-roster")
+        first.connection.emitRoster(
+            CompleteRosterSnapshot(first.account.id.value, emptyList()),
+            staleAttempt,
+        )
+        second.connection.emitRoster(
+            CompleteRosterSnapshot(
+                second.account.id.value,
+                listOf(RosterMember("second-peer@example.org", null)),
+            ),
+        )
+
+        assertEquals(
+            listOf("first-peer@example.org"),
+            RosterStore(database).observe(first.account.id.value).first().map { it.jid },
+        )
+        assertEquals(
+            listOf("second-peer@example.org"),
+            RosterStore(database).observe(second.account.id.value).first().map { it.jid },
+        )
+    }
+
+    @Test
+    fun `roster storage failure revokes the connected session`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "failed-roster")
+        val attempt = fixture.connection.attemptIdentity
+        database.close()
+
+        fixture.connection.emitRoster(CompleteRosterSnapshot(fixture.account.id.value, emptyList()))
+        runCurrent()
+
+        assertEquals(
+            ConnectionState.Failed(fixture.account.id, attempt.generation, SessionFailureReason.LOCAL_STORAGE),
+            fixture.runtime.state.value,
+        )
+        assertFalse(fixture.connection.isUsable)
+        assertEquals(1, fixture.connection.disconnectCalls)
     }
 
     @Test
@@ -1585,6 +1643,13 @@ class SessionRuntimeTest {
                     OutgoingFailureEnvelope(operationId, peer, "remote-server-timeout"),
                 ),
             )
+        }
+
+        fun emitRoster(
+            snapshot: CompleteRosterSnapshot,
+            attempt: SessionAttemptIdentity = attemptIdentity,
+        ) {
+            event(SessionEvent.RosterSnapshot(attempt, snapshot))
         }
 
         fun emitLoss(reason: SessionFailureReason) {
