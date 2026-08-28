@@ -69,6 +69,28 @@ class AppearanceRepository(
 
     fun stored(scope: AppearanceScope): AppearanceSpec? = read(scope)
 
+    fun appPaletteId(): String = PaletteCatalog.resolve(
+        preferences.getString(APP_PALETTE_ID, null),
+    ).id
+
+    suspend fun saveAppPaletteId(id: String): Boolean = writes.withLock {
+        withContext(ioDispatcher) {
+            val resolvedId = PaletteCatalog.resolve(id).id
+            val previousId = preferences.getString(APP_PALETTE_ID, null)
+            val editor = preferences.edit()
+            editor.putString(APP_PALETTE_ID, resolvedId)
+            val success = editor.commit()
+            if (success) {
+                mutableRevision.update { it + 1 }
+            } else {
+                val rollback = preferences.edit()
+                if (previousId == null) rollback.remove(APP_PALETTE_ID) else rollback.putString(APP_PALETTE_ID, previousId)
+                rollback.commit()
+            }
+            success
+        }
+    }
+
     fun resolve(accountId: String?, canonicalBarePeer: String?): AppearanceSpec {
         val app = read(AppearanceScope.App) ?: AppearanceSpec.DEFAULT
         val account = accountId?.let { read(AppearanceScope.Account(it)) }
@@ -223,6 +245,7 @@ class AppearanceRepository(
 
     companion object {
         private const val PREFERENCES = "appearance"
+        private const val APP_PALETTE_ID = "appearance.app.palette-id"
         private const val NEUTRAL = "neutral"
         private const val CUSTOM = "custom"
 

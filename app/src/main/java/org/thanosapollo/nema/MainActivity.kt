@@ -52,6 +52,7 @@ import org.thanosapollo.nema.ui.SessionBottomBar
 import org.thanosapollo.nema.ui.chat.DirectChatContent
 import org.thanosapollo.nema.ui.chat.canReact
 import org.thanosapollo.nema.ui.showLoginSessionChrome
+import org.thanosapollo.nema.ui.theme.AppPaletteAuthority
 import org.thanosapollo.nema.ui.theme.AppearanceScope
 import org.thanosapollo.nema.ui.theme.AppearanceSpec
 import org.thanosapollo.nema.ui.theme.NemaTheme
@@ -75,10 +76,16 @@ class MainActivity : ComponentActivity() {
             processToken = processToken,
         )
         setContent {
-            AccountConnectionScreen(
-                restoreChatRouteOnStart = restoreChatRoute,
-                activityResumed = activityResumed.value,
-            )
+            val themeAuthority = remember {
+                AppPaletteAuthority((application as NemaApplication).appearanceRepository)
+            }
+            NemaTheme(themeAuthority.palette) {
+                AccountConnectionScreen(
+                    restoreChatRouteOnStart = restoreChatRoute,
+                    activityResumed = activityResumed.value,
+                    themeAuthority = themeAuthority,
+                )
+            }
         }
     }
 
@@ -216,7 +223,11 @@ internal fun rememberPrimaryDestination(processToken: String): MutableState<Prim
 }
 
 @Composable
-private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean, activityResumed: Boolean) {
+private fun AccountConnectionScreen(
+    restoreChatRouteOnStart: Boolean,
+    activityResumed: Boolean,
+    themeAuthority: AppPaletteAuthority,
+) {
     val context = LocalContext.current
     val application = context.applicationContext as NemaApplication
     val scope = rememberCoroutineScope()
@@ -309,9 +320,8 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean, activityRe
                 )
             }
         }
-        val shellAppearance = AppearanceSpec.DEFAULT
-        NemaTheme(shellAppearance) {
-            Scaffold(
+        val shellAppearance = AppearanceSpec(themeMode = themeAuthority.palette.mode)
+        Scaffold(
                 contentWindowInsets = WindowInsets(0, 0, 0, 0),
                 bottomBar = {
                     if (destination != PrimaryDestination.HOME) {
@@ -483,7 +493,6 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean, activityRe
                     }
                 }
             }
-        }
         return
     }
     var bareJid by remember { mutableStateOf("") }
@@ -570,7 +579,6 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean, activityRe
         networkPort = form.networkPort
     }
 
-    NemaTheme(AppearanceSpec.DEFAULT) {
     LoginFormContent(
         bareJid = bareJid,
         onBareJidChange = { bareJid = it },
@@ -650,5 +658,4 @@ private fun AccountConnectionScreen(restoreChatRouteOnStart: Boolean, activityRe
             )
         },
     )
-    }
 }

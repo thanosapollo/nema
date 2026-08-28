@@ -44,7 +44,25 @@ fun NemaTheme(
     content: @Composable () -> Unit,
 ) {
     val dark = appearance.isDark(isSystemInDarkTheme())
-    val colors = semanticPalette(appearance, dark)
+    NemaThemeContent(appearance, semanticPalette(appearance, dark), dark, content)
+}
+
+@Composable
+fun NemaTheme(
+    palette: PaletteDefinition,
+    content: @Composable () -> Unit,
+) {
+    val appearance = AppearanceSpec(themeMode = palette.mode)
+    NemaThemeContent(appearance, palette.colors, palette.mode == ThemeMode.DARK, content)
+}
+
+@Composable
+private fun NemaThemeContent(
+    appearance: AppearanceSpec,
+    colors: SemanticPalette,
+    dark: Boolean,
+    content: @Composable () -> Unit,
+) {
     val parentDensity = LocalDensity.current
     val scaledDensity = remember(parentDensity, appearance.textScale, appearance.uiScale) {
         val spec = appearance.sanitized()
