@@ -106,6 +106,7 @@ class CarbonMessageMappingTest {
             "urn:xmpp:delay" to listOf("delay"),
             "urn:xmpp:occupant-id:0" to listOf("occupant-id"),
             "urn:xmpp:message-correct:0" to listOf("replace"),
+            "urn:xmpp:mam:tmp" to listOf("archived"),
             "jabber:x:oob" to listOf("x"),
             "eu.siacs.conversations.axolotl" to listOf("encrypted"),
             "urn:xmpp:omemo:1" to listOf("encrypted"),
@@ -124,6 +125,19 @@ class CarbonMessageMappingTest {
                 inner("peer@example.org/phone", "$own/device", extension = extension("wrong", namespace)),
             ))
         }
+    }
+
+    @Test
+    fun `ejabberd archived metadata does not suppress a body carbon`() {
+        val message = StanzaBuilder.buildMessage("ejabberd-carbon")
+            .from(JidCreate.entityFullFrom("peer@example.org/phone"))
+            .to(JidCreate.entityFullFrom("$own/device"))
+            .ofType(Message.Type.chat)
+            .setBody("body")
+            .addExtension(extension("archived", "urn:xmpp:mam:tmp"))
+            .build()
+
+        assertEquals("body", requireNotNull(mapped(CarbonExtension.Direction.received, message)).message.body)
     }
 
     @Test

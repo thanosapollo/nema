@@ -1702,6 +1702,7 @@ private fun isCarbonPayload(extension: org.jivesoftware.smack.packet.ExtensionEl
         "urn:xmpp:fallback:0" -> setOf("fallback")
         "urn:xmpp:hints" -> setOf("store", "no-store", "no-permanent-store", "no-copy")
         DelayInformation.NAMESPACE -> setOf("delay")
+        "urn:xmpp:mam:tmp" -> setOf("archived")
         OCCUPANT_ID_NAMESPACE -> setOf("occupant-id")
         MessageCorrectExtension.NAMESPACE -> setOf("replace")
         "jabber:x:oob", "jabber:x:encrypted" -> setOf("x")
