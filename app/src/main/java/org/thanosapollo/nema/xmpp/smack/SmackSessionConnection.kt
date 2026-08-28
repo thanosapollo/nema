@@ -1685,7 +1685,9 @@ internal fun MessageCarrier.toTrustedCarbonMessage(
 }
 
 private fun Message.hasCarbonPayload(): Boolean {
-    val payloads = extensions.filterNot { it.elementName == "body" && it.namespace == "jabber:client" }
+    val payloads = extensions.filterNot {
+        it.namespace == "jabber:client" && it.elementName in setOf("body", "thread")
+    }
     return !body.isNullOrEmpty() && payloads.all(::isCarbonPayload) ||
         body.isNullOrEmpty() && payloads.isNotEmpty() && payloads.all(::isCarbonPayload)
 }

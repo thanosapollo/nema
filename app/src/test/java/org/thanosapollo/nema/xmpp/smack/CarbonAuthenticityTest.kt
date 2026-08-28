@@ -12,6 +12,11 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.thanosapollo.nema.session.ConnectionAttempt
+import org.thanosapollo.nema.session.LifecycleEpoch
+import org.thanosapollo.nema.session.SessionAttemptIdentity
+import org.thanosapollo.nema.xmpp.transport.AccountId
+import org.thanosapollo.nema.xmpp.transport.ConnectionGeneration
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
@@ -62,6 +67,35 @@ class CarbonAuthenticityTest {
         assertEquals("operation", direct.classifyOutgoingFailure(ownBare).failure?.operationId)
         assertTrue(pseudo is MessageCarrier.Direct)
         assertNull(pseudo.classifyOutgoingFailure(ownBare).failure)
+    }
+
+    @Test
+    fun `parsed Hermes reply Carbon reaches an incoming envelope`() {
+        val response = "✨ New session started!"
+        val inner = "<message xmlns='jabber:client' id='response' from='hermes@example.org/device' " +
+            "to='$ownBare' type='chat'><archived xmlns='urn:xmpp:mam:tmp'/>" +
+            "<stanza-id xmlns='urn:xmpp:sid:0' id='server-id' by='$ownBare'/>" +
+            "<reply xmlns='urn:xmpp:reply:0' id='command' to='$ownBare/sender'/>" +
+            "<active xmlns='http://jabber.org/protocol/chatstates'/><body>$response</body>" +
+            "<thread>487ed403-1bc9-46e3-9eef-67ce7dc9abe6</thread></message>"
+        val wrapper = outer(
+            "<received xmlns='$carbonNamespace'><forwarded xmlns='urn:xmpp:forward:0'>$inner</forwarded></received>",
+            to = boundFull,
+        )
+        val trusted = requireNotNull(
+            parse(wrapper)
+                .classifyCarrier(ownBare, boundFull)
+                .toTrustedCarbonMessage(ownBare),
+        )
+        val envelope = requireNotNull(trusted.message.toIncomingEnvelope(
+            SessionAttemptIdentity(AccountId.require("a"), ConnectionGeneration.require(1),
+                ConnectionAttempt.require(1), LifecycleEpoch.require(1)), ownBare,
+            carbonDirection = trusted.carbonDirection,
+        ))
+
+        assertEquals(response, envelope.body)
+        assertEquals("487ed403-1bc9-46e3-9eef-67ce7dc9abe6", envelope.thread?.id?.value)
+        assertEquals("command", envelope.reply?.id)
     }
 
     private fun parse(xml: String): Message = PacketParserUtils.parseStanza(xml)
