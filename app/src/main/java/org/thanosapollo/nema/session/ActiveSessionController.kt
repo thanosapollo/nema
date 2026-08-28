@@ -126,6 +126,14 @@ sealed interface SessionEvent {
         val attempt: SessionAttemptIdentity,
         val view: org.thanosapollo.nema.xmpp.muc.RoomView,
     ) : SessionEvent
+    data class RosterSnapshot(
+        val attempt: SessionAttemptIdentity,
+        val snapshot: org.thanosapollo.nema.storage.CompleteRosterSnapshot,
+    ) : SessionEvent {
+        init {
+            require(snapshot.accountId == attempt.accountId.value)
+        }
+    }
 }
 
 interface SessionConnection {
@@ -636,6 +644,7 @@ internal class ActiveSessionController(
             is SessionEvent.Reaction -> runBlocking { handleDurableEvent(event.attempt, event) }
             is SessionEvent.OutgoingFailure -> runBlocking { handleDurableEvent(event.attempt, event) }
             is SessionEvent.RoomUpdated -> runBlocking { handleIncomingRoom(event) }
+            is SessionEvent.RosterSnapshot -> runBlocking { handleDurableEvent(event.attempt, event) }
         }
     }
 

@@ -70,14 +70,16 @@ class ActiveSessionControllerTest {
     }
 
     @Test
-    fun `durable message handler accepts only current session attempt`() = runTest {
+    fun `durable message and roster handlers accept only current session attempt`() = runTest {
         val received = mutableListOf<IncomingMessageEnvelope>()
+        val rosters = mutableListOf<String>()
         val factory = FakeFactory()
         val controller = ActiveSessionController(
             scope = this,
             factory = factory,
             durableEvent = { event ->
                 if (event is SessionEvent.Incoming) received += event.message
+                if (event is SessionEvent.RosterSnapshot) rosters += event.snapshot.accountId
             },
             retryWait = {},
         )
@@ -86,14 +88,18 @@ class ActiveSessionControllerTest {
         val firstAttempt = first.attemptIdentity
 
         first.emitIncoming("current")
+        first.emitRoster(firstAttempt)
         advanceUntilIdle()
         controller.switchTo(account("second"), "secret".toCharArray()) {}
         first.emitIncoming("stale", firstAttempt)
+        first.emitRoster(firstAttempt)
         val second = factory.created.last()
         second.emitIncoming("replacement")
+        second.emitRoster(second.attemptIdentity)
         advanceUntilIdle()
 
         assertEquals(listOf("current", "replacement"), received.map(IncomingMessageEnvelope::body))
+        assertEquals(listOf("first", "second"), rosters)
     }
 
     @Test
@@ -1773,6 +1779,9 @@ class ActiveSessionControllerTest {
                 ),
             )
         }
+
+        fun emitRoster(attempt: SessionAttemptIdentity) =
+            event(SessionEvent.RosterSnapshot(attempt, org.thanosapollo.nema.storage.CompleteRosterSnapshot(attempt.accountId.value, emptyList())))
 
         fun emitFailure(operationId: String, attempt: SessionAttemptIdentity = attemptIdentity) {
             event(

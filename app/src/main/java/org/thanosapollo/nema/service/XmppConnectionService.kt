@@ -270,6 +270,7 @@ class SessionRuntime(
                         rooms.apply(event.attempt.accountId.value, event.view)
                         persistRoomDisplayName(event.attempt.accountId.value, event.view)
                     }
+                    is org.thanosapollo.nema.session.SessionEvent.RosterSnapshot -> Unit
                     is org.thanosapollo.nema.session.SessionEvent.ConnectionLost -> Unit
                 }
             },
