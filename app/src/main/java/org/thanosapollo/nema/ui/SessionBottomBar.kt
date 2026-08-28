@@ -2,6 +2,7 @@ package org.thanosapollo.nema.ui
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
@@ -36,14 +37,16 @@ fun SessionBottomBar(
     }
 }
 
-private val PrimaryDestination.label: String
+internal val PrimaryDestination.label: String
     get() = when (this) {
+        PrimaryDestination.ROSTER -> "Roster"
         PrimaryDestination.HOME -> "Home"
         PrimaryDestination.SETTINGS -> "Settings"
     }
 
 private val PrimaryDestination.icon: ImageVector
     get() = when (this) {
+        PrimaryDestination.ROSTER -> Icons.Filled.Person
         PrimaryDestination.HOME -> Icons.Filled.Home
         PrimaryDestination.SETTINGS -> Icons.Filled.Settings
     }

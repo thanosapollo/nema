@@ -8,6 +8,7 @@ class PrimaryDestinationTest {
     fun fromSavedRestoresKnownDestinationAndDefaultsUnknown() {
         assertEquals(PrimaryDestination.HOME, PrimaryDestination.fromSaved(null))
         assertEquals(PrimaryDestination.HOME, PrimaryDestination.fromSaved("nope"))
+        assertEquals(PrimaryDestination.ROSTER, PrimaryDestination.fromSaved("ROSTER"))
         assertEquals(PrimaryDestination.SETTINGS, PrimaryDestination.fromSaved("SETTINGS"))
         assertEquals(PrimaryDestination.HOME, PrimaryDestination.fromSaved("ACCOUNTS"))
     }
@@ -25,5 +26,6 @@ class PrimaryDestinationTest {
             selectSessionDestination(PrimaryDestination.SETTINGS) { closed += 1 },
         )
         assertEquals(2, closed)
+
     }
 }

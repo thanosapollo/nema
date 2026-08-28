@@ -2,6 +2,7 @@ package org.thanosapollo.nema.ui
 
 /** Top-level session destinations for the persistent bottom bar. */
 enum class PrimaryDestination {
+    ROSTER,
     HOME,
     SETTINGS,
     ;

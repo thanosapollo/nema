@@ -21,6 +21,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -44,9 +45,11 @@ import org.thanosapollo.nema.service.XmppConnectionService
 import org.thanosapollo.nema.service.privacySafeStatus
 import org.thanosapollo.nema.session.ConnectionState
 import org.thanosapollo.nema.session.SessionIdentity
+import org.thanosapollo.nema.storage.RosterStore
 import org.thanosapollo.nema.ui.AccountSettingsContent
 import org.thanosapollo.nema.ui.LoginFormContent
 import org.thanosapollo.nema.ui.PrimaryDestination
+import org.thanosapollo.nema.ui.RosterContent
 import org.thanosapollo.nema.ui.selectSessionDestination
 import org.thanosapollo.nema.ui.SessionBottomBar
 import org.thanosapollo.nema.ui.chat.DirectChatContent
@@ -327,6 +330,20 @@ private fun AccountConnectionScreen(
             bottomBar = { SessionBottomBar(selected = destination, onSelect = ::selectDestination) },
         ) { contentPadding ->
                 when (destination) {
+                    PrimaryDestination.ROSTER -> {
+                        key(account.id) {
+                            RosterContent(
+                                peers = remember(account.id) {
+                                    RosterStore(application.database).observe(account.id.value)
+                                },
+                                onSelectPeer = presenter::selectPeer,
+                                onAccepted = { destination = PrimaryDestination.HOME },
+                                modifier = Modifier
+                                    .padding(contentPadding)
+                                    .statusBarsPadding(),
+                            )
+                        }
+                    }
                     PrimaryDestination.HOME -> {
                         DirectChatContent(
                             state = chatState,

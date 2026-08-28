@@ -32,6 +32,8 @@ class MainActivityInsetContractTest {
         val home = java.io.File("src/main/java/org/thanosapollo/nema/ui/HomeContent.kt").readText()
 
         assertTrue(activity.contains("bottomBar = { SessionBottomBar("))
+        assertTrue(activity.contains("onAccepted = { destination = PrimaryDestination.HOME }"))
+        assertFalse(activity.contains("onAccepted = { selectDestination(PrimaryDestination.HOME) }"))
         assertFalse(home.contains("SessionBottomBar("))
     }
 
@@ -51,9 +53,9 @@ class MainActivityInsetContractTest {
             destination = rememberPrimaryDestination(processToken)
         }
 
-        composeRule.runOnIdle { destination.value = PrimaryDestination.SETTINGS }
+        composeRule.runOnIdle { destination.value = PrimaryDestination.ROSTER }
         restorationTester.emulateSavedInstanceStateRestore()
-        composeRule.runOnIdle { assertEquals(PrimaryDestination.SETTINGS, destination.value) }
+        composeRule.runOnIdle { assertEquals(PrimaryDestination.ROSTER, destination.value) }
     }
 
     @Test
@@ -65,7 +67,7 @@ class MainActivityInsetContractTest {
             destination = rememberPrimaryDestination(processToken)
         }
 
-        composeRule.runOnIdle { destination.value = PrimaryDestination.SETTINGS }
+        composeRule.runOnIdle { destination.value = PrimaryDestination.ROSTER }
         processToken += "-replacement"
         restorationTester.emulateSavedInstanceStateRestore()
         composeRule.runOnIdle { assertEquals(PrimaryDestination.HOME, destination.value) }
