@@ -354,6 +354,27 @@ abstract class MessageDao {
     @Upsert
     abstract suspend fun upsertPeer(peer: PeerEntity)
 
+    @Query("UPDATE peers SET rosterName = NULL, inRoster = 0 WHERE accountId = :accountId")
+    protected abstract suspend fun clearRoster(accountId: String): Int
+
+    @Query("UPDATE peers SET rosterName = :name, inRoster = 1 WHERE accountId = :accountId AND jid = :jid")
+    protected abstract suspend fun setRosterMember(accountId: String, jid: String, name: String?): Int
+
+    @Query("SELECT * FROM peers WHERE accountId = :accountId AND inRoster = 1 ORDER BY jid")
+    abstract fun observeRoster(accountId: String): Flow<List<PeerEntity>>
+
+    @Transaction
+    open suspend fun reconcileRoster(snapshot: CompleteRosterSnapshot) {
+        require(accountExists(snapshot.accountId)) { "Unknown roster account" }
+        clearRoster(snapshot.accountId)
+        snapshot.members.forEach { member ->
+            insertPeer(PeerEntity(snapshot.accountId, member.bareJid))
+            check(setRosterMember(snapshot.accountId, member.bareJid, member.name) == 1) {
+                "Peer changed while reconciling roster"
+            }
+        }
+    }
+
     @Query(
         """
         UPDATE peers SET displayName = :displayName, photoMime = :photoMime,

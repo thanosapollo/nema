@@ -25,9 +25,11 @@ data class PeerEntity(
     val accountId: String,
     val jid: String,
     // displayName is remote profile/vCard. localNickname is the local alias.
-    // WIP-FOUNDATION: no rosterName column until a roster writer exists.
     val displayName: String? = null,
     val localNickname: String? = null,
+    val rosterName: String? = null,
+    @ColumnInfo(defaultValue = "0")
+    val inRoster: Boolean = false,
     val photoMime: String? = null,
     val photoBytes: ByteArray? = null,
     val photoSha1: String? = null,
@@ -45,6 +47,8 @@ data class PeerEntity(
             jid == other.jid &&
             displayName == other.displayName &&
             localNickname == other.localNickname &&
+            rosterName == other.rosterName &&
+            inRoster == other.inRoster &&
             photoMime == other.photoMime &&
             photoSha1 == other.photoSha1 &&
             vcardFetchedAtMs == other.vcardFetchedAtMs &&
@@ -59,6 +63,8 @@ data class PeerEntity(
         result = 31 * result + jid.hashCode()
         result = 31 * result + (displayName?.hashCode() ?: 0)
         result = 31 * result + (localNickname?.hashCode() ?: 0)
+        result = 31 * result + (rosterName?.hashCode() ?: 0)
+        result = 31 * result + inRoster.hashCode()
         result = 31 * result + (photoMime?.hashCode() ?: 0)
         result = 31 * result + (photoSha1?.hashCode() ?: 0)
         result = 31 * result + (vcardFetchedAtMs?.hashCode() ?: 0)

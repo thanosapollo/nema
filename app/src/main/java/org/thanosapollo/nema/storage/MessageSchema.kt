@@ -5,6 +5,13 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 internal object MessageSchema {
+    val MIGRATION_22_23: Migration = object : Migration(22, 23) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE peers ADD COLUMN rosterName TEXT")
+            db.execSQL("ALTER TABLE peers ADD COLUMN inRoster INTEGER NOT NULL DEFAULT 0")
+        }
+    }
+
     val MIGRATION_21_22: Migration = object : Migration(21, 22) {
         override fun migrate(db: SupportSQLiteDatabase) {
             db.execSQL(

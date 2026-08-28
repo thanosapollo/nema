@@ -45,6 +45,8 @@ android {
     testOptions {
         unitTests.isIncludeAndroidResources = true
     }
+
+    sourceSets["debug"].assets.srcDir("$projectDir/schemas")
 }
 
 kotlin {
@@ -91,6 +93,7 @@ dependencies {
     testImplementation(platform("androidx.compose:compose-bom:2026.06.01"))
     testImplementation("androidx.compose.ui:ui-test-junit4")
     testImplementation("org.robolectric:robolectric:4.16")
+    testImplementation("androidx.room:room-testing:2.8.4")
 
     androidTestImplementation("androidx.room:room-testing:2.8.4")
     androidTestImplementation("androidx.test:core:1.6.1")
