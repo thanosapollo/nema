@@ -16,6 +16,7 @@ import org.jivesoftware.smack.packet.Message
 import org.jivesoftware.smack.packet.Stanza
 import org.jivesoftware.smack.packet.StanzaBuilder
 import org.jivesoftware.smack.packet.StanzaError
+import org.jivesoftware.smack.packet.StandardExtensionElement
 import org.jivesoftware.smack.tcp.XMPPTCPConnection
 import org.jivesoftware.smack.tcp.XMPPTCPConnectionConfiguration
 import org.jivesoftware.smackx.blocking.BlockingCommandManager
@@ -41,6 +42,7 @@ import org.thanosapollo.nema.session.SessionAttemptIdentity
 import org.thanosapollo.nema.session.SessionFailureReason
 import org.thanosapollo.nema.session.SessionEvent
 import org.thanosapollo.nema.session.SessionIdentity
+import org.thanosapollo.nema.xmpp.chatstates.ChatActivity
 import org.thanosapollo.nema.xmpp.transport.AccountId
 import org.thanosapollo.nema.xmpp.transport.ConnectionGeneration
 import org.thanosapollo.nema.xmpp.transport.SendNotAttemptedException
@@ -49,6 +51,34 @@ import org.jxmpp.jid.impl.JidCreate
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class SmackSessionConnectionTest {
+    @Test
+    fun `sent carbon gone reaches its peer without sending a stanza`() {
+        SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
+        val transport = RecordingXmppConnection()
+        val events = mutableListOf<SessionEvent>()
+        val session = session(transport, events::add)
+        val attempt = attempt(1)
+        session.updateAttempt(attempt)
+        val gone = StanzaBuilder.buildMessage()
+            .from(JidCreate.entityBareFrom(ACCOUNT_BARE_JID))
+            .to(JidCreate.entityBareFrom(PEER))
+            .ofType(Message.Type.chat)
+            .addExtension(StandardExtensionElement.builder("gone", "http://jabber.org/protocol/chatstates").build())
+            .build()
+        val carbon = StanzaBuilder.buildMessage()
+            .from(JidCreate.entityBareFrom(ACCOUNT_BARE_JID))
+            .addExtension(CarbonExtension(CarbonExtension.Direction.sent, Forwarded(gone)))
+            .build()
+
+        val listener = session.privateField("messageListener") as org.jivesoftware.smack.StanzaListener
+        listener.processStanza(carbon)
+
+        val state = events.filterIsInstance<SessionEvent.ChatState>().single().state
+        assertEquals(PEER, state.peer)
+        assertEquals(ChatActivity.GONE, state.activity)
+        assertTrue(transport.events.isEmpty())
+    }
+
     @Test
     fun `message listener emits direct and trusted received carbon failures for current attempt`() {
         SmackAndroid.initialize(ApplicationProvider.getApplicationContext())

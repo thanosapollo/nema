@@ -242,26 +242,35 @@ internal class SmackSessionConnection(
         val roomFacts = copyRoomConsumerFacts(
             entryGate, roomStableIdAuthorities, attempt, room,
         )
-        message.message.toIncomingSignal(attempt, expectedBareJid)?.let {
-            event(SessionEvent.Signal(attempt, it))
-            return@StanzaListener
+        val carbonEffect = carrier.bodylessCarbonEffect()
+        if (carrier is MessageCarrier.Direct || carbonEffect == BodylessCarbonEffect.SIGNAL) {
+            message.message.toIncomingSignal(attempt, expectedBareJid)?.let {
+                event(SessionEvent.Signal(attempt, it))
+                return@StanzaListener
+            }
         }
-        message.message.toIncomingChatState(attempt, expectedBareJid, roomFacts?.ownNick)?.let {
-            event(SessionEvent.ChatState(attempt, it))
+        if (carrier is MessageCarrier.Direct || carbonEffect == BodylessCarbonEffect.CHAT_STATE) {
+            carrier.toIncomingChatState(attempt, expectedBareJid, roomFacts?.ownNick)?.let {
+                event(SessionEvent.ChatState(attempt, it))
+            }
         }
-        if (wrapper.getExtension(MamResultExtension::class.java) == null) {
+        if ((carrier is MessageCarrier.Direct || carbonEffect == BodylessCarbonEffect.RTT) &&
+            wrapper.getExtension(MamResultExtension::class.java) == null
+        ) {
             message.message.toIncomingRtt(attempt, expectedBareJid)?.let {
                 event(SessionEvent.RealTimeText(attempt, it))
             }
         }
-        message.message.toIncomingReaction(
-            attempt, expectedBareJid, roomFacts = roomFacts,
-            liveCarrier = message.isRawLive(
-                wrapper.getExtension(MamResultExtension::class.java) != null,
-            ),
-        )?.let {
-            event(SessionEvent.Reaction(attempt, it))
-            if (message.message.body.isNullOrEmpty()) return@StanzaListener
+        if (carrier is MessageCarrier.Direct || carbonEffect == BodylessCarbonEffect.REACTION) {
+            message.message.toIncomingReaction(
+                attempt, expectedBareJid, roomFacts = roomFacts,
+                liveCarrier = message.isRawLive(
+                    wrapper.getExtension(MamResultExtension::class.java) != null,
+                ),
+            )?.let {
+                event(SessionEvent.Reaction(attempt, it))
+                if (message.message.body.isNullOrEmpty()) return@StanzaListener
+            }
         }
         stableIdGate.accept(attempt, message).forEach(::deliver)
     }
@@ -1212,6 +1221,7 @@ internal fun Message.toIncomingChatState(
     attempt: SessionAttemptIdentity,
     expectedBareJid: String,
     ownRoomNick: String? = null,
+    ownSenderPeer: String? = null,
 ): IncomingChatState? {
     if (type != Message.Type.chat && type != Message.Type.groupchat && type != Message.Type.normal) return null
     val fromJid = from ?: return null
@@ -1237,15 +1247,35 @@ internal fun Message.toIncomingChatState(
         )
     } else {
         val sender = fromJid.asBareJid().takeIf { it.isEntityBareJid }?.toString() ?: return null
-        if (sender == expectedBareJid) return null
+        val peer = if (sender == expectedBareJid) ownSenderPeer ?: return null else sender
         IncomingChatState(
             accountId = attempt.accountId,
             generation = attempt.generation,
-            peer = sender,
+            peer = peer,
             actor = sender,
             groupChat = false,
             activity = activity,
         )
+    }
+}
+
+internal fun MessageCarrier.toIncomingChatState(
+    attempt: SessionAttemptIdentity,
+    expectedBareJid: String,
+    ownRoomNick: String? = null,
+): IncomingChatState? {
+    return when (this) {
+        is MessageCarrier.Direct -> message.toIncomingChatState(attempt, expectedBareJid, ownRoomNick)
+        is MessageCarrier.Carbon -> {
+            if (!message.body.isNullOrEmpty()) return null
+            val ownSenderPeer = if (direction == CarbonCarrier.Direction.SENT) {
+                message.to?.asBareJid()?.takeIf { it.isEntityBareJid }?.toString() ?: return null
+            } else {
+                null
+            }
+            message.toIncomingChatState(attempt, expectedBareJid, ownRoomNick, ownSenderPeer)
+        }
+        MessageCarrier.Inert -> null
     }
 }
 
@@ -1532,6 +1562,29 @@ internal sealed interface MessageCarrier {
         val delay: DelayInformation?,
     ) : MessageCarrier
     data object Inert : MessageCarrier
+}
+
+internal enum class BodylessCarbonEffect { SIGNAL, CHAT_STATE, RTT, REACTION }
+
+internal fun MessageCarrier.bodylessCarbonEffect(): BodylessCarbonEffect? {
+    val carbon = this as? MessageCarrier.Carbon ?: return null
+    if (!carbon.message.body.isNullOrEmpty()) return null
+    return carbon.message.extensions.mapNotNull { extension ->
+        when (extension.namespace) {
+            CHAT_STATES_NAMESPACE -> BodylessCarbonEffect.CHAT_STATE.takeIf {
+                extension.elementName in setOf("active", "composing", "gone", "inactive", "paused")
+            }
+            RECEIPTS_NAMESPACE -> BodylessCarbonEffect.SIGNAL.takeIf {
+                extension.elementName == "request" || extension.elementName == "received"
+            }
+            CHAT_MARKERS_NAMESPACE -> BodylessCarbonEffect.SIGNAL.takeIf {
+                extension.elementName in setOf("acknowledged", "displayed", "markable", "received")
+            }
+            REACTIONS_NAMESPACE -> BodylessCarbonEffect.REACTION.takeIf { extension.elementName == "reactions" }
+            RTT_NAMESPACE -> BodylessCarbonEffect.RTT.takeIf { extension.elementName == "rtt" }
+            else -> null
+        }
+    }.singleOrNull()
 }
 
 internal fun Message.classifyCarrier(expectedBareJid: String, boundFullJid: String): MessageCarrier {
