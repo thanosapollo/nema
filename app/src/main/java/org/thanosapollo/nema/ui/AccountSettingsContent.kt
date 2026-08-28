@@ -41,6 +41,10 @@ fun AccountSettingsContent(
     onChooseBackground: () -> Unit = {},
     onClearBackground: () -> Unit = {},
     onUseInheritedAppearance: () -> Unit = {},
+    currentPaletteId: String = "rum",
+    onPreviewPalette: (String) -> Unit = {},
+    onApplyPalette: ((Boolean) -> Unit) -> Unit = { it(false) },
+    onCancelPalette: () -> Unit = {},
     readReceiptsEnabled: Boolean = false,
     onSetReadReceiptsEnabled: (Boolean) -> Unit = {},
     accounts: List<AccountConfiguration> = emptyList(),
@@ -51,7 +55,12 @@ fun AccountSettingsContent(
     onSignOut: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
-    Column(
+    ThemeSettingsContent(
+        currentPaletteId = currentPaletteId,
+        onPreview = onPreviewPalette,
+        onApply = onApplyPalette,
+        onCancel = onCancelPalette,
+    ) { openThemes -> Column(
         modifier = modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
@@ -64,12 +73,7 @@ fun AccountSettingsContent(
                 Text(it, style = MaterialTheme.typography.bodySmall)
             }
         }
-        Text("Appearance (WIP)", style = MaterialTheme.typography.titleMedium)
-        Text(
-            "Theme and palette options are hidden until they are stable.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        TextButton(onClick = openThemes, modifier = Modifier.fillMaxWidth()) { Text("Themes") }
         AccountsContent(
             accounts = accounts,
             activeAccountId = activeAccountId,
@@ -104,5 +108,5 @@ fun AccountSettingsContent(
         TextButton(onClick = onSignOut, modifier = Modifier.fillMaxWidth()) {
             Text("Sign out")
         }
-    }
+    } }
 }

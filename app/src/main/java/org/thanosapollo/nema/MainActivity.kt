@@ -268,7 +268,8 @@ private fun AccountConnectionScreen(
             )
         }
         fun selectDestination(next: PrimaryDestination) {
-            destination = selectSessionDestination(next, presenter::closeConversation)
+            destination = selectSessionDestinationAndCancelPreview(
+                next, presenter::closeConversation, themeAuthority::cancelPreview)
         }
         DisposableEffect(presenter) {
             onDispose(presenter::close)
@@ -468,6 +469,10 @@ private fun AccountConnectionScreen(
                                 val target = appearanceScope
                                 scope.launch { application.appearanceRepository.clear(target) }
                             },
+                            currentPaletteId = themeAuthority.palette.id,
+                            onPreviewPalette = themeAuthority::preview,
+                            onApplyPalette = { complete -> scope.launch { complete(themeAuthority.applyPreview()) } },
+                            onCancelPalette = themeAuthority::cancelPreview,
                             readReceiptsEnabled = readReceiptsEnabled,
                             onSetReadReceiptsEnabled = { enabled ->
                                 application.messagingPreferences.setReadReceipts(account.id.value, enabled)
@@ -659,3 +664,7 @@ private fun AccountConnectionScreen(
         },
     )
 }
+
+internal fun selectSessionDestinationAndCancelPreview(next: PrimaryDestination, close: () -> Unit,
+    cancelPreview: () -> Unit): PrimaryDestination { if (next != PrimaryDestination.SETTINGS)
+    cancelPreview(); return selectSessionDestination(next, close) }
