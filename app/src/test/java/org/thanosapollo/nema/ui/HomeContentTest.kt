@@ -280,7 +280,7 @@ class HomeContentTest {
     }
 
     @Test
-    fun homeStaysComposedUnderOpenChat() {
+    fun homeStaysComposedUnderOpenChatWithoutOwningSessionBar() {
         composeRule.setContent {
             MaterialTheme {
                 DirectChatContent(
@@ -304,7 +304,7 @@ class HomeContentTest {
         }
 
         composeRule.onNodeWithText("Nema", useUnmergedTree = true).assertExists()
-        composeRule.onNodeWithContentDescription("Primary destinations", useUnmergedTree = true).assertExists()
+        composeRule.onNodeWithContentDescription("Primary destinations", useUnmergedTree = true).assertDoesNotExist()
         composeRule.onNodeWithContentDescription("Back").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Settings").assertDoesNotExist()
     }
@@ -344,7 +344,7 @@ class HomeContentTest {
 
         composeRule.runOnIdle { owner.completeBack() }
         composeRule.onNodeWithText("hi there").assertIsDisplayed()
-        composeRule.onNodeWithText("Settings").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Own profile").assertIsDisplayed()
         composeRule.onNodeWithText("hi there").performClick()
         composeRule.runOnIdle { assertEquals(1, opened) }
     }
@@ -451,7 +451,7 @@ class HomeContentTest {
         }
 
         composeRule.onNodeWithContentDescription("New chat").assertIsDisplayed()
-        composeRule.onNodeWithText("Settings").assertIsDisplayed().performClick()
+        composeRule.onNodeWithContentDescription("Own profile").assertIsDisplayed().performClick()
         composeRule.runOnIdle { assertTrue(openedSettings) }
     }
 }

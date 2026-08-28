@@ -11,6 +11,8 @@ import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -23,6 +25,15 @@ import org.thanosapollo.nema.ui.PrimaryDestination
 class MainActivityInsetContractTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun sessionScaffoldIsTheOnlyBottomBarOwner() {
+        val activity = java.io.File("src/main/java/org/thanosapollo/nema/MainActivity.kt").readText()
+        val home = java.io.File("src/main/java/org/thanosapollo/nema/ui/HomeContent.kt").readText()
+
+        assertTrue(activity.contains("bottomBar = { SessionBottomBar("))
+        assertFalse(home.contains("SessionBottomBar("))
+    }
 
     @Test
     fun chatRouteRestoresOnlyWithinSameProcess() {

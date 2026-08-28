@@ -13,7 +13,7 @@ class PrimaryDestinationTest {
     }
 
     @Test
-    fun choosingHomeClosesOpenConversation() {
+    fun choosingAnyBottomDestinationClosesOpenConversation() {
         var closed = 0
         assertEquals(
             PrimaryDestination.HOME,
@@ -24,6 +24,6 @@ class PrimaryDestinationTest {
             PrimaryDestination.SETTINGS,
             selectSessionDestination(PrimaryDestination.SETTINGS) { closed += 1 },
         )
-        assertEquals(1, closed)
+        assertEquals(2, closed)
     }
 }

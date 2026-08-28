@@ -12,16 +12,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
@@ -301,7 +305,10 @@ class SessionBottomBarTest {
         }
 
         composeRule.onNodeWithContentDescription("Primary destinations").assertIsDisplayed()
+        composeRule.onAllNodesWithContentDescription("Primary destinations").assertCountEquals(1)
         composeRule.onNodeWithText("Home").assertIsSelected()
+        composeRule.onNodeWithText("Home").assertHeightIsAtLeast(48.dp)
+        composeRule.onNodeWithText("Settings").assertHeightIsAtLeast(48.dp)
         composeRule.onNodeWithText("Settings").performClick()
         composeRule.runOnIdle { assertEquals(PrimaryDestination.SETTINGS, selected) }
         composeRule.onNodeWithText("Settings").assertIsSelected()

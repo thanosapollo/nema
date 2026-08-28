@@ -192,12 +192,6 @@ fun HomeContent(
                     }
                 }
             }
-            SessionBottomBar(
-                selected = PrimaryDestination.HOME,
-                onSelect = { destination ->
-                    if (destination == PrimaryDestination.SETTINGS) onOpenOwnProfile()
-                },
-            )
         }
         if (newChatOpen) {
             NewChatDialog(

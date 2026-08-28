@@ -323,16 +323,9 @@ private fun AccountConnectionScreen(
         }
         val shellAppearance = AppearanceSpec(themeMode = themeAuthority.palette.mode)
         Scaffold(
-                contentWindowInsets = WindowInsets(0, 0, 0, 0),
-                bottomBar = {
-                    if (destination != PrimaryDestination.HOME) {
-                        SessionBottomBar(
-                            selected = destination,
-                            onSelect = ::selectDestination,
-                        )
-                    }
-                },
-            ) { contentPadding ->
+            contentWindowInsets = WindowInsets(0, 0, 0, 0),
+            bottomBar = { SessionBottomBar(selected = destination, onSelect = ::selectDestination) },
+        ) { contentPadding ->
                 when (destination) {
                     PrimaryDestination.HOME -> {
                         DirectChatContent(

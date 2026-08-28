@@ -16,6 +16,6 @@ fun selectSessionDestination(
     next: PrimaryDestination,
     closeConversation: () -> Unit,
 ): PrimaryDestination {
-    if (next == PrimaryDestination.HOME) closeConversation()
+    closeConversation()
     return next
 }
