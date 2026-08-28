@@ -235,7 +235,9 @@ internal class SmackSessionConnection(
             failure.failure?.let { event(SessionEvent.OutgoingFailure(attempt, it)) }
             return@StanzaListener
         }
-        val message = carrier.toTrustedCarbonMessage(expectedBareJid) ?: return@StanzaListener
+        val message = carrier.toTrustedCarbonMessage(expectedBareJid) { room ->
+            synchronized(entryGate) { roomStableIdAuthorities.snapshot(attempt, room) != null }
+        } ?: return@StanzaListener
         val room = message.message.from?.asBareJid()?.toString()
         val roomFacts = copyRoomConsumerFacts(
             entryGate, roomStableIdAuthorities, attempt, room,
@@ -886,7 +888,9 @@ internal class SmackSessionConnection(
     }
 
     private fun deliver(decision: StableIdMessageDecision) {
-        val room = decision.message.from?.asBareJid()?.toString()
+        val room = if (decision.carbonDirection == CarbonCarrier.Direction.SENT &&
+            decision.message.type == Message.Type.groupchat
+        ) decision.message.to?.asBareJid()?.toString() else decision.message.from?.asBareJid()?.toString()
         val roomFacts = copyRoomConsumerFacts(
             entryGate, roomStableIdAuthorities, decision.attempt, room,
         )
@@ -903,6 +907,7 @@ internal class SmackSessionConnection(
             decision.sentAtEpochMs,
             decision.sentTimeSource,
             decision.receivedAtEpochMs,
+            decision.carbonDirection,
         )?.let { event(SessionEvent.Incoming(decision.attempt, it)) }
     }
 
@@ -1350,6 +1355,7 @@ internal fun Message.toIncomingEnvelope(
     suppliedSentAtEpochMs: Long? = null,
     suppliedSentTimeSource: MessageTimeSource? = null,
     receivedAtEpochMs: Long = System.currentTimeMillis(),
+    carbonDirection: CarbonCarrier.Direction? = null,
 ): IncomingMessageEnvelope? {
     val topLevelDelay = DelayInformation.from(this)?.stamp?.time
     val sentAtEpochMs = (suppliedSentAtEpochMs ?: topLevelDelay)?.coerceAtMost(receivedAtEpochMs)
@@ -1360,7 +1366,7 @@ internal fun Message.toIncomingEnvelope(
     val groupChat = type == Message.Type.groupchat
     if (!groupChat && type != Message.Type.chat && type != Message.Type.normal) return null
     val fromJid = from ?: return null
-    val receiptRequested = type == Message.Type.chat &&
+    val receiptRequested = carbonDirection == null && type == Message.Type.chat &&
         extensions.count { it is DeliveryReceiptRequest } == 1
     val markable = type == Message.Type.chat && extensions.count {
         it.elementName == org.thanosapollo.nema.xmpp.markers.MARKABLE_ELEMENT &&
@@ -1388,7 +1394,9 @@ internal fun Message.toIncomingEnvelope(
     } ?: return null
     val replyEnvelope = reply?.copy(fallbackBody = parsed?.fallbackBody)
     return if (groupChat) {
-        val room = fromJid.asBareJid().takeIf { it.isEntityBareJid }?.toString() ?: return null
+        val carbonSent = carbonDirection == CarbonCarrier.Direction.SENT
+        val roomJid = if (carbonSent) to else fromJid
+        val room = roomJid?.asBareJid()?.takeIf { it.isEntityBareJid }?.toString() ?: return null
         val occupant = fromJid.takeIf { it.isEntityFullJid }?.toString() ?: room
         val occupantNick = fromJid.resourceOrNull?.toString()
         IncomingMessageEnvelope(
@@ -1396,7 +1404,7 @@ internal fun Message.toIncomingEnvelope(
             generation = attempt.generation,
             peer = room,
             sender = occupant,
-            outbound = (occupantNick != null && occupantNick == ownRoomNick) ||
+            outbound = carbonSent || (occupantNick != null && occupantNick == ownRoomNick) ||
                 (sentTimeSource == MessageTimeSource.MAM && mucActorBareJid() == expectedBareJid),
             originId = structurallyValidOriginId(),
             body = messageBody,
@@ -1506,6 +1514,7 @@ internal data class TrustedIncomingStanza(
     val sentTimeSource: MessageTimeSource? = null,
     val receivedAtEpochMs: Long = System.currentTimeMillis(),
     val forwarded: Boolean = false,
+    val carbonDirection: CarbonCarrier.Direction? = null,
 )
 
 internal fun TrustedIncomingStanza.isRawLive(mamCarrier: Boolean): Boolean =
@@ -1547,6 +1556,7 @@ internal fun Message.classifyCarrier(expectedBareJid: String, boundFullJid: Stri
 internal fun MessageCarrier.toTrustedCarbonMessage(
     expectedBareJid: String,
     receivedAtEpochMs: Long = System.currentTimeMillis(),
+    joinedRoom: (String) -> Boolean = { false },
 ): TrustedIncomingStanza? {
     if (this is MessageCarrier.Inert) return null
     if (this is MessageCarrier.Direct) return TrustedIncomingStanza(message, receivedAtEpochMs = receivedAtEpochMs)
@@ -1554,12 +1564,20 @@ internal fun MessageCarrier.toTrustedCarbonMessage(
     val forwarded = message
     val sender = forwarded.from?.asBareJid()?.toString() ?: return null
     val recipient = forwarded.to?.asBareJid()?.toString() ?: return null
+    if (!forwarded.hasCarbonPayload() || forwarded.type == Message.Type.headline) return null
+    if (forwarded.extensions.any {
+            (it.elementName == "x" && it.namespace == "http://jabber.org/protocol/muc#user") ||
+                (it.elementName == "private" && it.namespace == CarbonExtension.NAMESPACE)
+        }
+    ) return null
     val trusted = when (direction) {
         CarbonCarrier.Direction.SENT -> forwarded.takeIf {
-            sender == expectedBareJid && recipient != expectedBareJid
+            sender == expectedBareJid &&
+                (it.type == Message.Type.groupchat || !joinedRoom(recipient))
         }
         CarbonCarrier.Direction.RECEIVED -> forwarded.takeIf {
-            sender != expectedBareJid && recipient == expectedBareJid
+            recipient == expectedBareJid && it.type != Message.Type.groupchat &&
+                !joinedRoom(sender)
         }
     } ?: return null
     return TrustedIncomingStanza(
@@ -1568,7 +1586,35 @@ internal fun MessageCarrier.toTrustedCarbonMessage(
         sentTimeSource = MessageTimeSource.CARBON,
         receivedAtEpochMs = receivedAtEpochMs,
         forwarded = true,
+        carbonDirection = direction,
     )
+}
+
+private fun Message.hasCarbonPayload(): Boolean {
+    val payloads = extensions.filterNot { it.elementName == "body" && it.namespace == "jabber:client" }
+    return !body.isNullOrEmpty() && payloads.all(::isCarbonPayload) ||
+        body.isNullOrEmpty() && payloads.isNotEmpty() && payloads.all(::isCarbonPayload)
+}
+
+private fun isCarbonPayload(extension: org.jivesoftware.smack.packet.ExtensionElement): Boolean {
+    val names = when (extension.namespace) {
+        CHAT_STATES_NAMESPACE -> setOf("active", "composing", "gone", "inactive", "paused")
+        RECEIPTS_NAMESPACE -> setOf("request", "received")
+        CHAT_MARKERS_NAMESPACE -> setOf("acknowledged", "displayed", "markable", "received")
+        REACTIONS_NAMESPACE -> setOf("reactions")
+        RTT_NAMESPACE -> setOf("rtt")
+        StableUniqueStanzaIdManager.NAMESPACE -> setOf("origin-id", "stanza-id")
+        "urn:xmpp:reply:0" -> setOf("reply")
+        "urn:xmpp:fallback:0" -> setOf("fallback")
+        "urn:xmpp:hints" -> setOf("store", "no-store", "no-permanent-store", "no-copy")
+        DelayInformation.NAMESPACE -> setOf("delay")
+        OCCUPANT_ID_NAMESPACE -> setOf("occupant-id")
+        MessageCorrectExtension.NAMESPACE -> setOf("replace")
+        "jabber:x:oob", "jabber:x:encrypted" -> setOf("x")
+        "eu.siacs.conversations.axolotl" -> setOf("encrypted")
+        else -> if (extension.namespace.startsWith("urn:xmpp:omemo:")) setOf("encrypted") else emptySet()
+    }
+    return extension.elementName in names
 }
 
 internal fun List<Message>.haveArchiveAuthority(expectedArchiveAuthority: String): Boolean = all {
@@ -1639,6 +1685,7 @@ internal data class StableIdMessageDecision(
     val sentAtEpochMs: Long? = null,
     val sentTimeSource: MessageTimeSource? = null,
     val receivedAtEpochMs: Long = System.currentTimeMillis(),
+    val carbonDirection: CarbonCarrier.Direction? = null,
 )
 
 internal class StableIdDiscoveryGate {
@@ -1746,6 +1793,7 @@ private fun TrustedIncomingStanza.toDecision(
     sentAtEpochMs = sentAtEpochMs,
     sentTimeSource = sentTimeSource,
     receivedAtEpochMs = receivedAtEpochMs,
+    carbonDirection = carbonDirection,
 )
 
 internal fun drainStableIdGate(
