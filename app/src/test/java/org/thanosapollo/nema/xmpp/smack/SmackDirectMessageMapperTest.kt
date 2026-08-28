@@ -781,14 +781,8 @@ class SmackDirectMessageMapperTest {
         val room = "room@conference.example.org"
         val entryGate = Any()
         val registry = RoomStableIdAuthorityRegistry().apply { begin(attempt) }
-        val handoff = RoomStatusHandoff(entryGate, registry, onCurrentRevoked = {})
-        fun candidate(lease: RoomStableIdLease) = handoff.candidate(lease, { _ -> }, { _ -> })
         val firstLease = requireNotNull(registry.beginJoin(attempt, room))
-        assertTrue(handoff.publish(
-            candidate(firstLease),
-            RoomFeatureSupport(stableIds = true, occupantIds = false),
-            ownNick = "nick1",
-        ))
+        assertTrue(synchronized(entryGate) { registry.publish(firstLease, true, false, "nick1") })
         assertEquals(RoomConsumerFacts(firstLease, room, false, "nick1"), copyRoomConsumerFacts(entryGate, registry, attempt, room))
         val published = CountDownLatch(1)
         val releasePublication = CountDownLatch(1)
@@ -796,15 +790,11 @@ class SmackDirectMessageMapperTest {
         val observed = AtomicReference<RoomConsumerFacts?>()
         val secondLease = requireNotNull(registry.beginJoin(attempt, room))
         val publisher = thread {
-            handoff.publish(
-                candidate(secondLease),
-                RoomFeatureSupport(stableIds = false, occupantIds = true),
-                ownNick = "nick2",
-                afterPublished = {
-                    published.countDown()
-                    releasePublication.await(5, TimeUnit.SECONDS)
-                },
-            )
+            synchronized(entryGate) {
+                assertTrue(registry.publish(secondLease, false, true, "nick2"))
+                published.countDown()
+                releasePublication.await(5, TimeUnit.SECONDS)
+            }
         }
         assertTrue(published.await(5, TimeUnit.SECONDS))
         val consumer = thread {
@@ -821,7 +811,7 @@ class SmackDirectMessageMapperTest {
 
         assertEquals(RoomConsumerFacts(secondLease, null, true, "nick2"), observed.get())
         val replacement = attempt.copy(attempt = ConnectionAttempt.require(3))
-        synchronized(entryGate) { beginRoomMembershipAttempt(registry, replacement) }
+        synchronized(entryGate) { registry.begin(replacement) }
         assertTrue(listOf(replacement, attempt).all { copyRoomConsumerFacts(entryGate, registry, it, room) == null })
     }
     @Test

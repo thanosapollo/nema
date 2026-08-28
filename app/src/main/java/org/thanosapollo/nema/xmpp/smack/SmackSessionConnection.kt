@@ -1025,8 +1025,6 @@ internal data class RoomConsumerFacts(
     val occupantIds: Boolean, val ownNick: String?,
 )
 
-internal fun beginRoomMembershipAttempt(registry: RoomStableIdAuthorityRegistry, attempt: SessionAttemptIdentity) = registry.begin(attempt)
-
 internal fun copyRoomConsumerFacts(
     entryGate: Any, registry: RoomStableIdAuthorityRegistry,
     attempt: SessionAttemptIdentity, authority: String?,
@@ -1052,68 +1050,6 @@ private class RoomViewStatusListener(
     override fun ownershipRevoked() = refresh()
     override fun adminGranted() = refresh()
     override fun adminRevoked() = refresh()
-    override fun roomDestroyed(multiUserChat: MultiUserChat, reason: String?) = revoke()
-}
-
-internal class RoomStatusHandoff(
-    private val entryGate: Any,
-    private val registry: RoomStableIdAuthorityRegistry,
-    private val onCurrentRevoked: (String) -> Unit,
-    private val beforeRevocation: () -> Unit = {},
-) {
-    internal class Candidate(
-        val lease: RoomStableIdLease, val listener: UserStatusListener,
-        val remove: (UserStatusListener) -> Unit,
-    )
-
-    private val active = mutableMapOf<String, Candidate>()
-
-    fun candidate(lease: RoomStableIdLease, add: (UserStatusListener) -> Unit,
-                  remove: (UserStatusListener) -> Unit): Candidate {
-        lateinit var candidate: Candidate
-        val listener = RoomStatusRevocationListener { revoke(candidate) }
-        candidate = Candidate(lease, listener, remove)
-        add(listener)
-        return candidate
-    }
-
-    fun publish(candidate: Candidate, features: RoomFeatureSupport, ownNick: String? = null,
-                validate: () -> Boolean = { true }, afterPublished: () -> Unit = {}): Boolean =
-        synchronized(entryGate) {
-        if (!validate() || !registry.publish(
-                candidate.lease, features.stableIds, features.occupantIds, ownNick,
-            )
-        ) {
-            return@synchronized false
-        }
-        afterPublished()
-        active.put(candidate.lease.authority, candidate)?.let { previous ->
-            previous.remove(previous.listener)
-        }
-        true
-    }
-
-    fun discard(candidate: Candidate) = synchronized(entryGate) {
-        registry.revoke(candidate.lease)
-        candidate.remove(candidate.listener)
-    }
-
-    private fun revoke(candidate: Candidate) = synchronized(entryGate) {
-        beforeRevocation()
-        val revoked = registry.revoke(candidate.lease)
-        val room = candidate.lease.authority
-        val wasCurrent = revoked && active[room] === candidate
-        if (wasCurrent) active.remove(room)
-        candidate.remove(candidate.listener)
-        if (wasCurrent) onCurrentRevoked(room)
-    }
-}
-
-private class RoomStatusRevocationListener(private val revoke: () -> Unit) : UserStatusListener {
-    override fun kicked(actor: Jid?, reason: String?) = revoke()
-    override fun banned(actor: Jid?, reason: String?) = revoke()
-    override fun removed(mucUser: org.jivesoftware.smackx.muc.packet.MUCUser, presence: org.jivesoftware.smack.packet.Presence) = revoke()
-    override fun membershipRevoked() = revoke()
     override fun roomDestroyed(multiUserChat: MultiUserChat, reason: String?) = revoke()
 }
 

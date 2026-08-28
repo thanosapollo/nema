@@ -243,6 +243,7 @@ class SmackSessionConnectionTest {
         assertTrue(session.privateField("roomViewHandoff") is RoomViewHandoff<*, *, *, *>)
         assertThrows(NoSuchFieldException::class.java) { session.privateField("watchedRooms") }
         assertThrows(NoSuchFieldException::class.java) { session.privateField("roomStatusHandoff") }
+        assertThrows(ClassNotFoundException::class.java) { Class.forName("org.thanosapollo.nema.xmpp.smack.RoomStatusHandoff") }
     }
 
     @Test
