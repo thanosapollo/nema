@@ -18,7 +18,7 @@ internal class RoomViewHandoffFixture(
     }
 
     val entryLock = Any()
-    val log = mutableListOf<String>()
+    val log = java.util.Collections.synchronizedList(mutableListOf<String>())
     val entered = Gate.entries.associateWith { CountDownLatch(1) }
     val release = Gate.entries.associateWith { CountDownLatch(1) }
 
