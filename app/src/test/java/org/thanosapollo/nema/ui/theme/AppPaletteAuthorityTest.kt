@@ -46,31 +46,29 @@ class AppPaletteAuthorityTest {
     }
 
     @Test
-    fun previewRecomposesWithoutPersistenceAndCancelRestoresPersistedPalette() {
+    fun selectionRecomposesBeforePersistenceAndFailureRestoresPersistedPalette() = runTest {
         preferences.edit().putString("appearance.app.palette-id", "nord").commit()
-        val authority = AppPaletteAuthority(repository)
+        lateinit var authority: AppPaletteAuthority
+        val failingRepository = AppearanceRepository(
+            InspectingFailPreferences(preferences) { assertEquals("white", authority.palette.id) },
+            NoBackgroundAccess, Dispatchers.Unconfined,
+        )
+        authority = AppPaletteAuthority(failingRepository)
         lateinit var observed: PaletteDefinition
         composeRule.setContent {
             val palette = authority.palette
             SideEffect { observed = palette }
         }
 
-        composeRule.runOnIdle { authority.preview("white") }
-        composeRule.runOnIdle {
-            assertEquals("white", observed.id)
-            assertEquals("nord", recreatedRepository().appPaletteId())
-            authority.cancelPreview()
-        }
+        assertFalse(authority.select("white"))
         composeRule.runOnIdle { assertEquals("nord", observed.id) }
+        assertEquals("nord", recreatedRepository().appPaletteId())
     }
 
     @Test
-    fun applySurvivesRepositoryAndActivityRecreationAndAccountTransitions() = runTest {
+    fun selectionSurvivesRepositoryAndActivityRecreationAndAccountTransitions() = runTest {
         val authority = AppPaletteAuthority(repository)
-        authority.preview("everforest")
-
-        assertTrue(authority.applyPreview())
-        assertFalse(authority.hasPreview)
+        assertTrue(authority.select("everforest"))
         assertEquals("everforest", authority.palette.id)
         assertEquals("everforest", AppPaletteAuthority(recreatedRepository()).palette.id)
     }
@@ -82,10 +80,8 @@ class AppPaletteAuthorityTest {
             FailingCommitPreferences(preferences), NoBackgroundAccess, Dispatchers.Unconfined,
         )
         val authority = AppPaletteAuthority(failingRepository)
-        authority.preview("white")
-
-        assertFalse(authority.applyPreview())
-        assertEquals("white", authority.palette.id)
+        assertFalse(authority.select("white"))
+        assertEquals("nord", authority.palette.id)
         assertEquals("nord", AppPaletteAuthority(recreatedRepository()).palette.id)
     }
 
@@ -99,12 +95,12 @@ class AppPaletteAuthorityTest {
     }
 
     @Test
-    fun unknownPersistedAndPreviewIdsFallBackToDefault() {
+    fun unknownPersistedAndSelectedIdsFallBackToDefault() = runTest {
         preferences.edit().putString("appearance.app.palette-id", "removed").commit()
         val authority = AppPaletteAuthority(recreatedRepository())
 
         assertEquals(PaletteCatalog.default.id, authority.palette.id)
-        authority.preview("also-removed")
+        authority.select("also-removed")
         assertEquals(PaletteCatalog.default.id, authority.palette.id)
     }
 
@@ -138,6 +134,15 @@ class AppPaletteAuthorityTest {
         override fun commit(): Boolean {
             delegate.commit()
             return false
+        }
+    }
+
+    private class InspectingFailPreferences(
+        private val delegate: SharedPreferences,
+        private val onCommit: () -> Unit,
+    ) : SharedPreferences by delegate {
+        override fun edit(): SharedPreferences.Editor = object : SharedPreferences.Editor by delegate.edit() {
+            override fun commit(): Boolean { onCommit(); return false }
         }
     }
 }

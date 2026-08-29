@@ -42,9 +42,7 @@ fun AccountSettingsContent(
     onClearBackground: () -> Unit = {},
     onUseInheritedAppearance: () -> Unit = {},
     currentPaletteId: String = "rum",
-    onPreviewPalette: (String) -> Unit = {},
-    onApplyPalette: ((Boolean) -> Unit) -> Unit = { it(false) },
-    onCancelPalette: () -> Unit = {},
+    onSelectPalette: (String, (Boolean) -> Unit) -> Unit = { _, complete -> complete(false) },
     readReceiptsEnabled: Boolean = false,
     onSetReadReceiptsEnabled: (Boolean) -> Unit = {},
     accounts: List<AccountConfiguration> = emptyList(),
@@ -57,9 +55,7 @@ fun AccountSettingsContent(
 ) {
     ThemeSettingsContent(
         currentPaletteId = currentPaletteId,
-        onPreview = onPreviewPalette,
-        onApply = onApplyPalette,
-        onCancel = onCancelPalette,
+        onSelect = onSelectPalette,
     ) { openThemes -> Column(
         modifier = modifier
             .fillMaxSize()

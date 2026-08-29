@@ -135,7 +135,11 @@ class AccountSettingsContentTest {
             }
         }
         composeRule.onNodeWithText("Settings").assertIsDisplayed()
-        openThemePicker()
+        composeRule.onNodeWithText("Themes").performClick()
+        composeRule.onNodeWithText("Themes").assertIsDisplayed()
+        composeRule.onNodeWithText("Select theme").assertDoesNotExist()
+        composeRule.onNodeWithText("Apply").assertDoesNotExist()
+        composeRule.onNodeWithText("Cancel").assertDoesNotExist()
         composeRule.onNodeWithText("Default").assertIsSelected()
         composeRule.onNodeWithTag("theme-list")
             .assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.SelectableGroup))
@@ -146,15 +150,13 @@ class AccountSettingsContentTest {
         }
         composeRule.runOnIdle { empty.value = true }
         composeRule.onNodeWithText("Themes").performClick()
-        composeRule.onNodeWithText("Select theme").performClick()
         composeRule.onNodeWithText("No themes available").assertIsDisplayed()
-        composeRule.onNodeWithText("Apply").assertIsNotEnabled()
     }
 
     @Test
-    fun themeTapPreviewsWhileApplyCommitsAndCancelOrBackRestores() {
+    fun themeTapImmediatelySavesStaysOnThemesReportsFailureAndBackReturnsToSettings() {
         val events = mutableListOf<String>()
-        lateinit var completeApply: (Boolean) -> Unit
+        lateinit var completeSave: (Boolean) -> Unit
         lateinit var back: OnBackPressedDispatcher
         composeRule.setContent {
             MaterialTheme {
@@ -163,40 +165,23 @@ class AccountSettingsContentTest {
                 AccountSettingsContent(
                     activeAccountId = FIRST,
                     currentPaletteId = current,
-                    onPreviewPalette = { current = it; events += "preview:$it" },
-                    onApplyPalette = { complete -> events += "apply"; completeApply = complete },
-                    onCancelPalette = { current = PaletteCatalog.default.id; events += "cancel" },
+                    onSelectPalette = { id, complete ->
+                        current = id
+                        events += "save:$id"
+                        completeSave = complete
+                    },
                 )
             }
         }
-        openThemePicker()
+        composeRule.onNodeWithText("Themes").performClick()
         selectPalette("nord", "Nord")
         composeRule.onNodeWithText("Nord").assertIsSelected()
-        composeRule.runOnIdle { assertEquals(listOf("preview:nord"), events) }
-        composeRule.onNodeWithText("Apply").performClick()
-        composeRule.onNodeWithText("Apply").assertIsNotEnabled().performClick()
-        composeRule.onNodeWithText("Cancel").assertIsNotEnabled().performClick()
-        composeRule.runOnIdle { back.onBackPressed(); assertEquals(listOf("preview:nord", "apply"), events) }
-        composeRule.onNodeWithText("Select theme").assertIsDisplayed()
-        composeRule.runOnIdle { completeApply(false) }; composeRule.onNodeWithText("Theme was not saved").assertIsDisplayed()
-        composeRule.onNodeWithText("Apply").performClick()
-        composeRule.runOnIdle { completeApply(true) }
-        composeRule.onNodeWithText("Cancel").assertDoesNotExist()
-        composeRule.runOnIdle { assertEquals(listOf("preview:nord", "apply", "apply"), events) }
-        composeRule.onNodeWithText("Select theme").performClick()
+        composeRule.runOnIdle { assertEquals(listOf("save:nord"), events); completeSave(false) }
+        composeRule.onNodeWithText("Theme was not saved").assertIsDisplayed()
+        composeRule.onNodeWithText("Themes").assertIsDisplayed()
         selectPalette("white", "White")
-        composeRule.onNodeWithText("Cancel").performClick()
-        composeRule.runOnIdle { assertEquals("cancel", events.last()) }
-        composeRule.onNodeWithText("Select theme").performClick()
-        selectPalette("everforest", "Everforest")
-        composeRule.runOnIdle { back.onBackPressed() }
-        composeRule.onNodeWithText("Select theme").assertIsDisplayed()
-        composeRule.runOnIdle { assertEquals("cancel", events.last()) }
-    }
-
-    private fun openThemePicker() {
-        composeRule.onNodeWithText("Themes").performClick()
-        composeRule.onNodeWithText("Select theme").performClick()
+        composeRule.runOnIdle { completeSave(true); back.onBackPressed() }
+        composeRule.onNodeWithText("Settings").assertIsDisplayed()
     }
 
     private fun selectPalette(id: String, name: String) {
@@ -292,14 +277,14 @@ class SessionBottomBarTest {
 
     @Test
     fun destinationsPresentAndSelectedStateTracksClicks() {
-        var selected = PrimaryDestination.HOME; var previewCancels = 0
+        var selected = PrimaryDestination.HOME
         composeRule.setContent {
             MaterialTheme {
                 var current by remember { mutableStateOf(PrimaryDestination.HOME) }
                 selected = current
                 SessionBottomBar(
                     selected = current,
-                    onSelect = { current = org.thanosapollo.nema.selectSessionDestinationAndCancelPreview(it, {}, { previewCancels++ }) },
+                    onSelect = { current = selectSessionDestination(it, {}) },
                 )
             }
         }
@@ -313,7 +298,7 @@ class SessionBottomBarTest {
         composeRule.runOnIdle { assertEquals(PrimaryDestination.SETTINGS, selected) }
         composeRule.onNodeWithText("Settings").assertIsSelected()
         composeRule.onNodeWithText("Switch account").assertDoesNotExist()
-        composeRule.onNodeWithText("Home").performClick(); composeRule.runOnIdle { assertEquals(1, previewCancels) }
+        composeRule.onNodeWithText("Home").performClick()
         composeRule.onNodeWithText("Settings").assertIsDisplayed()
     }
 

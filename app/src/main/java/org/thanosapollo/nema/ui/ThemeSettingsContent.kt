@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -15,11 +14,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.selectableGroup
-import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -35,52 +32,40 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import org.thanosapollo.nema.ui.theme.PaletteCatalog
 import org.thanosapollo.nema.ui.theme.PaletteDefinition
-private enum class ThemeSettingsPage { SETTINGS, THEMES, PICKER }
+private enum class ThemeSettingsPage { SETTINGS, THEMES }
 @Composable
-internal fun ThemeSettingsContent(currentPaletteId: String, onPreview: (String) -> Unit = {},
-    onApply: (((Boolean) -> Unit) -> Unit) = { it(false) }, onCancel: () -> Unit = {},
+internal fun ThemeSettingsContent(currentPaletteId: String,
+    onSelect: (String, (Boolean) -> Unit) -> Unit = { _, complete -> complete(false) },
     palettes: List<PaletteDefinition> = PaletteCatalog.entries,
     settingsContent: @Composable ((() -> Unit) -> Unit)) {
     var page by remember { mutableStateOf(ThemeSettingsPage.SETTINGS) }
-    var applying by remember { mutableStateOf(false) }
+    var saving by remember { mutableStateOf(false) }
     var saveFailed by remember { mutableStateOf(false) }
-    fun cancelPicker() { onCancel(); page = ThemeSettingsPage.THEMES }
     BackHandler(enabled = page == ThemeSettingsPage.THEMES) { page = ThemeSettingsPage.SETTINGS }
-    BackHandler(enabled = page == ThemeSettingsPage.PICKER) { if (!applying) cancelPicker() }
     when (page) {
         ThemeSettingsPage.SETTINGS -> settingsContent { page = ThemeSettingsPage.THEMES }
-        ThemeSettingsPage.THEMES -> Page("Themes") {
-            TextButton(
-                onClick = { page = ThemeSettingsPage.PICKER },
-                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-            ) { Text("Select theme") }
-        }
-        ThemeSettingsPage.PICKER -> ThemePicker(
+        ThemeSettingsPage.THEMES -> ThemePicker(
             palettes = palettes,
             currentPaletteId = currentPaletteId,
-            applying = applying,
+            saving = saving,
             saveFailed = saveFailed,
-            onPreview = { saveFailed = false; onPreview(it) },
-            onApply = { applying = true; saveFailed = false
-                onApply { saved -> applying = false
-                    if (saved) page = ThemeSettingsPage.THEMES else saveFailed = true }
+            onSelect = { id ->
+                saving = true
+                saveFailed = false
+                onSelect(id) { saved ->
+                    saving = false
+                    saveFailed = !saved
+                }
             },
-            onCancel = ::cancelPicker,
         )
     }
 }
 
 @Composable
-private fun Page(title: String, content: @Composable ColumnScope.() -> Unit) {
-    Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp))
-    { Text(title, style = MaterialTheme.typography.titleLarge); content() }
-}
-
-@Composable
-private fun ThemePicker(palettes: List<PaletteDefinition>, currentPaletteId: String, applying: Boolean,
-    saveFailed: Boolean, onPreview: (String) -> Unit, onApply: () -> Unit, onCancel: () -> Unit) {
+private fun ThemePicker(palettes: List<PaletteDefinition>, currentPaletteId: String, saving: Boolean,
+    saveFailed: Boolean, onSelect: (String) -> Unit) {
     Column(Modifier.fillMaxSize().padding(24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Select theme", style = MaterialTheme.typography.titleLarge)
+        Text("Themes", style = MaterialTheme.typography.titleLarge)
         if (palettes.isEmpty()) {
             Text("No themes available")
         } else {
@@ -89,15 +74,11 @@ private fun ThemePicker(palettes: List<PaletteDefinition>, currentPaletteId: Str
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 items(palettes, key = PaletteDefinition::id) { palette ->
-                    PaletteCard(palette, palette.id == currentPaletteId, !applying) { onPreview(palette.id) }
+                    PaletteCard(palette, palette.id == currentPaletteId, !saving) { onSelect(palette.id) }
                 }
             }
         }
         if (saveFailed) Text("Theme was not saved", modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = onCancel, enabled = !applying, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("Cancel") }
-            Button(onClick = onApply, enabled = palettes.isNotEmpty() && !applying, modifier = Modifier.weight(1f).heightIn(min = 48.dp)) { Text("Apply") }
-        }
     }
 }
 

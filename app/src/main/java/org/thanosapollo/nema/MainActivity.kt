@@ -271,8 +271,7 @@ private fun AccountConnectionScreen(
             )
         }
         fun selectDestination(next: PrimaryDestination) {
-            destination = selectSessionDestinationAndCancelPreview(
-                next, presenter::closeConversation, themeAuthority::cancelPreview)
+            destination = selectSessionDestination(next, presenter::closeConversation)
         }
         DisposableEffect(presenter) {
             onDispose(presenter::close)
@@ -480,9 +479,9 @@ private fun AccountConnectionScreen(
                                 scope.launch { application.appearanceRepository.clear(target) }
                             },
                             currentPaletteId = themeAuthority.palette.id,
-                            onPreviewPalette = themeAuthority::preview,
-                            onApplyPalette = { complete -> scope.launch { complete(themeAuthority.applyPreview()) } },
-                            onCancelPalette = themeAuthority::cancelPreview,
+                            onSelectPalette = { id, complete ->
+                                scope.launch { complete(themeAuthority.select(id)) }
+                            },
                             readReceiptsEnabled = readReceiptsEnabled,
                             onSetReadReceiptsEnabled = { enabled ->
                                 application.messagingPreferences.setReadReceipts(account.id.value, enabled)
@@ -674,7 +673,3 @@ private fun AccountConnectionScreen(
         },
     )
 }
-
-internal fun selectSessionDestinationAndCancelPreview(next: PrimaryDestination, close: () -> Unit,
-    cancelPreview: () -> Unit): PrimaryDestination { if (next != PrimaryDestination.SETTINGS)
-    cancelPreview(); return selectSessionDestination(next, close) }
