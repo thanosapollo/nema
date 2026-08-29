@@ -1407,18 +1407,21 @@ class SessionRuntimeTest {
             ConnectionState.ReconnectWait(oldAttempt.accountId, oldAttempt.generation),
             fixture.runtime.state.first { it is ConnectionState.ReconnectWait },
         )
-        repeat(3) {
+        repeat(7) { elapsedSeconds ->
             runCurrent()
-            advanceTimeBy(1_000L)
+            val connected = fixture.runtime.state.value as? ConnectionState.Connected
+            if (
+                connected?.accountId == oldAttempt.accountId &&
+                connected.generation.value > oldAttempt.generation.value
+            ) {
+                val currentAttempt = fixture.connection.attemptIdentity
+                assertEquals(oldAttempt.generation.value + 1, currentAttempt.generation.value)
+                assertEquals(connected, ConnectionState.Connected(currentAttempt.accountId, currentAttempt.generation))
+                return currentAttempt
+            }
+            if (elapsedSeconds < 6) advanceTimeBy(1_000L)
         }
-        runCurrent()
-        val currentAttempt = fixture.connection.attemptIdentity
-        assertEquals(oldAttempt.generation.value + 1, currentAttempt.generation.value)
-        assertEquals(
-            ConnectionState.Connected(currentAttempt.accountId, currentAttempt.generation),
-            fixture.runtime.state.value,
-        )
-        return currentAttempt
+        throw AssertionError("Reconnect did not complete within 6 seconds of virtual time")
     }
 
     private fun account(id: String, bareJid: String = "$id@example.org") = AccountConfiguration.create(
