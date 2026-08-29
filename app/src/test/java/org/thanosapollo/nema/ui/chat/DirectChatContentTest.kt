@@ -719,6 +719,49 @@ class DirectChatContentTest {
     }
 
     @Test
+    fun roomJoinIdentityIgnoresSubjectAndOccupantUpdates() {
+        val room = state(ACCOUNT_A, "room@conference.example.org").copy(
+            selectedPeerGroupChat = true,
+            selectedRoomSubject = "First subject",
+            selectedRoomOccupantCount = 2,
+        )
+        lateinit var show: (DirectChatState) -> Unit
+        var joins = 0
+        composeRule.setContent {
+            MaterialTheme {
+                var current by remember { mutableStateOf(room) }
+                show = { current = it }
+                DirectChatContent(
+                    state = current,
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onJoinRoom = {
+                        joins++
+                        true
+                    },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                )
+            }
+        }
+        composeRule.waitUntil { joins == 1 }
+
+        composeRule.runOnIdle {
+            show(
+                room.copy(
+                    selectedRoomSubject = "Updated subject",
+                    selectedRoomOccupantCount = 7,
+                ),
+            )
+        }
+        composeRule.waitForIdle()
+
+        assertEquals(1, joins)
+        composeRule.onNodeWithText("Updated subject").assertIsDisplayed()
+    }
+
+    @Test
     fun semanticRepliesAndManualQuotesHaveDistinctVisuals() {
         composeRule.setContent {
             MaterialTheme {
@@ -913,7 +956,7 @@ class DirectChatContentTest {
                             groupChat = true,
                         ),
                     ),
-                    conversationGroupChat = true,
+                    venue = ConversationVenue.Room(null, 0),
                     onLoadInlineImage = { preview },
                 )
             }
@@ -921,6 +964,77 @@ class DirectChatContentTest {
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("message-inline-image", useUnmergedTree = true).assertDoesNotExist()
         composeRule.onNodeWithText("Download pic.png", useUnmergedTree = true).assertIsDisplayed()
+    }
+
+    @Test
+    fun mixedDirectRowInRoomKeepsTimelinePolicyAndRowEvidenceDistinct() {
+        val preview = android.graphics.Bitmap.createBitmap(2, 2, android.graphics.Bitmap.Config.ARGB_8888)
+            .asImageBitmap()
+        val thread = ThreadRef(ThreadId.require("mixed-thread"))
+        val mixedDirect = message("mixed direct", outgoing = false).copy(
+            attachmentUrl = "https://example.org/mixed.png",
+            attachmentName = "mixed.png",
+            attachmentMime = "image/png",
+            replyReferenceId = "mixed-wire-id",
+            markable = true,
+            markerTargetId = "mixed-marker-id",
+            threadSummaries = listOf(
+                ThreadSummary(thread, 1, "mixed direct", "mixed direct"),
+            ),
+            reactions = listOf(
+                org.thanosapollo.nema.xmpp.reactions.ReactionDisplay(
+                    "mixed direct",
+                    "👍",
+                    1,
+                    false,
+                    listOf(PEER_A),
+                ),
+            ),
+        )
+        val editableDirect = message("mixed editable", outgoing = true).copy(
+            delivery = DeliveryPresentation.SENT,
+            correctionReferenceId = "mixed-edit-wire-id",
+        )
+        var displayed = 0
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(
+                    messages = listOf(mixedDirect),
+                    venue = ConversationVenue.Room("Room", 3),
+                    readReceiptsEnabled = true,
+                    activityResumed = true,
+                    onMessageDisplayed = {
+                        displayed++
+                        true
+                    },
+                    onLoadInlineImage = { preview },
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        assertEquals(
+            emptyList<TimelineMessage>(),
+            displayedMarkerCandidates(
+                messages = listOf(mixedDirect),
+                visibleMessageIds = setOf(mixedDirect.id),
+                enabled = true,
+                resumed = true,
+                venue = ConversationVenue.Room("Room", 3),
+            ),
+        )
+        assertNull(editableDirect.correctionTargetOrNull(ConversationVenue.Room("Room", 3)))
+        assertFalse(canReact(ConversationVenue.Room("Room", 3), mixedDirect))
+        assertEquals(0, displayed)
+        composeRule.onNodeWithTag("message-inline-image", useUnmergedTree = true).assertDoesNotExist()
+        composeRule.onNodeWithText("Download mixed.png", useUnmergedTree = true).assertIsDisplayed()
+        composeRule.onNodeWithTag("thread-summary-${thread.draftKey()}").assertDoesNotExist()
+        composeRule.onNodeWithTag("reaction-chip-mixed direct-👍").assertIsNotEnabled()
+        composeRule.onNodeWithTag("message-bubble-mixed direct")
+            .performSemanticsAction(SemanticsActions.OnClick)
+        composeRule.onNodeWithText("Reply").assertIsDisplayed()
+        composeRule.onNodeWithText("Reply as a thread").assertDoesNotExist()
+        composeRule.onNodeWithText("Reactions").assertDoesNotExist()
     }
 
     @Test
@@ -1016,12 +1130,36 @@ class DirectChatContentTest {
                 visibleMessageIds = messages.map(TimelineMessage::id).toSet(),
                 enabled = true,
                 resumed = true,
-                conversationGroupChat = false,
+                venue = ConversationVenue.Direct,
             ),
         )
-        assertTrue(displayedMarkerCandidates(messages, setOf("eligible"), false, true, false).isEmpty())
-        assertTrue(displayedMarkerCandidates(messages, setOf("eligible"), true, false, false).isEmpty())
-        assertTrue(displayedMarkerCandidates(messages, setOf("eligible"), true, true, true).isEmpty())
+        assertTrue(
+            displayedMarkerCandidates(
+                messages,
+                setOf("eligible"),
+                enabled = false,
+                resumed = true,
+                venue = ConversationVenue.Direct,
+            ).isEmpty(),
+        )
+        assertTrue(
+            displayedMarkerCandidates(
+                messages,
+                setOf("eligible"),
+                enabled = true,
+                resumed = false,
+                venue = ConversationVenue.Direct,
+            ).isEmpty(),
+        )
+        assertTrue(
+            displayedMarkerCandidates(
+                messages,
+                setOf("eligible"),
+                enabled = true,
+                resumed = true,
+                venue = ConversationVenue.Room(null, 0),
+            ).isEmpty(),
+        )
     }
 
     @Test
@@ -1247,20 +1385,20 @@ class DirectChatContentTest {
             correctionReferenceId = "editable-wire-id",
         )
 
-        assertNotNull(eligible.correctionTargetOrNull(conversationGroupChat = false))
-        assertNull(eligible.copy(outgoing = false).correctionTargetOrNull(false))
-        assertNull(eligible.copy(delivery = DeliveryPresentation.QUEUED).correctionTargetOrNull(false))
-        assertNull(eligible.copy(correctionReferenceId = null).correctionTargetOrNull(false))
-        assertNull(eligible.copy(groupChat = true).correctionTargetOrNull(false))
-        assertNull(eligible.copy(attachmentUrl = "https://example.org/file").correctionTargetOrNull(false))
-        assertNull(eligible.copy(attachmentName = "file").correctionTargetOrNull(false))
-        assertNull(eligible.copy(attachmentMime = "text/plain").correctionTargetOrNull(false))
-        assertNull(eligible.copy(attachmentSize = 1).correctionTargetOrNull(false))
-        assertNull(eligible.copy(replyToId = "reply-target").correctionTargetOrNull(false))
-        assertNull(eligible.copy(replyToJid = PEER_A).correctionTargetOrNull(false))
-        assertNull(eligible.copy(replyFallbackBody = "quoted").correctionTargetOrNull(false))
-        assertNull(eligible.copy(body = " ").correctionTargetOrNull(false))
-        assertNull(eligible.correctionTargetOrNull(conversationGroupChat = true))
+        assertNotNull(eligible.correctionTargetOrNull(ConversationVenue.Direct))
+        assertNull(eligible.copy(outgoing = false).correctionTargetOrNull(ConversationVenue.Direct))
+        assertNull(eligible.copy(delivery = DeliveryPresentation.QUEUED).correctionTargetOrNull(ConversationVenue.Direct))
+        assertNull(eligible.copy(correctionReferenceId = null).correctionTargetOrNull(ConversationVenue.Direct))
+        assertNull(eligible.copy(groupChat = true).correctionTargetOrNull(ConversationVenue.Direct))
+        assertNull(eligible.copy(attachmentUrl = "https://example.org/file").correctionTargetOrNull(ConversationVenue.Direct))
+        assertNull(eligible.copy(attachmentName = "file").correctionTargetOrNull(ConversationVenue.Direct))
+        assertNull(eligible.copy(attachmentMime = "text/plain").correctionTargetOrNull(ConversationVenue.Direct))
+        assertNull(eligible.copy(attachmentSize = 1).correctionTargetOrNull(ConversationVenue.Direct))
+        assertNull(eligible.copy(replyToId = "reply-target").correctionTargetOrNull(ConversationVenue.Direct))
+        assertNull(eligible.copy(replyToJid = PEER_A).correctionTargetOrNull(ConversationVenue.Direct))
+        assertNull(eligible.copy(replyFallbackBody = "quoted").correctionTargetOrNull(ConversationVenue.Direct))
+        assertNull(eligible.copy(body = " ").correctionTargetOrNull(ConversationVenue.Direct))
+        assertNull(eligible.correctionTargetOrNull(ConversationVenue.Room(null, 0)))
     }
 
     @Test
@@ -1331,7 +1469,7 @@ class DirectChatContentTest {
         val restored = saver.restore(checkNotNull(saved))?.value
 
         assertEquals(original, restored)
-        assertEquals(correction, restored?.toDraftSnapshot(groupChat = false)?.correction)
+        assertEquals(correction, restored?.toDraftSnapshot(ConversationVenue.Direct)?.correction)
         assertEquals(backup, restored?.correctionBackup)
     }
 
@@ -3201,7 +3339,7 @@ class DirectChatContentTest {
                             groupChat = true,
                         ),
                     ),
-                    conversationGroupChat = true,
+                    venue = ConversationVenue.Room(null, 0),
                 )
             }
         }
@@ -3317,11 +3455,11 @@ class DirectChatContentTest {
         val direct = message("direct", outgoing = false)
         val authorizedRoom = direct.copy(groupChat = true, replyReferenceId = "room-sid")
 
-        assertTrue(canReact(conversationIsGroupChat = false, direct))
-        assertTrue(canReact(conversationIsGroupChat = true, authorizedRoom))
-        assertFalse(canReact(conversationIsGroupChat = true, authorizedRoom.copy(replyReferenceId = null)))
-        assertFalse(canReact(conversationIsGroupChat = true, direct))
-        assertFalse(canReact(conversationIsGroupChat = false, authorizedRoom))
+        assertTrue(canReact(ConversationVenue.Direct, direct))
+        assertTrue(canReact(ConversationVenue.Room(null, 0), authorizedRoom))
+        assertFalse(canReact(ConversationVenue.Room(null, 0), authorizedRoom.copy(replyReferenceId = null)))
+        assertFalse(canReact(ConversationVenue.Room(null, 0), direct))
+        assertFalse(canReact(ConversationVenue.Direct, authorizedRoom))
     }
 
     @Test
@@ -3344,7 +3482,7 @@ class DirectChatContentTest {
             MaterialTheme {
                 MessageTimeline(
                     messages = listOf(message),
-                    conversationGroupChat = true,
+                    venue = ConversationVenue.Room(null, 0),
                     onReact = { selected, emoji ->
                         reacted = reacted + (selected.id to emoji)
                         true
@@ -3384,7 +3522,7 @@ class DirectChatContentTest {
             MaterialTheme {
                 MessageTimeline(
                     messages = listOf(message),
-                    conversationGroupChat = true,
+                    venue = ConversationVenue.Room(null, 0),
                     onReact = { _, emoji ->
                         reacted = reacted + emoji
                         true

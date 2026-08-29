@@ -146,7 +146,6 @@ import org.thanosapollo.nema.chat.ThreadSummary
 import org.thanosapollo.nema.chat.TimelineMessage
 import org.thanosapollo.nema.chat.threadSummaryLabel
 import org.thanosapollo.nema.session.SessionIdentity
-import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.thread.ThreadId
 import org.thanosapollo.nema.thread.ThreadRef
 import org.thanosapollo.nema.thread.draftKey
@@ -261,6 +260,7 @@ fun DirectChatContent(
     onReact: suspend (TimelineMessage, String) -> Boolean = { _, _ -> false },
     modifier: Modifier = Modifier,
 ) {
+    val venue = state.conversationVenue()
     key(state.accountId) {
         val scope = rememberCoroutineScope()
         var pendingSendIdentities by remember(state.accountId) {
@@ -278,8 +278,8 @@ fun DirectChatContent(
         var composerStates by remember(state.accountId) {
             mutableStateOf(emptyMap<DirectConversationKey, ComposerState>())
         }
-        val groupChatByConversation = remember(state.accountId) {
-            mutableMapOf<DirectConversationKey, Boolean>()
+        val venueByConversation = remember(state.accountId) {
+            mutableMapOf<DirectConversationKey, ConversationVenue>()
         }
         LaunchedEffect(state.pendingSendIdentities, state.completedSendSnapshots) {
             pendingSendIdentities = pendingSendIdentities + state.pendingSendIdentities
@@ -326,7 +326,7 @@ fun DirectChatContent(
                     selectedPeer,
                     state.selectedThread,
                 )
-                groupChatByConversation[conversationKey] = state.selectedPeerGroupChat
+                venueByConversation[conversationKey] = venue
                 val peerKey = conversationKey.copy(thread = null)
                 val peerLabel = state.selectedPeerLabel ?: state.selectedPeer.orEmpty()
                 var showPeerProfile by rememberSaveable(
@@ -440,7 +440,7 @@ fun DirectChatContent(
                     if (completions.isEmpty()) return@LaunchedEffect
                     latestFocusRequest += 1
                     setComposer(completions.values.fold(composer) { current, snapshot ->
-                        current.clearAfterSend(snapshot, state.selectedPeerGroupChat)
+                        current.clearAfterSend(snapshot, venue)
                     })
                     completedSendSnapshots = completedSendSnapshots - completions.keys
                     pendingSendIdentities = pendingSendIdentities - completions.keys
@@ -480,8 +480,8 @@ fun DirectChatContent(
                         }
                     }
                 }
-                LaunchedEffect(selectedPeer, state.selectedPeerGroupChat) {
-                    if (state.selectedPeerGroupChat) {
+                LaunchedEffect(selectedPeer, venue.messageKind) {
+                    if (venue is ConversationVenue.Room) {
                         onJoinRoom(selectedPeer)
                     }
                 }
@@ -496,7 +496,7 @@ fun DirectChatContent(
                 fun updateComposer(next: ComposerState) {
                     setComposer(next)
                     if (next.correction != null) return
-                    val snapshot = next.toDraftSnapshot(state.selectedPeerGroupChat)
+                    val snapshot = next.toDraftSnapshot(venue)
                     val identity = PendingSendIdentity(snapshot.key, snapshot.composerRevision)
                     val action = onDraftChange(snapshot)
                     pendingDraftIdentities += identity
@@ -565,11 +565,7 @@ fun DirectChatContent(
                                             state.recentThreads
                                                 .firstOrNull {
                                                     it.thread == state.selectedThread &&
-                                                        it.messageKind == if (state.selectedPeerGroupChat) {
-                                                            MessageKind.GROUPCHAT
-                                                        } else {
-                                                            MessageKind.CHAT
-                                                        }
+                                                        it.messageKind == venue.messageKind
                                                 }
                                                 ?.title
                                                 ?: "Thread",
@@ -585,8 +581,8 @@ fun DirectChatContent(
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
                                         )
-                                        state.selectedThread == null && state.selectedPeerGroupChat -> Text(
-                                            roomSubtitle(state.selectedRoomSubject, state.selectedRoomOccupantCount),
+                                        state.selectedThread == null && venue is ConversationVenue.Room -> Text(
+                                            roomSubtitle(venue.subject, venue.occupantCount),
                                             style = MaterialTheme.typography.labelSmall,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
@@ -670,7 +666,7 @@ fun DirectChatContent(
                             pendingDraftIdentities.none { it.key == conversationKey }
                         MessageTimeline(
                             messages = state.messages,
-                            conversationGroupChat = state.selectedPeerGroupChat,
+                            venue = venue,
                             editActionsEnabled = editActionsEnabled,
                             readReceiptsEnabled = readReceiptsEnabled,
                             activityResumed = activityResumed,
@@ -722,7 +718,7 @@ fun DirectChatContent(
                             onEdit = edit@{ message ->
                                 if (!editActionsEnabled) return@edit
                                 val target = requireNotNull(
-                                    message.correctionTargetOrNull(state.selectedPeerGroupChat),
+                                    message.correctionTargetOrNull(venue),
                                 )
                                 setComposer(composer.beginCorrection(target, message.body))
                                 focusComposerWhenReady = true
@@ -756,13 +752,13 @@ fun DirectChatContent(
                             Icon(Icons.Filled.Add, contentDescription = null)
                         }
                         fun sendWith(action: (DraftSnapshot) -> Deferred<Boolean>) {
-                            val snapshot = composer.toDraftSnapshot(state.selectedPeerGroupChat)
+                            val snapshot = composer.toDraftSnapshot(venue)
                             val identity = PendingSendIdentity(snapshot.key, snapshot.composerRevision)
                             fun markFailed() {
                                 val current = composerStates[snapshot.key]
                                     ?: composer.takeIf { it.key == snapshot.key }
-                                val groupChat = groupChatByConversation[snapshot.key] ?: return
-                                if (current?.toDraftSnapshot(groupChat) == snapshot) {
+                                val retainedVenue = venueByConversation[snapshot.key] ?: return
+                                if (current?.toDraftSnapshot(retainedVenue) == snapshot) {
                                     failedSendIdentities += identity
                                 }
                             }
@@ -1524,11 +1520,14 @@ internal data class ComposerState(
     val correction: DraftCorrection? = null,
     val correctionBackup: ComposerBackup? = null,
 ) {
-    fun toDraftSnapshot(groupChat: Boolean): DraftSnapshot = DraftSnapshot(
+    fun toDraftSnapshot(venue: ConversationVenue): DraftSnapshot = DraftSnapshot(
         key = key,
         body = body,
         composerRevision = revision,
-        groupChat = groupChat,
+        groupChat = when (venue) {
+            ConversationVenue.Direct -> false
+            is ConversationVenue.Room -> true
+        },
         attachmentUrl = attachmentUrl,
         attachmentName = attachmentName,
         attachmentMime = attachmentMime,
@@ -1586,8 +1585,8 @@ private fun ComposerState.cancelCorrection(): ComposerState {
     )
 }
 
-private fun ComposerState.clearAfterSend(snapshot: DraftSnapshot, groupChat: Boolean): ComposerState =
-    if (toDraftSnapshot(groupChat) == snapshot) {
+private fun ComposerState.clearAfterSend(snapshot: DraftSnapshot, venue: ConversationVenue): ComposerState =
+    if (toDraftSnapshot(venue) == snapshot) {
         if (snapshot.correction != null) cancelCorrection() else copy(
             body = "",
             attachmentUrl = null,
@@ -1800,9 +1799,9 @@ internal fun displayedMarkerCandidates(
     visibleMessageIds: Set<String>,
     enabled: Boolean,
     resumed: Boolean,
-    conversationGroupChat: Boolean,
+    venue: ConversationVenue,
 ): List<TimelineMessage> {
-    if (!enabled || !resumed || conversationGroupChat || visibleMessageIds.isEmpty()) return emptyList()
+    if (!enabled || !resumed || venue is ConversationVenue.Room || visibleMessageIds.isEmpty()) return emptyList()
     return messages.filter { message ->
         message.id in visibleMessageIds &&
             !message.outgoing &&
@@ -1812,9 +1811,9 @@ internal fun displayedMarkerCandidates(
     }
 }
 
-internal fun TimelineMessage.correctionTargetOrNull(conversationGroupChat: Boolean): DraftCorrection? {
+internal fun TimelineMessage.correctionTargetOrNull(venue: ConversationVenue): DraftCorrection? {
     val referenceId = correctionReferenceId?.takeIf(String::isNotEmpty) ?: return null
-    if (conversationGroupChat || groupChat || !outgoing || body.isBlank()) return null
+    if (venue is ConversationVenue.Room || groupChat || !outgoing || body.isBlank()) return null
     if (attachmentUrl != null || attachmentName != null || attachmentMime != null || attachmentSize != null) return null
     if (replyToId != null || replyToJid != null || replyFallbackBody != null) return null
     if (delivery !in setOf(
@@ -1827,15 +1826,21 @@ internal fun TimelineMessage.correctionTargetOrNull(conversationGroupChat: Boole
     return DraftCorrection(id, referenceId, body)
 }
 
-internal fun canReact(conversationIsGroupChat: Boolean, message: TimelineMessage): Boolean =
-    conversationIsGroupChat == message.groupChat &&
-        (!conversationIsGroupChat || message.replyReferenceId != null)
+internal fun canReact(venue: ConversationVenue, message: TimelineMessage): Boolean = when (venue) {
+    ConversationVenue.Direct -> !message.groupChat
+    is ConversationVenue.Room -> message.groupChat && message.replyReferenceId != null
+}
+
+internal fun canReact(conversationIsGroupChat: Boolean, message: TimelineMessage): Boolean = canReact(
+    venue = if (conversationIsGroupChat) ConversationVenue.Room(null, 0) else ConversationVenue.Direct,
+    message = message,
+)
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun MessageTimeline(
+internal fun MessageTimeline(
     messages: List<TimelineMessage>,
-    conversationGroupChat: Boolean = false,
+    venue: ConversationVenue = ConversationVenue.Direct,
     editActionsEnabled: Boolean = true,
     readReceiptsEnabled: Boolean = false,
     activityResumed: Boolean = false,
@@ -1922,7 +1927,7 @@ fun MessageTimeline(
         viewportRestored,
         readReceiptsEnabled,
         activityResumed,
-        conversationGroupChat,
+        venue.messageKind,
         latestId,
         markerSignature,
     ) {
@@ -1932,7 +1937,7 @@ fun MessageTimeline(
             visibleMessageIds = visibleMessageIds,
             enabled = readReceiptsEnabled,
             resumed = activityResumed,
-            conversationGroupChat = conversationGroupChat,
+            venue = venue,
         ).forEach { message ->
             val target = requireNotNull(message.markerTargetId)
             if (target !in reportedMarkerTargets && currentOnMessageDisplayed(message)) {
@@ -2006,7 +2011,7 @@ fun MessageTimeline(
                 contentType = { message -> if (message.outgoing) 1 else 0 },
             ) { message ->
                 var messageActionsOpen by remember(message.id) { mutableStateOf(false) }
-                val reactable = canReact(conversationGroupChat, message)
+                val reactable = canReact(venue, message)
                 val (bubbleContainerColor, bubbleContentColor) = messageBubbleColors(message.outgoing)
                 val visibleBody = remember(message.body, message.attachmentUrl) {
                     if (message.attachmentUrl == null) {
@@ -2016,7 +2021,7 @@ fun MessageTimeline(
                     }
                 }
                 val segments = remember(visibleBody) { parseQuotedBody(visibleBody) }
-                val correctionTarget = message.correctionTargetOrNull(conversationGroupChat)
+                val correctionTarget = message.correctionTargetOrNull(venue)
                     .takeIf { editActionsEnabled }
                 Box(modifier = Modifier.fillMaxWidth()) {
                     Column(
@@ -2075,7 +2080,7 @@ fun MessageTimeline(
                                         url = url,
                                         name = message.attachmentName,
                                         mime = resolvedMime,
-                                        groupChat = conversationGroupChat || message.groupChat,
+                                        groupChat = venue is ConversationVenue.Room || message.groupChat,
                                         cached = isAttachmentCached(url),
                                         onUse = {
                                             onUseAttachment(url, message.attachmentName, resolvedMime)
@@ -2103,7 +2108,7 @@ fun MessageTimeline(
                                 if (message.edited) {
                                     Text("Edited", style = MaterialTheme.typography.labelSmall)
                                 }
-                                if (!conversationGroupChat && !message.groupChat) {
+                                if (venue is ConversationVenue.Direct && !message.groupChat) {
                                     message.threadSummaries.forEach { summary ->
                                         ThreadSummaryButton(
                                             summary = summary,
@@ -2220,7 +2225,7 @@ fun MessageTimeline(
                                         onReply(message)
                                     },
                                 )
-                                if (!conversationGroupChat && !message.groupChat) {
+                                if (venue is ConversationVenue.Direct && !message.groupChat) {
                                     DropdownMenuItem(
                                         text = { Text("Reply as a thread") },
                                         onClick = {
