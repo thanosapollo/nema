@@ -1,27 +1,18 @@
 package org.thanosapollo.nema.ui
 
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.unit.dp
 import org.thanosapollo.nema.account.AccountConfiguration
-import org.thanosapollo.nema.update.UpdateUiModel
 import org.thanosapollo.nema.ui.theme.AppearanceScope
 import org.thanosapollo.nema.ui.theme.AppearanceSpec
 import org.thanosapollo.nema.ui.theme.PaletteChoice
 import org.thanosapollo.nema.ui.theme.ThemeMode
+import org.thanosapollo.nema.update.UpdateUiModel
 import org.thanosapollo.nema.xmpp.transport.AccountId
 
 @Suppress("UNUSED_PARAMETER")
@@ -61,73 +52,122 @@ fun AccountSettingsContent(
     ThemeSettingsContent(
         currentPaletteId = currentPaletteId,
         onSelect = onSelectPalette,
-    ) { openThemes -> Column(
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text("Settings", style = MaterialTheme.typography.titleLarge)
-        connectionStatus?.let { status ->
-            quietConnectionStatus(status)?.let {
-                Text(it, style = MaterialTheme.typography.bodySmall)
-            }
-        }
-        TextButton(onClick = openThemes, modifier = Modifier.fillMaxWidth()) { Text("Themes") }
-        AccountsContent(
-            accounts = accounts,
-            activeAccountId = activeAccountId,
-            switching = switchingAccount,
-            onSelectAccount = onSelectAccount,
-            onAddAccount = onAddAccount,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        Text("Privacy", style = MaterialTheme.typography.titleMedium)
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+        modifier = modifier,
+    ) { openThemes ->
+        SettingsProfileScreen(
+            title = "Settings",
+            listTag = "settings-list",
         ) {
-            Column(Modifier.weight(1f)) {
-                Text("Send read receipts")
-                Text(
-                    "Tell direct-chat contacts when a visible message has been read.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+            connectionStatus?.let { status ->
+                quietConnectionStatus(status)?.let { quietStatus ->
+                    item {
+                        Text(
+                            quietStatus,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+            }
+            item {
+                SettingsRow(
+                    title = "Themes",
+                    onClick = openThemes,
+                    modifier = Modifier.testTag("settings-row-themes"),
                 )
             }
-            Switch(
-                checked = readReceiptsEnabled,
-                onCheckedChange = onSetReadReceiptsEnabled,
-                modifier = Modifier.testTag("read-receipts-toggle"),
-            )
-        }
-        Text("Session", style = MaterialTheme.typography.titleMedium)
-        TextButton(onClick = onStop, modifier = Modifier.fillMaxWidth()) {
-            Text("Stop")
-        }
-        TextButton(onClick = onSignOut, modifier = Modifier.fillMaxWidth()) {
-            Text("Sign out")
-        }
-        update?.let { model ->
-            Text("Updates", style = MaterialTheme.typography.titleMedium)
-            Text(model.currentVersion)
-            model.status?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
-            TextButton(
-                onClick = onCheckForUpdates,
-                enabled = model.canCheck,
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("Check for updates") }
-            if (model.canDownload) {
-                TextButton(onClick = onDownloadUpdate, modifier = Modifier.fillMaxWidth()) {
-                    Text("Download update")
+            item {
+                AccountsContent(
+                    accounts = accounts,
+                    activeAccountId = activeAccountId,
+                    switching = switchingAccount,
+                    onSelectAccount = onSelectAccount,
+                    onAddAccount = onAddAccount,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            item {
+                SettingsSectionHeader(
+                    title = "Privacy",
+                    modifier = Modifier.testTag("settings-section-privacy"),
+                )
+            }
+            item {
+                SettingsRow(
+                    title = "Send read receipts",
+                    supportingText = "Tell direct-chat contacts when a visible message has been read.",
+                    modifier = Modifier.testTag("settings-row-read-receipts"),
+                    trailingContent = {
+                        Switch(
+                            checked = readReceiptsEnabled,
+                            onCheckedChange = onSetReadReceiptsEnabled,
+                            modifier = Modifier.testTag("read-receipts-toggle"),
+                        )
+                    },
+                )
+            }
+            item {
+                SettingsSectionHeader(
+                    title = "Session",
+                    modifier = Modifier.testTag("settings-section-session"),
+                )
+            }
+            item {
+                SettingsRow(
+                    title = "Stop",
+                    onClick = onStop,
+                    modifier = Modifier.testTag("settings-row-stop"),
+                )
+            }
+            item {
+                SettingsRow(
+                    title = "Sign out",
+                    onClick = onSignOut,
+                    modifier = Modifier.testTag("settings-row-sign-out"),
+                    tone = SettingsRowTone.Danger,
+                )
+            }
+            update?.let { model ->
+                item {
+                    SettingsSectionHeader(
+                        title = "Updates",
+                        modifier = Modifier.testTag("settings-section-updates"),
+                    )
+                }
+                item {
+                    SettingsRow(
+                        title = model.currentVersion,
+                        supportingText = model.status,
+                        modifier = Modifier.testTag("settings-row-update-status"),
+                    )
+                }
+                item {
+                    SettingsRow(
+                        title = "Check for updates",
+                        enabled = model.canCheck,
+                        onClick = onCheckForUpdates,
+                        modifier = Modifier.testTag("settings-row-check-update"),
+                    )
+                }
+                if (model.canDownload) {
+                    item {
+                        SettingsRow(
+                            title = "Download update",
+                            onClick = onDownloadUpdate,
+                            modifier = Modifier.testTag("settings-row-download-update"),
+                        )
+                    }
+                }
+                if (model.canInstall) {
+                    item {
+                        SettingsRow(
+                            title = "Install update",
+                            onClick = onInstallUpdate,
+                            modifier = Modifier.testTag("settings-row-install-update"),
+                        )
+                    }
                 }
             }
-            if (model.canInstall) {
-                TextButton(onClick = onInstallUpdate, modifier = Modifier.fillMaxWidth()) {
-                    Text("Install update")
-                }
-            }
         }
-    } }
+    }
 }

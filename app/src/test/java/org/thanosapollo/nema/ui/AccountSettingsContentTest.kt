@@ -3,6 +3,7 @@ package org.thanosapollo.nema.ui
 import android.app.Application
 import androidx.activity.OnBackPressedDispatcher
 import androidx.activity.compose.LocalOnBackPressedDispatcherOwner
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -11,9 +12,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHeightIsAtLeast
+import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.StateRestorationTester
@@ -26,10 +29,12 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -69,13 +74,82 @@ class AccountSettingsContentTest {
             }
         }
 
-        composeRule.onNodeWithText("Current version: Nema 0.1.1 (2)").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Check for updates").performScrollTo().performClick()
-        composeRule.onNodeWithText("Download update").performScrollTo().performClick()
+        val list = composeRule.onNodeWithTag("settings-list")
+        list.performScrollToIndex(8)
+        composeRule.onNodeWithText("Current version: Nema 0.1.1 (2)").assertIsDisplayed()
+        composeRule.onNodeWithText("Nema 0.2 is available").assertIsDisplayed()
+        list.performScrollToIndex(9)
+        composeRule.onNodeWithTag("settings-row-check-update").performClick()
+        list.performScrollToIndex(10)
+        composeRule.onNodeWithTag("settings-row-download-update").performClick()
         composeRule.onNodeWithText("Install update").assertDoesNotExist()
         assertEquals(1, checks)
         assertEquals(1, downloads)
         assertEquals(0, installs)
+    }
+
+    @Test
+    fun updaterCurrentStatusAndDisabledCheckInstallStateStayExact() {
+        var checks = 0
+        var downloads = 0
+        var installs = 0
+        composeRule.setContent {
+            MaterialTheme {
+                AccountSettingsContent(
+                    activeAccountId = FIRST,
+                    update = UpdateUiModel(
+                        currentVersion = "Current version: Nema 0.1.1 (2)",
+                        status = "Update verified",
+                        canCheck = false,
+                        canDownload = false,
+                        canInstall = true,
+                    ),
+                    onCheckForUpdates = { checks++ },
+                    onDownloadUpdate = { downloads++ },
+                    onInstallUpdate = { installs++ },
+                )
+            }
+        }
+
+        val list = composeRule.onNodeWithTag("settings-list")
+        list.performScrollToIndex(8)
+        composeRule.onNodeWithText("Current version: Nema 0.1.1 (2)").assertIsDisplayed()
+        composeRule.onNodeWithText("Update verified").assertIsDisplayed()
+        list.performScrollToIndex(9)
+        composeRule.onNodeWithTag("settings-row-check-update")
+            .assertIsNotEnabled()
+            .assertHasNoClickAction()
+        composeRule.onNodeWithText("Download update").assertDoesNotExist()
+        list.performScrollToIndex(10)
+        composeRule.onNodeWithTag("settings-row-install-update").performClick()
+        assertEquals(0, checks)
+        assertEquals(0, downloads)
+        assertEquals(1, installs)
+    }
+
+    @Test
+    fun settingsKeepsTaggedThemesPrivacyAndSessionOrder() {
+        composeRule.setContent {
+            MaterialTheme {
+                AccountSettingsContent(activeAccountId = FIRST)
+            }
+        }
+
+        val list = composeRule.onNodeWithTag("settings-list")
+        list.performScrollToIndex(0)
+        composeRule.onNodeWithTag("settings-row-themes").assertHeightIsAtLeast(64.dp)
+        list.performScrollToIndex(1)
+        composeRule.onNodeWithText("Accounts").assertIsDisplayed()
+        list.performScrollToIndex(2)
+        composeRule.onNodeWithTag("settings-section-privacy").assertIsDisplayed()
+        list.performScrollToIndex(3)
+        composeRule.onNodeWithTag("settings-row-read-receipts").assertHeightIsAtLeast(64.dp)
+        list.performScrollToIndex(4)
+        composeRule.onNodeWithTag("settings-section-session").assertIsDisplayed()
+        list.performScrollToIndex(5)
+        composeRule.onNodeWithTag("settings-row-stop").assertHeightIsAtLeast(64.dp)
+        list.performScrollToIndex(6)
+        composeRule.onNodeWithTag("settings-row-sign-out").assertHeightIsAtLeast(64.dp)
     }
 
     @Test
@@ -92,8 +166,11 @@ class AccountSettingsContentTest {
             }
         }
 
-        composeRule.onNodeWithText("Sign out").performScrollTo().performClick()
-        composeRule.onNodeWithText("Stop").performScrollTo().performClick()
+        val list = composeRule.onNodeWithTag("settings-list")
+        list.performScrollToIndex(6)
+        composeRule.onNodeWithTag("settings-row-sign-out").performClick()
+        list.performScrollToIndex(5)
+        composeRule.onNodeWithTag("settings-row-stop").performClick()
 
         assertEquals(1, signOutCalls)
         assertEquals(1, stopCalls)
@@ -116,6 +193,49 @@ class AccountSettingsContentTest {
         composeRule.onNodeWithText("Custom accent #RRGGBB").assertDoesNotExist()
         composeRule.onNodeWithText("Apply custom palette").assertDoesNotExist()
         composeRule.onNodeWithText("Dark").assertDoesNotExist()
+    }
+
+    @Test
+    fun callerTopPaddingProtectsSettingsAndThemesEqually() {
+        composeRule.setContent {
+            MaterialTheme {
+                AccountSettingsContent(
+                    activeAccountId = FIRST,
+                    modifier = Modifier.padding(top = 32.dp),
+                )
+            }
+        }
+
+        val callerTopPaddingPx = with(composeRule.density) { 32.dp.toPx() }
+        val settingsTitleTop = composeRule.onNodeWithText("Settings")
+            .fetchSemanticsNode().boundsInRoot.top
+        val settingsListTop = composeRule.onNodeWithTag("settings-list")
+            .fetchSemanticsNode().boundsInRoot.top
+        assertTrue(
+            "caller top padding must protect Settings title",
+            settingsTitleTop >= callerTopPaddingPx,
+        )
+        assertTrue(
+            "caller top padding must protect Settings list",
+            settingsListTop >= callerTopPaddingPx,
+        )
+
+        composeRule.onNodeWithTag("settings-row-themes").performClick()
+
+        val themesTitleTop = composeRule.onNodeWithText("Themes")
+            .fetchSemanticsNode().boundsInRoot.top
+        val themesListTop = composeRule.onNodeWithTag("theme-scroll-list")
+            .fetchSemanticsNode().boundsInRoot.top
+        assertTrue(
+            "caller top padding must protect Themes title",
+            themesTitleTop >= callerTopPaddingPx,
+        )
+        assertTrue(
+            "caller top padding must protect Themes list",
+            themesListTop >= callerTopPaddingPx,
+        )
+        assertEquals(settingsTitleTop, themesTitleTop, 0.5f)
+        assertEquals(settingsListTop, themesListTop, 0.5f)
     }
 
     @Test
@@ -174,10 +294,14 @@ class AccountSettingsContentTest {
         composeRule.onNodeWithText("Apply").assertDoesNotExist()
         composeRule.onNodeWithText("Cancel").assertDoesNotExist()
         composeRule.onNodeWithText("Default").assertIsSelected()
-        composeRule.onNodeWithTag("theme-list")
+        composeRule.onNodeWithText("Default")
+            .assert(SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.RadioButton))
+        composeRule.onNodeWithTag("theme-scroll-list")
             .assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.SelectableGroup))
+        composeRule.onNodeWithTag("theme-list")
+            .assert(SemanticsMatcher.keyNotDefined(SemanticsProperties.SelectableGroup))
         PaletteCatalog.entries.forEachIndexed { index, palette ->
-            composeRule.onNodeWithTag("theme-list").performScrollToIndex(index)
+            composeRule.onNodeWithTag("theme-scroll-list").performScrollToIndex(index)
             composeRule.onNodeWithText(palette.displayName).assertIsDisplayed()
             composeRule.onNodeWithTag("theme-swatches-${palette.id}", true).assertExists()
         }
@@ -219,7 +343,7 @@ class AccountSettingsContentTest {
 
     private fun selectPalette(id: String, name: String) {
         val index = PaletteCatalog.entries.indexOfFirst { it.id == id }
-        composeRule.onNodeWithTag("theme-list").performScrollToIndex(index)
+        composeRule.onNodeWithTag("theme-scroll-list").performScrollToIndex(index)
         composeRule.onNodeWithText(name).performClick()
     }
 
