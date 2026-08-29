@@ -1543,6 +1543,7 @@ class ChatRepositoryPresenterTest {
                 "threaded-target",
                 "threaded body",
                 threadId = "parent-thread",
+                parentThreadId = "root-thread",
             ).copy(
                 aliases = listOf(
                     TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "threaded-wire-id"),
@@ -1555,7 +1556,7 @@ class ChatRepositoryPresenterTest {
             repository = repository,
             scope = scope,
             enqueue = { _, _ -> true },
-            threadingPolicy = ThreadingPolicy { ThreadId.require("child-thread") },
+            threadingPolicy = ThreadingPolicy { error("thread ID must not be allocated") },
         )
         assertTrue(presenter.selectPeer(PEER))
         val selected = presenter.state.first { state ->
@@ -1578,8 +1579,15 @@ class ChatRepositoryPresenterTest {
 
         assertTrue(presenter.startThreadFrom(currentThreaded))
 
-        val opened = presenter.state.first { it.selectedThread?.id?.value == "child-thread" }
-        assertEquals("parent-thread", opened.selectedThread?.parentId?.value)
+        val expectedThread = ThreadRef(
+            ThreadId.require("parent-thread"),
+            ThreadId.require("root-thread"),
+        )
+        val opened = presenter.state.first { it.selectedThread == expectedThread }
+        assertEquals(expectedThread, opened.selectedThread)
+        assertEquals(ChatRoute(PEER, expectedThread), repository.observeRoute(ACCOUNT).first())
+        val draftKey = DirectConversationKey(ACCOUNT, PEER, expectedThread)
+        assertEquals("threaded-wire-id", repository.observeStoredDraft(draftKey).first().reply?.id)
         assertEquals("threaded-wire-id", opened.draftReply?.id)
         presenter.close()
     }

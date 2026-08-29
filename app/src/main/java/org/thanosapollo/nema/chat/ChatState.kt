@@ -795,7 +795,7 @@ class DirectChatPresenter(
         if (current.selectedPeerGroupChat) return false
         if (current.messages.singleOrNull { it.id == message.id } != message) return false
         val reference = message.replyReferenceId ?: return false
-        val thread = message.thread?.let(threadingPolicy::childOf) ?: newTopic(
+        val thread = message.thread?.let(threadingPolicy::replyTo) ?: newTopic(
             current.currentSession ?: repository.ensureCurrentSession(account.id.value, route.peerJid),
         )
         val nextRoute = route.copy(thread = thread)
