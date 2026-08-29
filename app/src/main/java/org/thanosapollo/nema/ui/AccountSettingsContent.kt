@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import org.thanosapollo.nema.account.AccountConfiguration
+import org.thanosapollo.nema.update.UpdateUiModel
 import org.thanosapollo.nema.ui.theme.AppearanceScope
 import org.thanosapollo.nema.ui.theme.AppearanceSpec
 import org.thanosapollo.nema.ui.theme.PaletteChoice
@@ -51,6 +52,10 @@ fun AccountSettingsContent(
     onAddAccount: () -> Unit = {},
     onStop: () -> Unit = {},
     onSignOut: () -> Unit = {},
+    update: UpdateUiModel? = null,
+    onCheckForUpdates: () -> Unit = {},
+    onDownloadUpdate: () -> Unit = {},
+    onInstallUpdate: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     ThemeSettingsContent(
@@ -103,6 +108,26 @@ fun AccountSettingsContent(
         }
         TextButton(onClick = onSignOut, modifier = Modifier.fillMaxWidth()) {
             Text("Sign out")
+        }
+        update?.let { model ->
+            Text("Updates", style = MaterialTheme.typography.titleMedium)
+            Text(model.currentVersion)
+            model.status?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+            TextButton(
+                onClick = onCheckForUpdates,
+                enabled = model.canCheck,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Check for updates") }
+            if (model.canDownload) {
+                TextButton(onClick = onDownloadUpdate, modifier = Modifier.fillMaxWidth()) {
+                    Text("Download update")
+                }
+            }
+            if (model.canInstall) {
+                TextButton(onClick = onInstallUpdate, modifier = Modifier.fillMaxWidth()) {
+                    Text("Install update")
+                }
+            }
         }
     } }
 }

@@ -266,7 +266,7 @@ class UpdateRepository(
     private val blockingDispatcher: CoroutineDispatcher = Dispatchers.IO,
     private val packageFacts: PackageFactsAdapter? = null,
     private val apiLevel: Int = android.os.Build.VERSION.SDK_INT,
-    private val installLauncher: (BoundUpdateArtifact) -> Boolean = { false },
+    private val installLauncher: (BoundUpdateArtifact, InstallHandoffLease) -> Boolean = { _, _ -> false },
 ) {
     constructor(
         installedVersionCode: Long,
@@ -308,7 +308,14 @@ class UpdateRepository(
             if (artifact != null) return
             if (downloading) return
             if (available.manifest.size > MAX_APK_BYTES) return
-            pruneUpdateFiles()
+            try {
+                pruneUpdateFiles()
+            } catch (failure: CancellationException) {
+                throw failure
+            } catch (_: Exception) {
+                mutableState.value = UpdateState.Failed("Could not download update. Try again.", accepted)
+                return
+            }
             downloading = true
             val prior = mutableState.value
             mutableState.value = UpdateState.Downloading(accepted)
@@ -393,7 +400,7 @@ class UpdateRepository(
                 lease = handoff
                 mutableState.value = UpdateState.Installing(authority.artifact.accepted, handoff)
                 try {
-                    if (installLauncher(authority.artifact)) return@withContext true
+                    if (installLauncher(authority.artifact, handoff)) return@withContext true
                     restoreVerified(handoff)
                     false
                 } catch (failure: CancellationException) {
@@ -409,13 +416,12 @@ class UpdateRepository(
         }
     }
 
-    suspend fun settleInstallOnResume() {
+    suspend fun settleInstallOnResume(expectedLease: InstallHandoffLease) {
         val adapter = packageFacts ?: return
         withContext(blockingDispatcher) {
-            if (!gate.tryLock()) return@withContext
-            try {
-                val handoff = lease ?: return@withContext
-                val authority = handoff.verified
+            gate.withLock {
+                if (lease !== expectedLease) return@withLock
+                val authority = expectedLease.verified
                 val installed = safeInstalled(adapter)
                 val candidate = safeArchive(adapter, authority.artifact.file)
                 val upgraded = installed != null && candidate != null && installed.packageName == candidate.packageName &&
@@ -423,12 +429,10 @@ class UpdateRepository(
                 val exact = installed == authority.installed && candidate == authority.candidate &&
                     artifact == authority.artifact && fileMatches(authority.artifact)
                 if (!upgraded && exact) {
-                    restoreVerified(handoff)
+                    restoreVerified(expectedLease)
                 } else {
                     clearInstallAuthority(authority.artifact)
                 }
-            } finally {
-                gate.unlock()
             }
         }
     }

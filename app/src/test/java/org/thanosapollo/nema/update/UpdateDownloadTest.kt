@@ -503,25 +503,57 @@ class UpdateDownloadTest {
         assertEquals(acceptedReplacement.accepted.generation + 1, acceptedLater.accepted.generation)
     }
 
-    @Test fun `cleanup refusal exposes failure but never binds unauthorized candidate`() = runTest {
+    @Test fun `cleanup refusal retry stays failed without escaping or invoking transport`() = runTest {
         val bytes = "bad cleanup".toByteArray()
         var refuseDelete = false
         val directory = temporary.newFolder("refused-cleanup")
         val manifest = manifest(bytes)
         val fetcher = FakeFetcher(manifestJson(manifest))
-        val repository = repositoryWithSeams(directory, fetcher,
-            RecordingEffect(bytes.dropLast(1).toByteArray()),
+        val effect = RecordingEffect(bytes.dropLast(1).toByteArray())
+        val repository = repositoryWithSeams(directory, fetcher, effect,
             delete = { file -> if (refuseDelete) false else file.delete() })
         repository.checkManual()
         val accepted = repository.state.value.accepted
         refuseDelete = true
 
         repository.download()
+        val firstFailure = repository.state.value as UpdateState.Failed
+        assertSame(accepted, firstFailure.accepted)
+        assertEquals(1, effect.calls)
 
-        val failed = repository.state.value as UpdateState.Failed
-        assertEquals(accepted, failed.accepted)
+        repository.download()
+
+        val retryFailure = repository.state.value as UpdateState.Failed
+        assertEquals("Could not download update. Try again.", retryFailure.message)
+        assertSame(accepted, retryFailure.accepted)
+        assertEquals(1, effect.calls)
         assertNull(repository.boundArtifact())
         assertTrue(directory.resolve(PART_FILE_NAME).exists())
+    }
+
+    @Test fun `retry preflight propagates cancellation and errors without invoking transport`() = runTest {
+        listOf<Throwable>(CancellationException("stop"), AssertionError("fatal")).forEachIndexed { index, failure ->
+            val bytes = "preflight $index".toByteArray()
+            var deleteFailure: Throwable? = null
+            val directory = temporary.newFolder("preflight-$index")
+            val fetcher = FakeFetcher(manifestJson(manifest(bytes)))
+            val effect = RecordingEffect(bytes.dropLast(1).toByteArray())
+            val repository = repositoryWithSeams(directory, fetcher, effect, delete = {
+                deleteFailure?.let { throw it }
+                false
+            })
+            repository.checkManual()
+            repository.download()
+            val failed = repository.state.value as UpdateState.Failed
+            deleteFailure = failure
+
+            var observed: Throwable? = null
+            try { repository.download() } catch (caught: Throwable) { observed = caught }
+
+            assertSame(failure, observed)
+            assertSame(failed, repository.state.value)
+            assertEquals(1, effect.calls)
+        }
     }
 
     @Test fun `cancelled cleanup refusal propagates cancellation and exposes failure`() = runTest {

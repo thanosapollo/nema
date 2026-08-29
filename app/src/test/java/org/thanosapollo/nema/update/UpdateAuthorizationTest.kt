@@ -174,7 +174,7 @@ class UpdateAuthorizationTest {
             { throw IllegalStateException("private") },
         ).forEach { outcome ->
             lateinit var fixture: Fixture
-            fixture = fixture(launcher = {
+            fixture = fixture(launcher = { _, _ ->
                 assertTrue(fixture.repository.state.value is UpdateState.Installing)
                 outcome(fixture)
             })
@@ -186,7 +186,7 @@ class UpdateAuthorizationTest {
     }
 
     @Test fun `launcher cancellation restores exact verified and propagates`() = runTest {
-        val fixture = fixture(launcher = { throw CancellationException("stop") })
+        val fixture = fixture(launcher = { _, _ -> throw CancellationException("stop") })
         fixture.prepareVerified()
         val prior = fixture.repository.state.value
         try { fixture.repository.install(); fail() } catch (_: CancellationException) {}
@@ -260,14 +260,15 @@ class UpdateAuthorizationTest {
             { it.beforeInstalled = { throw CancellationException("installed") } },
             { it.beforeArchive = { throw CancellationException("archive") } },
         ).forEach { cancelAdapter ->
-            val fixture = fixture(launcher = { true })
+            val fixture = fixture(launcher = { _, _ -> true })
             fixture.prepareVerified()
             assertTrue(fixture.repository.install())
             val prior = fixture.repository.state.value
+            val lease = (prior as UpdateState.Installing).lease
             val candidate = fixture.repository.boundArtifact()
             cancelAdapter(fixture.adapter)
 
-            try { fixture.repository.settleInstallOnResume(); fail() } catch (_: CancellationException) {}
+            try { fixture.repository.settleInstallOnResume(lease); fail() } catch (_: CancellationException) {}
             assertSame(prior, fixture.repository.state.value)
             assertSame(candidate, fixture.repository.boundArtifact())
             assertTrue(fixture.directory.resolve(CANDIDATE_FILE_NAME).exists())
@@ -275,7 +276,7 @@ class UpdateAuthorizationTest {
     }
 
     @Test fun `true launcher leaves lease and blocks every repository action`() = runTest {
-        val fixture = fixture(launcher = { true })
+        val fixture = fixture(launcher = { _, _ -> true })
         fixture.prepareVerified()
         assertTrue(fixture.repository.install())
         assertTrue(fixture.repository.state.value is UpdateState.Installing)
@@ -291,39 +292,74 @@ class UpdateAuthorizationTest {
     }
 
     @Test fun `resume cancellation restores exact verified and upgrade clears candidate`() = runTest {
-        val canceled = fixture(launcher = { true })
+        val canceled = fixture(launcher = { _, _ -> true })
         canceled.prepareVerified()
         val prior = canceled.repository.state.value as UpdateState.Verified
         canceled.repository.install()
-        canceled.repository.settleInstallOnResume()
+        val canceledLease = (canceled.repository.state.value as UpdateState.Installing).lease
+        canceled.repository.settleInstallOnResume(canceledLease)
         assertSame(prior, canceled.repository.state.value)
 
-        val upgraded = fixture(launcher = { true })
+        val upgraded = fixture(launcher = { _, _ -> true })
         upgraded.prepareVerified()
         upgraded.repository.install()
+        val upgradedLease = (upgraded.repository.state.value as UpdateState.Installing).lease
         upgraded.adapter.installed = upgraded.candidate
-        upgraded.repository.settleInstallOnResume()
+        upgraded.repository.settleInstallOnResume(upgradedLease)
         assertNull(upgraded.repository.boundArtifact())
         assertFalse(upgraded.directory.resolve(CANDIDATE_FILE_NAME).exists())
     }
 
     @Test fun `resume stale candidate clears authority and cleanup refusal fails closed`() = runTest {
-        val stale = fixture(launcher = { true })
+        val stale = fixture(launcher = { _, _ -> true })
         stale.prepareVerified()
         stale.repository.install()
+        val staleLease = (stale.repository.state.value as UpdateState.Installing).lease
         stale.adapter.candidate = stale.candidate!!.copy(versionCode = 4)
-        stale.repository.settleInstallOnResume()
+        stale.repository.settleInstallOnResume(staleLease)
         assertNull(stale.repository.boundArtifact())
 
         var refuse = false
-        val refused = fixture(launcher = { true }, delete = { file -> if (refuse) false else file.delete() })
+        val refused = fixture(launcher = { _, _ -> true }, delete = { file -> if (refuse) false else file.delete() })
         refused.prepareVerified()
         refused.repository.install()
+        val refusedLease = (refused.repository.state.value as UpdateState.Installing).lease
         refused.adapter.candidate = null
         refuse = true
-        refused.repository.settleInstallOnResume()
+        refused.repository.settleInstallOnResume(refusedLease)
         assertTrue(refused.repository.state.value is UpdateState.Failed)
         assertNull(refused.repository.boundArtifact())
+    }
+
+    @Test fun `delayed settlement for stale lease cannot settle a newer install`() = runTest {
+        val fixture = fixture(launcher = { _, _ -> true })
+        fixture.prepareVerified()
+        val verified = fixture.repository.state.value as UpdateState.Verified
+        val candidate = fixture.repository.boundArtifact()
+
+        assertTrue(fixture.repository.install())
+        val lease1 = (fixture.repository.state.value as UpdateState.Installing).lease
+        assertSame(lease1, fixture.launchedLease)
+        val delayed = async(start = CoroutineStart.LAZY) {
+            fixture.repository.settleInstallOnResume(lease1)
+        }
+
+        fixture.repository.settleInstallOnResume(lease1)
+        assertSame(verified, fixture.repository.state.value)
+        assertTrue(fixture.repository.install())
+        val installing2 = fixture.repository.state.value as UpdateState.Installing
+        val lease2 = installing2.lease
+        assertTrue(lease1 !== lease2)
+        assertSame(lease2, fixture.launchedLease)
+
+        delayed.await()
+        assertSame(installing2, fixture.repository.state.value)
+        assertSame(lease2, (fixture.repository.state.value as UpdateState.Installing).lease)
+        assertSame(candidate, fixture.repository.boundArtifact())
+
+        fixture.repository.settleInstallOnResume(lease2)
+        assertSame(verified, fixture.repository.state.value)
+        assertSame(candidate, fixture.repository.boundArtifact())
     }
 
     private fun fixture(
@@ -334,7 +370,7 @@ class UpdateAuthorizationTest {
             signingHistory = setOf(signer),
             currentSignerCount = 1,
         ),
-        launcher: (BoundUpdateArtifact) -> Boolean = { false },
+        launcher: (BoundUpdateArtifact, InstallHandoffLease) -> Boolean = { _, _ -> false },
         delete: (File) -> Boolean = File::delete,
         dispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.Unconfined,
     ): Fixture {
@@ -354,11 +390,16 @@ class UpdateAuthorizationTest {
         val adapter = FakePackageFacts(installed, candidate)
         var downloads = 0
         var launches = 0
+        var launchedLease: InstallHandoffLease? = null
         val repository = UpdateRepository(2, fetcher, { 1L }, { 0L }, {}, { true }, directory,
             ApkDownloadEffect { _, part -> downloads++; part.writeBytes(bytes) }, delete,
-            dispatcher, adapter, 34) { artifact -> launches++; launcher(artifact) }
+            dispatcher, adapter, 34) { artifact, handoff ->
+                launches++
+                launchedLease = handoff
+                launcher(artifact, handoff)
+            }
         return Fixture(directory, repository, fetcher, adapter, installed, candidate,
-            { downloads }, { launches })
+            { downloads }, { launches }, { launchedLease })
     }
 
     private data class Fixture(
@@ -370,9 +411,11 @@ class UpdateAuthorizationTest {
         val candidate: PackageFacts?,
         private val downloadCount: () -> Int,
         private val launchCount: () -> Int,
+        private val launchedLeaseValue: () -> InstallHandoffLease?,
     ) {
         val downloads get() = downloadCount()
         val launches get() = launchCount()
+        val launchedLease get() = launchedLeaseValue()
         suspend fun prepare() { repository.checkManual(); repository.download() }
         suspend fun prepareVerified() { prepare(); repository.verify() }
     }

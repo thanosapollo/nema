@@ -10,6 +10,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.lifecycle.lifecycleScope
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
@@ -34,8 +35,10 @@ import androidx.compose.ui.platform.LocalContext
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.thanosapollo.nema.account.AccountConfiguration
@@ -56,6 +59,9 @@ import org.thanosapollo.nema.ui.SessionBottomBar
 import org.thanosapollo.nema.ui.chat.DirectChatContent
 import org.thanosapollo.nema.ui.chat.canReact
 import org.thanosapollo.nema.ui.showLoginSessionChrome
+import org.thanosapollo.nema.update.InstallHandoffLease
+import org.thanosapollo.nema.update.requestInstallOrPermission
+import org.thanosapollo.nema.update.updateUiModel
 import org.thanosapollo.nema.ui.theme.AppPaletteAuthority
 import org.thanosapollo.nema.ui.theme.AppearanceScope
 import org.thanosapollo.nema.ui.theme.AppearanceSpec
@@ -74,6 +80,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        if (shouldStartAutomaticUpdateCheck(savedInstanceState)) {
+            lifecycleScope.launch { (application as NemaApplication).updates.checkAutomatic() }
+        }
         val processToken = (application as NemaApplication).processToken
         val restoreChatRoute = shouldRestoreChatRoute(
             savedProcessToken = savedInstanceState?.getString(STATE_PROCESS_TOKEN),
@@ -95,10 +104,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        (application as NemaApplication).installResumeController.onResume()
         activityResumed.value = true
     }
 
     override fun onPause() {
+        (application as NemaApplication).installResumeGate.onPause()
         activityResumed.value = false
         super.onPause()
     }
@@ -109,7 +120,85 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+internal class InstallResumeGate {
+    private var resumed = false
+    private var armed: InstallHandoffLease? = null
+    private var pending: InstallHandoffLease? = null
+    private var inFlight: InstallHandoffLease? = null
+
+    @Synchronized
+    fun arm(handoff: InstallHandoffLease): Boolean {
+        if (!resumed || armed != null || pending != null || inFlight != null) return false
+        armed = handoff
+        return true
+    }
+
+    @Synchronized
+    fun abort(handoff: InstallHandoffLease) {
+        if (armed === handoff) armed = null
+        if (pending === handoff) pending = null
+        if (inFlight === handoff) inFlight = null
+    }
+
+    @Synchronized
+    fun onPause() {
+        resumed = false
+        val handoff = armed ?: return
+        armed = null
+        if (pending == null && inFlight == null) pending = handoff
+    }
+
+    @Synchronized
+    fun onResumeAndBeginSettlement(): InstallHandoffLease? {
+        resumed = true
+        if (inFlight != null) return null
+        val handoff = pending ?: return null
+        pending = null
+        inFlight = handoff
+        return handoff
+    }
+
+    @Synchronized
+    fun complete(handoff: InstallHandoffLease) {
+        if (inFlight === handoff) inFlight = null
+    }
+
+    @Synchronized
+    fun requeue(handoff: InstallHandoffLease) {
+        if (inFlight !== handoff) return
+        inFlight = null
+        if (pending == null) pending = handoff
+    }
+}
+
+internal class InstallResumeController(
+    private val scope: CoroutineScope,
+    private val gate: InstallResumeGate,
+    private val settle: suspend (InstallHandoffLease) -> Unit,
+) {
+    fun onResume(): Job? {
+        val handoff = gate.onResumeAndBeginSettlement() ?: return null
+        return scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            try {
+                settle(handoff)
+                gate.complete(handoff)
+            } catch (exception: CancellationException) {
+                gate.requeue(handoff)
+                throw exception
+            } catch (_: Exception) {
+                gate.requeue(handoff)
+            } catch (error: Error) {
+                gate.requeue(handoff)
+                throw error
+            }
+        }
+    }
+}
+
 private const val STATE_PROCESS_TOKEN = "nema.process-token"
+
+internal fun shouldStartAutomaticUpdateCheck(savedInstanceState: Bundle?): Boolean =
+    savedInstanceState == null
 
 internal fun shouldRestoreChatRoute(savedProcessToken: String?, processToken: String): Boolean =
     savedProcessToken != null && savedProcessToken == processToken
@@ -238,6 +327,7 @@ private fun AccountConnectionScreen(
     val connectionState by application.sessionRuntime.state.collectAsState()
     val activeAccount by application.sessionRuntime.activeAccount.collectAsState(initial = null)
     val configuredAccounts by application.sessionRuntime.configuredAccounts.collectAsState(initial = emptyList())
+    val updateState by application.updates.state.collectAsState()
     var destination by rememberPrimaryDestination(application.processToken)
     var addingAccount by remember { mutableStateOf(false) }
     val backgroundTarget = rememberPendingBackgroundScope()
@@ -503,6 +593,22 @@ private fun AccountConnectionScreen(
                             },
                             onStop = ::stopSession,
                             onSignOut = ::signOutSession,
+                            update = updateUiModel(
+                                BuildConfig.VERSION_NAME,
+                                BuildConfig.VERSION_CODE.toLong(),
+                                updateState,
+                            ),
+                            onCheckForUpdates = {
+                                scope.launch { application.updates.checkManual() }
+                            },
+                            onDownloadUpdate = {
+                                scope.launch { application.updates.downloadAndVerify() }
+                            },
+                            onInstallUpdate = {
+                                requestInstallOrPermission(context) {
+                                    scope.launch { application.updates.install() }
+                                }
+                            },
                             modifier = Modifier
                                 .padding(contentPadding)
                                 .consumeWindowInsets(contentPadding)

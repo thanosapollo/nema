@@ -36,6 +36,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.thanosapollo.nema.account.AccountConfiguration
+import org.thanosapollo.nema.update.UpdateUiModel
 import org.thanosapollo.nema.ui.theme.PaletteCatalog
 import org.thanosapollo.nema.xmpp.transport.AccountId
 
@@ -44,6 +45,38 @@ import org.thanosapollo.nema.xmpp.transport.AccountId
 class AccountSettingsContentTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun updatesActionsAreVisibleAndInvokeEnabledCallbacksOnce() {
+        var checks = 0
+        var downloads = 0
+        var installs = 0
+        composeRule.setContent {
+            MaterialTheme {
+                AccountSettingsContent(
+                    activeAccountId = FIRST,
+                    update = UpdateUiModel(
+                        currentVersion = "Current version: Nema 0.1.1 (2)",
+                        status = "Nema 0.2 is available",
+                        canCheck = true,
+                        canDownload = true,
+                        canInstall = false,
+                    ),
+                    onCheckForUpdates = { checks++ },
+                    onDownloadUpdate = { downloads++ },
+                    onInstallUpdate = { installs++ },
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("Current version: Nema 0.1.1 (2)").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Check for updates").performScrollTo().performClick()
+        composeRule.onNodeWithText("Download update").performScrollTo().performClick()
+        composeRule.onNodeWithText("Install update").assertDoesNotExist()
+        assertEquals(1, checks)
+        assertEquals(1, downloads)
+        assertEquals(0, installs)
+    }
 
     @Test
     fun settingsOwnsStopAndSignOut() {
