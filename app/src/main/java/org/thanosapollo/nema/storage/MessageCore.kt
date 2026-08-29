@@ -2190,6 +2190,7 @@ class MessageStore private constructor(
         val position = incoming.archivePosition()
         val result = ingestInTransaction(
             incoming.withoutArchivePosition(),
+            preserveStoredThreadLineage = true,
             allowLiveReconciliation = position == null,
         )
         if (position != null) attachArchivePosition(result.messageId, incoming.accountId, position)

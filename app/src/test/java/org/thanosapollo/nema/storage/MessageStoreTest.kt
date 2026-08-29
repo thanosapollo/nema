@@ -3968,17 +3968,76 @@ class MessageStoreTest {
         }
         assertNull(store.outbox(ACCOUNT, "operation-missing-parent"))
         assertEquals(7, store.messages(ACCOUNT).size)
-        assertSuspendFailure<IllegalArgumentException> {
-            store.ingest(
-                incoming(
-                    localId = "conflicting-child",
-                    body = "conflict",
-                    threadId = "child",
-                    parentThreadId = "different-root",
-                ),
-            )
-        }
-        Unit
+        store.ingest(
+            incoming(
+                localId = "conflicting-child",
+                body = "conflict",
+                threadId = "child",
+                parentThreadId = "different-root",
+            ),
+        )
+        assertEquals("root", store.messages(ACCOUNT).last().parentThreadId)
+        assertNull(database.messageDao().thread(ACCOUNT, PEER, MessageKind.CHAT, "different-root"))
+    }
+
+    @Test
+    fun liveConflictingParentPreservesEstablishedLineage() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(
+            incoming(
+                localId = "first-child",
+                body = "first",
+                threadId = "child",
+                parentThreadId = "parent-a",
+            ),
+        )
+
+        store.ingest(
+            incoming(
+                localId = "second-child",
+                body = "second",
+                threadId = "child",
+                parentThreadId = "parent-b",
+            ),
+        )
+
+        assertEquals("parent-a", store.messages(ACCOUNT).last().parentThreadId)
+        assertNull(database.messageDao().thread(ACCOUNT, PEER, MessageKind.CHAT, "parent-b"))
+    }
+
+    @Test
+    fun liveConflictingParentCannotReparentCurrentDirectSession() = runBlocking {
+        val generated = ArrayDeque(listOf("current-session", "unexpected-session"))
+        val store = MessageStore(
+            database,
+            clock = { 0L },
+            threadIds = ThreadIdFactory { ThreadId.require(generated.removeFirst()) },
+        )
+        val session = store.ensureDirectThreadSession(ACCOUNT, PEER)
+
+        store.ingest(
+            incoming(
+                localId = "reparent-attempt",
+                body = "attack",
+                threadId = session.id.value,
+                parentThreadId = "attacker-parent",
+            ),
+        )
+        store.composeDirectDraft(
+            accountId = ACCOUNT,
+            operationId = "ordinary-wire",
+            localMessageId = "ordinary-local",
+            originId = "ordinary-origin",
+            peerJid = PEER,
+            senderJid = SELF,
+            body = "ordinary send",
+        )
+
+        assertNull(database.messageDao().thread(ACCOUNT, PEER, MessageKind.CHAT, session.id.value)?.parentThreadId)
+        assertNull(database.messageDao().thread(ACCOUNT, PEER, MessageKind.CHAT, "attacker-parent"))
+        assertEquals(session.id.value, database.messageDao().directThreadSession(ACCOUNT, PEER)?.threadId)
+        assertEquals(session.id.value, store.messages(ACCOUNT).last().threadId)
+        assertEquals(listOf("unexpected-session"), generated.toList())
     }
 
     @Test
