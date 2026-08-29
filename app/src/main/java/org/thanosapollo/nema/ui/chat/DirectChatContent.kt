@@ -13,6 +13,7 @@ import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -100,6 +101,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.focus.FocusRequester
@@ -118,6 +120,7 @@ import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
@@ -167,6 +170,52 @@ internal fun messageBubbleColors(outgoing: Boolean): Pair<Color, Color> = if (ou
     MaterialTheme.colorScheme.primaryContainer to MaterialTheme.colorScheme.onPrimaryContainer
 } else {
     MaterialTheme.colorScheme.secondaryContainer to MaterialTheme.colorScheme.onSecondaryContainer
+}
+
+internal enum class ThreadRouteRevealDirection { FORWARD, BACKWARD, NONE }
+
+internal data class ThreadRouteRevealStart(
+    val offsetFraction: Float,
+    val scale: Float,
+    val durationMillis: Int,
+)
+
+internal fun threadRouteRevealDirection(
+    previous: DirectConversationKey,
+    current: DirectConversationKey,
+): ThreadRouteRevealDirection {
+    if (previous.accountId != current.accountId ||
+        previous.canonicalBarePeer != current.canonicalBarePeer ||
+        previous == current
+    ) {
+        return ThreadRouteRevealDirection.NONE
+    }
+    val oldThread = previous.thread
+    val newThread = current.thread
+    return when {
+        oldThread == null && newThread != null -> ThreadRouteRevealDirection.FORWARD
+        oldThread != null && newThread?.parentId == oldThread.id -> ThreadRouteRevealDirection.FORWARD
+        oldThread != null && newThread == null -> ThreadRouteRevealDirection.BACKWARD
+        oldThread?.parentId != null && newThread?.id == oldThread.parentId -> ThreadRouteRevealDirection.BACKWARD
+        else -> ThreadRouteRevealDirection.NONE
+    }
+}
+
+internal fun threadRouteRevealStart(
+    direction: ThreadRouteRevealDirection,
+    layoutDirection: LayoutDirection,
+): ThreadRouteRevealStart {
+    val logicalOffset = when (direction) {
+        ThreadRouteRevealDirection.FORWARD -> 0.11f
+        ThreadRouteRevealDirection.BACKWARD -> -0.09f
+        ThreadRouteRevealDirection.NONE -> 0f
+    }
+    val physicalOffset = if (layoutDirection == LayoutDirection.Ltr) logicalOffset else -logicalOffset
+    return when (direction) {
+        ThreadRouteRevealDirection.FORWARD -> ThreadRouteRevealStart(physicalOffset, 0.985f, 220)
+        ThreadRouteRevealDirection.BACKWARD -> ThreadRouteRevealStart(physicalOffset, 0.985f, 190)
+        ThreadRouteRevealDirection.NONE -> ThreadRouteRevealStart(0f, 1f, 0)
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
@@ -278,8 +327,28 @@ fun DirectChatContent(
                     peerKey.canonicalBarePeer,
                 ) { mutableStateOf(false) }
                 var backProgress by remember { mutableFloatStateOf(0f) }
+                val layoutDirection = LocalLayoutDirection.current
+                var previousConversationKey by remember { mutableStateOf(conversationKey) }
+                val routeRevealStart = remember(conversationKey, layoutDirection) {
+                    threadRouteRevealStart(
+                        threadRouteRevealDirection(previousConversationKey, conversationKey),
+                        layoutDirection,
+                    )
+                }
+                val routeRevealProgress = remember(conversationKey, layoutDirection) {
+                    Animatable(if (routeRevealStart.durationMillis == 0) 1f else 0f)
+                }
                 LaunchedEffect(state.selectedPeer, state.selectedThread) {
                     backProgress = 0f
+                }
+                LaunchedEffect(conversationKey, layoutDirection) {
+                    previousConversationKey = conversationKey
+                    if (routeRevealStart.durationMillis > 0) {
+                        routeRevealProgress.animateTo(
+                            1f,
+                            animationSpec = tween(routeRevealStart.durationMillis),
+                        )
+                    }
                 }
                 BackHandler(enabled = showPeerProfile) { showPeerProfile = false }
                 BackHandler(enabled = !showPeerProfile && state.selectedThread != null) {
@@ -440,7 +509,12 @@ fun DirectChatContent(
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer {
-                            translationX = size.width * backProgress
+                            val revealProgress = routeRevealProgress.value
+                            translationX = size.width * (
+                                backProgress + routeRevealStart.offsetFraction * (1f - revealProgress)
+                            )
+                            scaleX = routeRevealStart.scale + (1f - routeRevealStart.scale) * revealProgress
+                            scaleY = scaleX
                         }
                         .background(
                             MaterialTheme.colorScheme.background.copy(

@@ -51,6 +51,7 @@ import androidx.compose.ui.test.click
 import androidx.compose.ui.test.doubleClick
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performTextReplacement
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -138,6 +139,54 @@ class DirectChatContentTest {
         assertEquals(2, store.size)
         assertEquals(firstAnchor, store[first])
         assertEquals(null, store[second])
+    }
+
+    @Test
+    fun threadRouteRevealDirectionRequiresSamePeerAndDirectLineage() {
+        val main = DirectConversationKey(ACCOUNT_A, PEER_A)
+        val parent = main.copy(thread = ThreadRef(ThreadId.require("parent")))
+        val child = main.copy(
+            thread = ThreadRef(
+                id = ThreadId.require("child"),
+                parentId = parent.thread?.id,
+            ),
+        )
+
+        assertEquals(ThreadRouteRevealDirection.FORWARD, threadRouteRevealDirection(main, parent))
+        assertEquals(ThreadRouteRevealDirection.FORWARD, threadRouteRevealDirection(parent, child))
+        assertEquals(ThreadRouteRevealDirection.BACKWARD, threadRouteRevealDirection(child, parent))
+        assertEquals(ThreadRouteRevealDirection.BACKWARD, threadRouteRevealDirection(parent, main))
+        assertEquals(ThreadRouteRevealDirection.NONE, threadRouteRevealDirection(parent, parent))
+        assertEquals(
+            ThreadRouteRevealDirection.NONE,
+            threadRouteRevealDirection(parent, main.copy(thread = ThreadRef(ThreadId.require("unrelated")))),
+        )
+        assertEquals(ThreadRouteRevealDirection.NONE, threadRouteRevealDirection(parent, parent.copy(accountId = ACCOUNT_B)))
+        assertEquals(ThreadRouteRevealDirection.NONE, threadRouteRevealDirection(parent, parent.copy(canonicalBarePeer = PEER_B)))
+    }
+
+    @Test
+    fun threadRouteRevealStartsFromLogicalEdgeWithBoundedScaleAndTiming() {
+        val forward = threadRouteRevealStart(ThreadRouteRevealDirection.FORWARD, LayoutDirection.Ltr)
+        val backward = threadRouteRevealStart(ThreadRouteRevealDirection.BACKWARD, LayoutDirection.Ltr)
+
+        assertEquals(0.11f, forward.offsetFraction)
+        assertEquals(-0.09f, backward.offsetFraction)
+        assertEquals(
+            -forward.offsetFraction,
+            threadRouteRevealStart(ThreadRouteRevealDirection.FORWARD, LayoutDirection.Rtl).offsetFraction,
+        )
+        assertEquals(
+            -backward.offsetFraction,
+            threadRouteRevealStart(ThreadRouteRevealDirection.BACKWARD, LayoutDirection.Rtl).offsetFraction,
+        )
+        assertEquals(0.985f, forward.scale)
+        assertEquals(220, forward.durationMillis)
+        assertEquals(190, backward.durationMillis)
+        assertEquals(
+            ThreadRouteRevealStart(0f, 1f, 0),
+            threadRouteRevealStart(ThreadRouteRevealDirection.NONE, LayoutDirection.Ltr),
+        )
     }
 
     @Test
