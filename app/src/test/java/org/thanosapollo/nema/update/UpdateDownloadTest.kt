@@ -552,33 +552,62 @@ class UpdateDownloadTest {
 
     @Test fun `second pass file work uses blocking dispatcher and publication does not`() = runTest {
         val bytes = "blocking dispatcher".toByteArray()
+        val effectEntered = CompletableDeferred<Unit>()
+        val releaseEffect = CompletableDeferred<Unit>()
+        val checkEntered = CompletableDeferred<Unit>()
+        val releaseCheck = CompletableDeferred<Unit>()
+        val moved = CompletableDeferred<Unit>()
         val marker = ThreadLocal<Boolean>()
         val dispatches = AtomicInteger()
         val directory = temporary.newFolder("dispatcher")
         val movedOnDispatcher = AtomicBoolean()
-        val stateAfterFileBlock = AtomicReference<UpdateState>()
+        val stateWhenMoved = AtomicReference<UpdateState>()
         lateinit var repository: UpdateRepository
         val dispatcher = RecordingDispatcher(marker, dispatches) {
             if (directory.resolve(CANDIDATE_FILE_NAME).exists() &&
                 !directory.resolve(PART_FILE_NAME).exists()) {
-                movedOnDispatcher.set(true)
-                stateAfterFileBlock.set(repository.state.value)
+                movedOnDispatcher.set(marker.get() == true)
+                stateWhenMoved.set(repository.state.value)
+                moved.complete(Unit)
             }
         }
         try {
             val fetcher = FakeFetcher(manifestJson(manifest(bytes)))
-            repository = repositoryWithSeams(directory, fetcher, RecordingEffect(bytes),
-                dispatcher = dispatcher)
+            val effect = ApkDownloadEffect { _, part ->
+                part.writeBytes(bytes)
+                effectEntered.complete(Unit)
+                releaseEffect.await()
+            }
+            repository = repositoryWithSeams(directory, fetcher, effect, dispatcher = dispatcher)
             repository.checkManual()
+            val accepted = repository.state.value.accepted
+            val download = async(start = CoroutineStart.UNDISPATCHED) { repository.download() }
+            effectEntered.await()
+            fetcher.result = Result.failure(IllegalStateException("offline"))
+            fetcher.beforeReturn = checkEntered
+            fetcher.release = releaseCheck
+            val check = async(start = CoroutineStart.UNDISPATCHED) { repository.checkManual() }
+            checkEntered.await()
+            val checking = repository.state.value as UpdateState.Checking
 
-            repository.download()
+            assertSame(accepted, checking.accepted)
+            releaseEffect.complete(Unit)
+            moved.await()
 
             assertTrue(dispatches.get() > 0)
             assertTrue(movedOnDispatcher.get())
-            assertTrue(stateAfterFileBlock.get() is UpdateState.Downloading)
+            assertSame(checking, stateWhenMoved.get())
             assertTrue(dispatcher.thread.get() !== Thread.currentThread())
-            assertTrue(repository.state.value is UpdateState.Downloaded)
+            assertSame(checking, repository.state.value)
+
+            releaseCheck.complete(Unit)
+            check.await()
+            download.await()
+            val downloaded = repository.state.value as UpdateState.Downloaded
+            assertSame(accepted, downloaded.accepted)
         } finally {
+            releaseEffect.complete(Unit)
+            releaseCheck.complete(Unit)
             dispatcher.close()
         }
     }

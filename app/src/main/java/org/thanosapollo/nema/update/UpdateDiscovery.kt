@@ -143,6 +143,14 @@ sealed interface UpdateState {
         override val accepted: AcceptedGeneration,
         val artifact: BoundUpdateArtifact,
     ) : UpdateState
+    data class Verified(
+        override val accepted: AcceptedGeneration,
+        val authority: VerifiedUpdate,
+    ) : UpdateState
+    data class Installing(
+        override val accepted: AcceptedGeneration,
+        val lease: InstallHandoffLease,
+    ) : UpdateState
     data class Failed(
         val message: String,
         override val accepted: AcceptedGeneration?,
@@ -154,6 +162,14 @@ data class BoundUpdateArtifact(
     val size: Long,
     val sha256: String,
 )
+data class VerifiedUpdate(
+    val artifact: BoundUpdateArtifact,
+    val installed: PackageFacts,
+    val candidate: PackageFacts,
+)
+data class InstallHandoffLease(val prior: UpdateState.Verified) {
+    val verified: VerifiedUpdate get() = prior.authority
+}
 fun interface ManifestFetcher { suspend fun fetch(): String }
 
 fun interface ApkDownloadEffect {
@@ -248,12 +264,31 @@ class UpdateRepository(
     private val downloadEffect: ApkDownloadEffect? = null,
     private val deleteFile: (File) -> Boolean = File::delete,
     private val blockingDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val packageFacts: PackageFactsAdapter? = null,
+    private val apiLevel: Int = android.os.Build.VERSION.SDK_INT,
+    private val installLauncher: (BoundUpdateArtifact) -> Boolean = { false },
 ) {
+    constructor(
+        installedVersionCode: Long,
+        fetcher: ManifestFetcher,
+        clock: () -> Long,
+        lastSuccess: () -> Long,
+        saveSuccess: (Long) -> Unit,
+        networkAvailable: () -> Boolean,
+        updateDirectory: File?,
+        downloadEffect: ApkDownloadEffect?,
+        deleteFile: (File) -> Boolean,
+        blockingDispatcher: CoroutineDispatcher,
+    ) : this(installedVersionCode, fetcher, clock, lastSuccess, saveSuccess, networkAvailable,
+        updateDirectory, downloadEffect, deleteFile, blockingDispatcher, null)
+
     private val gate = Mutex()
     private val mutableState = MutableStateFlow<UpdateState>(UpdateState.Idle)
     private var generation = 0L
     private var downloading = false
     private var artifact: BoundUpdateArtifact? = null
+    private var verified: VerifiedUpdate? = null
+    private var lease: InstallHandoffLease? = null
     val state: StateFlow<UpdateState> = mutableState.asStateFlow()
 
     init {
@@ -265,7 +300,9 @@ class UpdateRepository(
         val effect = downloadEffect ?: return
         currentCoroutineContext().ensureActive()
         val callerJob = requireNotNull(currentCoroutineContext()[Job])
-        val capture = gate.withLock {
+        if (!gate.tryLock()) return
+        val capture = try {
+            if (lease != null) return
             val accepted = mutableState.value.accepted ?: return
             val available = accepted.value as? AcceptedUpdate.Available ?: return
             if (artifact != null) return
@@ -276,6 +313,8 @@ class UpdateRepository(
             val prior = mutableState.value
             mutableState.value = UpdateState.Downloading(accepted)
             DownloadCapture(accepted, prior, callerJob)
+        } finally {
+            gate.unlock()
         }
         val part = directory.resolve(PART_FILE_NAME)
         val candidate = directory.resolve(CANDIDATE_FILE_NAME)
@@ -301,10 +340,104 @@ class UpdateRepository(
 
     internal fun boundArtifact(): BoundUpdateArtifact? = artifact
 
+    suspend fun verify() {
+        val adapter = packageFacts ?: return
+        currentCoroutineContext().ensureActive()
+        if (!gate.tryLock()) return
+        val capture = try {
+            if (lease != null) return
+            if (verified != null) return
+            val current = artifact ?: return
+            if (mutableState.value.accepted != current.accepted) return
+            if (current.accepted.value !is AcceptedUpdate.Available) return
+            current
+        } finally {
+            gate.unlock()
+        }
+        val authority = try {
+            withContext(blockingDispatcher) { authorize(capture, adapter) }
+        } catch (failure: CancellationException) {
+            throw failure
+        } catch (_: Exception) {
+            null
+        }
+        gate.withLock {
+            val sameTruth = artifact == capture &&
+                mutableState.value.accepted == capture.accepted && lease == null
+            if (authority != null && sameTruth) {
+                verified = authority
+                mutableState.value = UpdateState.Verified(capture.accepted, authority)
+            } else if (authority == null && sameTruth) {
+                rejectCandidate(capture)
+            }
+        }
+    }
+
+    suspend fun install(): Boolean {
+        val adapter = packageFacts ?: return false
+        currentCoroutineContext().ensureActive()
+        return withContext(blockingDispatcher) {
+            if (!gate.tryLock()) return@withContext false
+            try {
+                currentCoroutineContext().ensureActive()
+                if (lease != null) return@withContext false
+                val authority = verified ?: return@withContext false
+                val prior = mutableState.value as? UpdateState.Verified ?: return@withContext false
+                if (prior.authority !== authority) return@withContext false
+                if (!finalAuthorityMatches(authority, adapter)) {
+                    clearInstallAuthority(authority.artifact)
+                    return@withContext false
+                }
+                currentCoroutineContext().ensureActive()
+                val handoff = InstallHandoffLease(prior)
+                lease = handoff
+                mutableState.value = UpdateState.Installing(authority.artifact.accepted, handoff)
+                try {
+                    if (installLauncher(authority.artifact)) return@withContext true
+                    restoreVerified(handoff)
+                    false
+                } catch (failure: CancellationException) {
+                    restoreVerified(handoff)
+                    throw failure
+                } catch (_: Exception) {
+                    restoreVerified(handoff)
+                    false
+                }
+            } finally {
+                gate.unlock()
+            }
+        }
+    }
+
+    suspend fun settleInstallOnResume() {
+        val adapter = packageFacts ?: return
+        withContext(blockingDispatcher) {
+            if (!gate.tryLock()) return@withContext
+            try {
+                val handoff = lease ?: return@withContext
+                val authority = handoff.verified
+                val installed = safeInstalled(adapter)
+                val candidate = safeArchive(adapter, authority.artifact.file)
+                val upgraded = installed != null && candidate != null && installed.packageName == candidate.packageName &&
+                    installed.versionCode == candidate.versionCode && installed.currentSigners == candidate.currentSigners
+                val exact = installed == authority.installed && candidate == authority.candidate &&
+                    artifact == authority.artifact && fileMatches(authority.artifact)
+                if (!upgraded && exact) {
+                    restoreVerified(handoff)
+                } else {
+                    clearInstallAuthority(authority.artifact)
+                }
+            } finally {
+                gate.unlock()
+            }
+        }
+    }
+
     suspend fun checkAutomatic() {
         currentCoroutineContext().ensureActive()
         if (!gate.tryLock()) return
         try {
+            if (lease != null) return
             currentCoroutineContext().ensureActive()
             val now = clock()
             if (!networkAvailable() || !automaticEligible(now, lastSuccess())) return
@@ -318,6 +451,7 @@ class UpdateRepository(
         currentCoroutineContext().ensureActive()
         if (!gate.tryLock()) return
         try {
+            if (lease != null) return
             currentCoroutineContext().ensureActive()
             checkLocked(manual = true)
         } finally {
@@ -339,7 +473,9 @@ class UpdateRepository(
             mutableState.value = prior
             throw failure
         } catch (_: Exception) {
-            mutableState.value = if (manual) {
+            mutableState.value = if (verified != null) {
+                prior
+            } else if (manual) {
                 UpdateState.Failed("Could not check for updates. Try again.", prior.accepted)
             } else {
                 prior
@@ -432,6 +568,8 @@ class UpdateRepository(
     private fun revokeArtifact() {
         artifact?.file?.let(::checkedDelete)
         artifact = null
+        verified = null
+        lease = null
     }
 
     private fun pruneUpdateFiles() {
@@ -441,11 +579,87 @@ class UpdateRepository(
             checkedDelete(directory.resolve(CANDIDATE_FILE_NAME))
         }
         artifact = null
+        verified = null
+        lease = null
     }
 
     private fun checkedDelete(file: File) {
         if (!file.exists()) return
         check(deleteFile(file) && !file.exists())
+    }
+
+    private fun authorize(bound: BoundUpdateArtifact, adapter: PackageFactsAdapter): VerifiedUpdate? {
+        if (!fileMatches(bound)) return null
+        val installed = safeInstalled(adapter) ?: return null
+        val candidate = safeArchive(adapter, bound.file) ?: return null
+        val manifest = (bound.accepted.value as? AcceptedUpdate.Available)?.manifest ?: return null
+        if (!packageUpgradeAuthorized(apiLevel, installed, candidate, manifest.versionCode)) return null
+        return VerifiedUpdate(bound, installed, candidate)
+    }
+
+    private fun finalAuthorityMatches(authority: VerifiedUpdate, adapter: PackageFactsAdapter): Boolean {
+        if (artifact != authority.artifact || mutableState.value.accepted != authority.artifact.accepted) return false
+        if (!fileMatches(authority.artifact)) return false
+        val installed = safeInstalled(adapter) ?: return false
+        val candidate = safeArchive(adapter, authority.artifact.file) ?: return false
+        val manifest = (authority.artifact.accepted.value as? AcceptedUpdate.Available)?.manifest ?: return false
+        return installed == authority.installed && candidate == authority.candidate &&
+            packageUpgradeAuthorized(apiLevel, installed, candidate, manifest.versionCode)
+    }
+
+    private fun fileMatches(bound: BoundUpdateArtifact): Boolean = try {
+        verifyPart(bound.file, bound.accepted.value.manifest) == (bound.size to bound.sha256)
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun safeInstalled(adapter: PackageFactsAdapter): PackageFacts? = try {
+        adapter.installed()
+    } catch (failure: CancellationException) {
+        throw failure
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun safeArchive(adapter: PackageFactsAdapter, file: File): PackageFacts? = try {
+        adapter.archive(file)
+    } catch (failure: CancellationException) {
+        throw failure
+    } catch (_: Exception) {
+        null
+    }
+
+    private fun restoreVerified(handoff: InstallHandoffLease) {
+        lease = null
+        verified = handoff.verified
+        mutableState.value = handoff.prior
+    }
+
+    private fun rejectCandidate(bound: BoundUpdateArtifact) {
+        if (artifact != bound) return
+        try {
+            checkedDelete(bound.file)
+            artifact = null
+            verified = null
+            mutableState.value = UpdateState.Available(bound.accepted)
+        } catch (_: Exception) {
+            artifact = null
+            verified = null
+            mutableState.value = UpdateState.Failed("Could not verify update. Try again.", bound.accepted)
+        }
+    }
+
+    private fun clearInstallAuthority(bound: BoundUpdateArtifact) {
+        lease = null
+        verified = null
+        try {
+            checkedDelete(bound.file)
+            artifact = null
+            mutableState.value = UpdateState.Available(bound.accepted)
+        } catch (_: Exception) {
+            artifact = null
+            mutableState.value = UpdateState.Failed("Could not clear update. Try again.", bound.accepted)
+        }
     }
 
     private data class DownloadCapture(
