@@ -14,6 +14,7 @@ Nema is alpha software. Database migrations and messaging behavior have
 automated coverage, but releases may still contain bugs or incomplete UI.
 
 + [[https://git.thanosapollo.org/nema/about/][Source]]
++ [[https://git.thanosapollo.org/nema/releases/][Releases]]
 + [[https://todos.thanosapollo.org/r/nema][Issues]]
 
 * Requirements
@@ -25,10 +26,12 @@ automated coverage, but releases may still contain bugs or incomplete UI.
 * Build
 
 #+begin_src sh
-  ./gradlew testDebugUnitTest assembleDebug lintDebug
+  ./gradlew testDebugUnitTest assembleDebug assembleRelease lintDebug
 #+end_src
 
 The debug APK is written to =app/build/outputs/apk/debug/app-debug.apk=.
+The signed alpha release APK is written to
+=app/build/outputs/apk/release/app-release.apk=.
 
 * Clone
 

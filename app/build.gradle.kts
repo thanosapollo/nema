@@ -17,8 +17,8 @@ android {
         applicationId = "org.thanosapollo.nema"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -26,6 +26,8 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // Alpha releases retain the established signer so existing users can upgrade.
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",

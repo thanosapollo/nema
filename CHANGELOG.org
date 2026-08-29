@@ -1,0 +1,13 @@
+#+TITLE: Nema changelog
+
+* 0.1.1 — 2026-08-29
+
+First tagged alpha release on Theodora.
+
++ Bundle 23 color-only themes, with Rum presented as Default.
++ Apply theme selections immediately across login and authenticated interfaces.
++ Add a durable, read-only XMPP roster and direct-chat handoff.
++ Keep one persistent bottom bar ordered Roster, Home, Settings.
++ Harden reconnect, account replacement, roster lifecycle, chat navigation, and composer failure handling.
+
+Nema remains an experimental plaintext XMPP client. OMEMO and OpenPGP are not implemented.
