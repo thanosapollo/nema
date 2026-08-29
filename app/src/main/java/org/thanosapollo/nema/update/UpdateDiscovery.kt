@@ -3,22 +3,36 @@ package org.thanosapollo.nema.update
 import android.util.JsonReader
 import android.util.JsonToken
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.io.StringReader
 import java.net.URI
 import java.net.URL
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.DigestOutputStream
+import java.security.MessageDigest
 import javax.net.ssl.HttpsURLConnection
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 const val UPDATE_ENDPOINT = "https://git.thanosapollo.org/nema/releases/latest.json"
+internal const val MAX_APK_BYTES = 64L * 1024 * 1024
+internal const val PART_FILE_NAME = "candidate.apk.part"
+internal const val CANDIDATE_FILE_NAME = "candidate.apk"
 private const val MAX_MANIFEST_BYTES = 16 * 1024
 private const val CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000L
 data class UpdateManifest(
@@ -124,12 +138,67 @@ sealed interface UpdateState {
     data class Checking(override val accepted: AcceptedGeneration?) : UpdateState
     data class Current(override val accepted: AcceptedGeneration) : UpdateState
     data class Available(override val accepted: AcceptedGeneration) : UpdateState
+    data class Downloading(override val accepted: AcceptedGeneration) : UpdateState
+    data class Downloaded(
+        override val accepted: AcceptedGeneration,
+        val artifact: BoundUpdateArtifact,
+    ) : UpdateState
     data class Failed(
         val message: String,
         override val accepted: AcceptedGeneration?,
     ) : UpdateState
 }
+data class BoundUpdateArtifact(
+    val accepted: AcceptedGeneration,
+    val file: File,
+    val size: Long,
+    val sha256: String,
+)
 fun interface ManifestFetcher { suspend fun fetch(): String }
+
+fun interface ApkDownloadEffect {
+    suspend fun download(manifest: UpdateManifest, part: File)
+}
+
+class HttpsApkDownloadEffect(
+    private val open: (URL) -> HttpsURLConnection = { it.openConnection() as HttpsURLConnection },
+) : ApkDownloadEffect {
+    override suspend fun download(manifest: UpdateManifest, part: File) = withContext(Dispatchers.IO) {
+        require(manifest.size <= MAX_APK_BYTES)
+        val expectedUrl = URL(manifest.apkUrl)
+        val connection = open(expectedUrl)
+        try {
+            connection.instanceFollowRedirects = false
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 10_000
+            require(connection.url.toString() == manifest.apkUrl)
+            check(connection.responseCode in 200..299)
+            val digest = MessageDigest.getInstance("SHA-256")
+            var size = 0L
+            connection.inputStream.use { input ->
+                FileOutputStream(part).use { file ->
+                    DigestOutputStream(file, digest).use { output ->
+                        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                        while (true) {
+                            val count = input.read(buffer)
+                            if (count == -1) break
+                            check(count > 0)
+                            size += count
+                            check(size <= manifest.size && size <= MAX_APK_BYTES)
+                            output.write(buffer, 0, count)
+                        }
+                        output.flush()
+                        file.fd.sync()
+                    }
+                }
+            }
+            check(size == manifest.size)
+            check(digest.digest().hex() == manifest.sha256)
+        } finally {
+            connection.disconnect()
+        }
+    }
+}
 
 class HttpsManifestFetcher(
     private val open: () -> HttpsURLConnection = {
@@ -175,11 +244,62 @@ class UpdateRepository(
     private val lastSuccess: () -> Long,
     private val saveSuccess: (Long) -> Unit,
     private val networkAvailable: () -> Boolean,
+    private val updateDirectory: File? = null,
+    private val downloadEffect: ApkDownloadEffect? = null,
+    private val deleteFile: (File) -> Boolean = File::delete,
+    private val blockingDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
     private val gate = Mutex()
     private val mutableState = MutableStateFlow<UpdateState>(UpdateState.Idle)
     private var generation = 0L
+    private var downloading = false
+    private var artifact: BoundUpdateArtifact? = null
     val state: StateFlow<UpdateState> = mutableState.asStateFlow()
+
+    init {
+        pruneUpdateFiles()
+    }
+
+    suspend fun download() {
+        val directory = updateDirectory ?: return
+        val effect = downloadEffect ?: return
+        currentCoroutineContext().ensureActive()
+        val callerJob = requireNotNull(currentCoroutineContext()[Job])
+        val capture = gate.withLock {
+            val accepted = mutableState.value.accepted ?: return
+            val available = accepted.value as? AcceptedUpdate.Available ?: return
+            if (artifact != null) return
+            if (downloading) return
+            if (available.manifest.size > MAX_APK_BYTES) return
+            pruneUpdateFiles()
+            downloading = true
+            val prior = mutableState.value
+            mutableState.value = UpdateState.Downloading(accepted)
+            DownloadCapture(accepted, prior, callerJob)
+        }
+        val part = directory.resolve(PART_FILE_NAME)
+        val candidate = directory.resolve(CANDIDATE_FILE_NAME)
+        var verified: BoundUpdateArtifact? = null
+        try {
+            effect.download(capture.accepted.value.manifest, part)
+            currentCoroutineContext().ensureActive()
+            val facts = withContext(blockingDispatcher) {
+                val verifiedFacts = verifyPart(part, capture.accepted.value.manifest)
+                moveAtomically(part, candidate)
+                verifiedFacts
+            }
+            verified = BoundUpdateArtifact(capture.accepted, candidate, facts.first, facts.second)
+        } catch (failure: CancellationException) {
+            withContext(NonCancellable) { settleDownload(capture, null, part, candidate) }
+            throw failure
+        } catch (_: Exception) {
+            withContext(NonCancellable) { settleDownload(capture, null, part, candidate) }
+            return
+        }
+        withContext(NonCancellable) { settleDownload(capture, verified, part, candidate) }
+    }
+
+    internal fun boundArtifact(): BoundUpdateArtifact? = artifact
 
     suspend fun checkAutomatic() {
         currentCoroutineContext().ensureActive()
@@ -208,15 +328,13 @@ class UpdateRepository(
     private suspend fun checkLocked(manual: Boolean) {
         val prior = mutableState.value
         mutableState.value = UpdateState.Checking(prior.accepted)
-        try {
+        val (accepted, successTime) = try {
             val accepted = UpdateManifest.parse(fetcher.fetch()).accept(installedVersionCode)
             currentCoroutineContext().ensureActive()
-            saveSuccess(clock())
-            val value = AcceptedGeneration(++generation, accepted)
-            mutableState.value = when (accepted) {
-                is AcceptedUpdate.Current -> UpdateState.Current(value)
-                is AcceptedUpdate.Available -> UpdateState.Available(value)
-            }
+            val successTime = clock()
+            currentCoroutineContext().ensureActive()
+            revokeArtifact()
+            accepted to successTime
         } catch (failure: CancellationException) {
             mutableState.value = prior
             throw failure
@@ -226,9 +344,115 @@ class UpdateRepository(
             } else {
                 prior
             }
+            return
+        }
+        val saveFailure = try {
+            saveSuccess(successTime)
+            null
+        } catch (failure: Throwable) {
+            failure
+        }
+        val value = AcceptedGeneration(++generation, accepted)
+        mutableState.value = when (accepted) {
+            is AcceptedUpdate.Current -> UpdateState.Current(value)
+            is AcceptedUpdate.Available -> UpdateState.Available(value)
+        }
+        when (saveFailure) {
+            null -> Unit
+            is CancellationException -> throw saveFailure
+            is Error -> throw saveFailure
+            is Exception -> Unit
+            else -> throw saveFailure
         }
     }
 
     private fun automaticEligible(now: Long, last: Long): Boolean =
         last <= 0 || now < last || now - last >= CHECK_INTERVAL_MS
+
+    private suspend fun settleDownload(
+        capture: DownloadCapture,
+        verified: BoundUpdateArtifact?,
+        part: File,
+        candidate: File,
+    ) = gate.withLock {
+        downloading = false
+        val current = mutableState.value.accepted
+        val stillAccepted = current?.generation == capture.accepted.generation &&
+            current.value.manifest == capture.accepted.value.manifest
+        if (verified != null && capture.callerJob.isActive && stillAccepted) {
+            artifact = verified
+            mutableState.value = UpdateState.Downloaded(current, verified)
+        } else {
+            val cleanupFailed = listOf(part, candidate).fold(false) { failed, file ->
+                try {
+                    checkedDelete(file)
+                    failed
+                } catch (_: Exception) {
+                    true
+                }
+            }
+            artifact = null
+            mutableState.value = if (cleanupFailed) {
+                UpdateState.Failed("Could not download update. Try again.", current)
+            } else if (mutableState.value == UpdateState.Downloading(capture.accepted)) {
+                capture.prior
+            } else {
+                mutableState.value
+            }
+        }
+    }
+
+    private fun verifyPart(part: File, manifest: UpdateManifest): Pair<Long, String> {
+        var size = 0L
+        val digest = MessageDigest.getInstance("SHA-256")
+        part.inputStream().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val count = input.read(buffer)
+                if (count == -1) break
+                size += count
+                check(size <= manifest.size && size <= MAX_APK_BYTES)
+                digest.update(buffer, 0, count)
+            }
+        }
+        val hash = digest.digest().hex()
+        check(size == manifest.size && hash == manifest.sha256)
+        return size to hash
+    }
+
+    private fun moveAtomically(part: File, candidate: File) {
+        try {
+            Files.move(part.toPath(), candidate.toPath(), StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING)
+        } catch (failure: AtomicMoveNotSupportedException) {
+            throw IllegalStateException("Private update directory does not support atomic publication", failure)
+        }
+    }
+
+    private fun revokeArtifact() {
+        artifact?.file?.let(::checkedDelete)
+        artifact = null
+    }
+
+    private fun pruneUpdateFiles() {
+        updateDirectory?.let { directory ->
+            directory.mkdirs()
+            checkedDelete(directory.resolve(PART_FILE_NAME))
+            checkedDelete(directory.resolve(CANDIDATE_FILE_NAME))
+        }
+        artifact = null
+    }
+
+    private fun checkedDelete(file: File) {
+        if (!file.exists()) return
+        check(deleteFile(file) && !file.exists())
+    }
+
+    private data class DownloadCapture(
+        val accepted: AcceptedGeneration,
+        val prior: UpdateState,
+        val callerJob: Job,
+    )
 }
+
+private fun ByteArray.hex(): String = joinToString("") { "%02x".format(it) }
