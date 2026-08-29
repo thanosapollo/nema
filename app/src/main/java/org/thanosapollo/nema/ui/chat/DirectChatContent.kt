@@ -269,11 +269,17 @@ fun DirectChatContent(
         var completedSendSnapshots by remember(state.accountId) {
             mutableStateOf(emptyMap<PendingSendIdentity, DraftSnapshot>())
         }
+        var failedSendIdentities by remember(state.accountId) {
+            mutableStateOf(emptySet<PendingSendIdentity>())
+        }
         var pendingDraftIdentities by remember(state.accountId) {
             mutableStateOf(emptySet<PendingSendIdentity>())
         }
         var composerStates by remember(state.accountId) {
             mutableStateOf(emptyMap<DirectConversationKey, ComposerState>())
+        }
+        val groupChatByConversation = remember(state.accountId) {
+            mutableMapOf<DirectConversationKey, Boolean>()
         }
         LaunchedEffect(state.pendingSendIdentities, state.completedSendSnapshots) {
             pendingSendIdentities = pendingSendIdentities + state.pendingSendIdentities
@@ -320,6 +326,7 @@ fun DirectChatContent(
                     selectedPeer,
                     state.selectedThread,
                 )
+                groupChatByConversation[conversationKey] = state.selectedPeerGroupChat
                 val peerKey = conversationKey.copy(thread = null)
                 val peerLabel = state.selectedPeerLabel ?: state.selectedPeer.orEmpty()
                 var showPeerProfile by rememberSaveable(
@@ -412,6 +419,9 @@ fun DirectChatContent(
                     )
                 }
                 fun setComposer(next: ComposerState) {
+                    if (next.key == composer.key && next.revision != composer.revision) {
+                        failedSendIdentities = failedSendIdentities.filterNot { it.key == next.key }.toSet()
+                    }
                     composer = next
                     composerStates += conversationKey to next
                 }
@@ -429,9 +439,12 @@ fun DirectChatContent(
                     val completions = completedSendSnapshots.filterKeys { it.key == conversationKey }
                     if (completions.isEmpty()) return@LaunchedEffect
                     latestFocusRequest += 1
-                    setComposer(completions.values.fold(composer, ComposerState::clearAfterSend))
+                    setComposer(completions.values.fold(composer) { current, snapshot ->
+                        current.clearAfterSend(snapshot, state.selectedPeerGroupChat)
+                    })
                     completedSendSnapshots = completedSendSnapshots - completions.keys
                     pendingSendIdentities = pendingSendIdentities - completions.keys
+                    failedSendIdentities = failedSendIdentities - completions.keys
                     onAcknowledgeCompletedSends(completions.keys)
                 }
                 val keyboard = LocalSoftwareKeyboardController.current
@@ -745,6 +758,14 @@ fun DirectChatContent(
                         fun sendWith(action: (DraftSnapshot) -> Deferred<Boolean>) {
                             val snapshot = composer.toDraftSnapshot(state.selectedPeerGroupChat)
                             val identity = PendingSendIdentity(snapshot.key, snapshot.composerRevision)
+                            fun markFailed() {
+                                val current = composerStates[snapshot.key]
+                                    ?: composer.takeIf { it.key == snapshot.key }
+                                val groupChat = groupChatByConversation[snapshot.key] ?: return
+                                if (current?.toDraftSnapshot(groupChat) == snapshot) {
+                                    failedSendIdentities += identity
+                                }
+                            }
                             if (identity in pendingSendIdentities) return
                             pendingSendIdentities += identity
                             val send = try {
@@ -754,6 +775,7 @@ fun DirectChatContent(
                                 throw cancelled
                             } catch (_: Exception) {
                                 pendingSendIdentities -= identity
+                                markFailed()
                                 return
                             }
                             scope.launch {
@@ -766,17 +788,23 @@ fun DirectChatContent(
                                     false
                                 }
                                 if (applied) {
+                                    failedSendIdentities -= identity
                                     completedSendSnapshots += identity to snapshot
                                 } else {
                                     pendingSendIdentities -= identity
+                                    markFailed()
                                 }
                             }
                         }
-                        val composerIsError = composer.failureRevision == composer.revision
+                        val draftSaveIsError = composer.failureRevision == composer.revision
+                        val sendIsError = PendingSendIdentity(conversationKey, composer.revision) in failedSendIdentities
                         Surface(
                             modifier = Modifier
                                 .weight(1f)
-                                .testTag("message-composer-container"),
+                                .testTag("message-composer-container")
+                                .semantics {
+                                    if (sendIsError) error("Message not sent")
+                                },
                             shape = RoundedCornerShape(22.dp),
                             tonalElevation = 1.dp,
                         ) {
@@ -859,7 +887,10 @@ fun DirectChatContent(
                                         .focusRequester(composerFocus)
                                         .testTag("message-composer")
                                         .semantics {
-                                            if (composerIsError) error("Draft not saved")
+                                            when {
+                                                sendIsError -> error("Message not sent")
+                                                draftSaveIsError -> error("Draft not saved")
+                                            }
                                         },
                                     textStyle = MaterialTheme.typography.bodyLarge.copy(
                                         color = MaterialTheme.colorScheme.onSurface,
@@ -882,7 +913,15 @@ fun DirectChatContent(
                                         }
                                     },
                                 )
-                                if (composerIsError) {
+                                if (sendIsError) {
+                                    Text(
+                                        "Message not sent",
+                                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 4.dp),
+                                        color = MaterialTheme.colorScheme.error,
+                                        style = MaterialTheme.typography.bodySmall,
+                                    )
+                                }
+                                if (draftSaveIsError) {
                                     Text(
                                         "Draft not saved",
                                         modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 4.dp),
@@ -1547,8 +1586,8 @@ private fun ComposerState.cancelCorrection(): ComposerState {
     )
 }
 
-private fun ComposerState.clearAfterSend(snapshot: DraftSnapshot): ComposerState =
-    if (matches(snapshot)) {
+private fun ComposerState.clearAfterSend(snapshot: DraftSnapshot, groupChat: Boolean): ComposerState =
+    if (toDraftSnapshot(groupChat) == snapshot) {
         if (snapshot.correction != null) cancelCorrection() else copy(
             body = "",
             attachmentUrl = null,
@@ -1567,6 +1606,10 @@ private fun ComposerState.matches(snapshot: DraftSnapshot): Boolean =
     key == snapshot.key &&
         revision == snapshot.composerRevision &&
         body == snapshot.body &&
+        attachmentUrl == snapshot.attachmentUrl &&
+        attachmentName == snapshot.attachmentName &&
+        attachmentMime == snapshot.attachmentMime &&
+        attachmentSize == snapshot.attachmentSize &&
         reply == snapshot.reply &&
         correction == snapshot.correction
 

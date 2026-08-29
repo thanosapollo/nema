@@ -1,13 +1,23 @@
 package org.thanosapollo.nema.ui.chat
 
+import android.app.Activity
 import android.app.Application
+import android.content.Intent
+import android.net.Uri
 import java.io.InputStream
+import java.nio.file.Files
 import java.time.Instant
 import java.time.ZoneId
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import androidx.activity.compose.LocalActivityResultRegistryOwner
+import androidx.activity.result.ActivityResultRegistry
+import androidx.activity.result.ActivityResultRegistryOwner
+import androidx.activity.result.contract.ActivityResultContract
+import androidx.core.app.ActivityOptionsCompat
 import androidx.navigationevent.compose.LocalNavigationEventDispatcherOwner
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -53,6 +63,9 @@ import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.performTextReplacement
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -94,6 +107,7 @@ import org.thanosapollo.nema.ui.theme.ThemeMode
 import org.thanosapollo.nema.ui.theme.contrastRatio
 import org.thanosapollo.nema.xmpp.blocking.PeerBlockingState
 import org.thanosapollo.nema.xmpp.blocking.PeerBlockingMutationResult
+import org.thanosapollo.nema.xmpp.httpupload.UploadedFile
 import org.thanosapollo.nema.xmpp.transport.AccountId
 import org.thanosapollo.nema.xmpp.transport.ConnectionGeneration
 
@@ -1629,6 +1643,7 @@ class DirectChatContentTest {
                         messages = (1..100).map { number ->
                             message("message-$number", outgoing = false)
                         },
+                        draftReply = DraftReply("reply-id", PEER_A, "quoted body", "Peer A"),
                     ),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -1639,6 +1654,7 @@ class DirectChatContentTest {
             }
         }
         composeRule.onNodeWithTag("message-timeline").performScrollToIndex(80)
+        composeRule.onNodeWithTag("message-composer").performClick().assertIsFocused()
 
         composeRule.onNodeWithContentDescription("Send").performClick()
         sendResult.complete(false)
@@ -1646,6 +1662,95 @@ class DirectChatContentTest {
 
         composeRule.onNodeWithText("message-100").assertDoesNotExist()
         composeRule.onNodeWithText("unsent message").assertIsDisplayed()
+        composeRule.onNodeWithTag("composer-reply-preview").assertIsDisplayed()
+        composeRule.onNodeWithTag("message-composer").assertIsFocused()
+        composeRule.onNodeWithText("Message not sent").assertIsDisplayed()
+        composeRule.onNodeWithTag("message-composer").assert(
+            SemanticsMatcher.expectValue(SemanticsProperties.Error, "Message not sent"),
+        )
+    }
+
+    @Test
+    fun synchronousSendExceptionShowsFailureAndPreservesDraft() {
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A, "sync draft"),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { throw IllegalStateException("send failed") },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Send").performClick()
+
+        composeRule.onNodeWithText("sync draft").assertIsDisplayed()
+        composeRule.onNodeWithText("Message not sent").assertIsDisplayed()
+    }
+
+    @Test
+    fun deferredSendExceptionShowsFailureAndPreservesDraft() {
+        val result = CompletableDeferred<Boolean>()
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A, "deferred draft"),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { result },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Send").performClick()
+        result.completeExceptionally(IllegalStateException("send failed"))
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("deferred draft").assertIsDisplayed()
+        composeRule.onNodeWithText("Message not sent").assertIsDisplayed()
+    }
+
+    @Test
+    fun failedSendPreservesExactAttachmentForRetry() {
+        val file = Files.createTempFile("nema-attachment", ".txt").toFile().apply {
+            writeText("attachment")
+        }
+        val resultOwner = TestActivityResultOwner(Uri.fromFile(file))
+        val sends = mutableListOf<DraftSnapshot>()
+        var uploads = 0
+        composeRule.setContent {
+            CompositionLocalProvider(LocalActivityResultRegistryOwner provides resultOwner) {
+                MaterialTheme {
+                    DirectChatContent(
+                        state = state(ACCOUNT_A, PEER_A, "attachment draft"),
+                        connectionStatus = "Connected",
+                        onSelectPeer = { true },
+                        onCloseConversation = {},
+                        onDraftChange = { CompletableDeferred(true) },
+                        onSend = { sends += it; CompletableDeferred(false) },
+                        onUploadFile = { name, mime, bytes ->
+                            uploads++
+                            UploadedFile("https://example.org/file", name, mime, bytes.size.toLong())
+                        },
+                    )
+                }
+            }
+        }
+        resultOwner.resume()
+
+        composeRule.onNodeWithContentDescription("Attach file").performClick()
+        composeRule.waitUntil { uploads == 1 }
+        composeRule.onNodeWithContentDescription("Send").performClick()
+        composeRule.onNodeWithText("Message not sent").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Send").performClick()
+        composeRule.waitUntil { sends.size == 2 }
+        assertEquals(sends.first(), sends.last())
+        assertEquals("https://example.org/file", sends.last().attachmentUrl)
     }
 
     @Test
@@ -1679,10 +1784,79 @@ class DirectChatContentTest {
         firstResult.complete(false)
         composeRule.waitForIdle()
         composeRule.onNodeWithText("send once").assertIsDisplayed()
+        composeRule.onNodeWithText("Message not sent").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Send").assertIsEnabled().performClick()
         composeRule.waitForIdle()
 
         assertEquals(2, sends)
+        composeRule.onNodeWithText("Message not sent").assertDoesNotExist()
+        composeRule.onNodeWithText("send once").assertDoesNotExist()
+    }
+
+    @Test
+    fun editingClearsSendFailure() {
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A, "failed draft"),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(false) },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Send").performClick()
+        composeRule.onNodeWithText("Message not sent").assertIsDisplayed()
+        composeRule.onNodeWithText("failed draft").performTextReplacement("edited draft")
+
+        composeRule.onNodeWithText("Message not sent").assertDoesNotExist()
+        composeRule.onNodeWithText("edited draft").assertIsDisplayed()
+    }
+
+    @Test
+    fun staleSendFailureDoesNotAffectNewRevisionOrAnotherPeer() {
+        var result = CompletableDeferred<Boolean>()
+        lateinit var show: (DirectChatState) -> Unit
+        composeRule.setContent {
+            MaterialTheme {
+                var current by remember { mutableStateOf(state(ACCOUNT_A, PEER_A, "old draft")) }
+                show = { current = it }
+                DirectChatContent(
+                    state = current,
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { result },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Send").performClick()
+        composeRule.onNodeWithText("old draft").performTextReplacement("new draft")
+        result.complete(false)
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Message not sent").assertDoesNotExist()
+        composeRule.onNodeWithText("new draft").assertIsDisplayed()
+
+        composeRule.onNodeWithContentDescription("Send").performClick()
+        composeRule.onNodeWithText("Message not sent").assertIsDisplayed()
+        composeRule.runOnIdle { show(state(ACCOUNT_A, PEER_B, "other draft")) }
+        composeRule.onNodeWithText("Message not sent").assertDoesNotExist()
+        composeRule.onNodeWithText("other draft").assertIsDisplayed()
+        composeRule.runOnIdle { show(state(ACCOUNT_A, PEER_A, "new draft")) }
+        composeRule.onNodeWithText("Message not sent").assertIsDisplayed()
+        composeRule.onNodeWithText("new draft").performTextReplacement("group draft")
+        result = CompletableDeferred()
+        composeRule.onNodeWithContentDescription("Send").performClick()
+        composeRule.runOnIdle { show(state(ACCOUNT_A, PEER_A, "group draft").copy(selectedPeerGroupChat = true)) }
+        composeRule.waitForIdle()
+        result.complete(false)
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Message not sent").assertDoesNotExist()
     }
 
     @Test
@@ -3316,6 +3490,25 @@ class DirectChatContentTest {
         private const val ACCOUNT_B = "account-b"
         private const val PEER_A = "peer-a@example.org"
         private const val PEER_B = "peer-b@example.org"
+    }
+
+    private class TestActivityResultOwner(private val uri: Uri) : ActivityResultRegistryOwner, LifecycleOwner {
+        private val lifecycleRegistry = LifecycleRegistry(this).apply {
+            currentState = Lifecycle.State.CREATED
+        }
+        override val lifecycle: Lifecycle = lifecycleRegistry
+        override val activityResultRegistry = object : ActivityResultRegistry() {
+            override fun <I, O> onLaunch(
+                requestCode: Int,
+                contract: ActivityResultContract<I, O>,
+                input: I,
+                options: ActivityOptionsCompat?,
+            ) {
+                dispatchResult(requestCode, Activity.RESULT_OK, Intent().setData(uri))
+            }
+        }
+
+        fun resume() { lifecycleRegistry.currentState = Lifecycle.State.RESUMED }
     }
 
     private class BlockingInputStream : InputStream() {
