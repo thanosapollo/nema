@@ -544,7 +544,10 @@ class DirectChatContentTest {
                         state = current,
                         connectionStatus = "Connected",
                         onSelectPeer = { true },
-                        onCloseConversation = { closeConversation++ },
+                        onCloseConversation = {
+                            closeConversation++
+                            current = current.copy(selectedPeer = null)
+                        },
                         onDraftChange = { CompletableDeferred(true) },
                         onSend = { CompletableDeferred(true) },
                         onCloseThread = { closeThread++ },
@@ -556,6 +559,36 @@ class DirectChatContentTest {
         composeRule.runOnIdle { owner.completeBack() }
         assertEquals(1, closeThread)
         assertEquals(0, closeConversation)
+
+        composeRule.runOnIdle { show(state(ACCOUNT_A, PEER_A)) }
+        composeRule.runOnIdle { owner.completeBack() }
+        assertEquals(1, closeThread)
+        assertEquals(1, closeConversation)
+
+        composeRule.runOnIdle { show(state(ACCOUNT_A, PEER_A).copy(selectedPeer = null)) }
+        composeRule.waitForIdle()
+        assertEquals(1, closeConversation)
+        composeRule.onNodeWithContentDescription("Back").assertDoesNotExist()
+    }
+
+    @Test
+    fun rootAppBarBackClosesAuthoritativeConversationExactlyOnce() {
+        var closeConversation = 0
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = { closeConversation++ },
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Back").performClick()
+        composeRule.runOnIdle { assertEquals(1, closeConversation) }
     }
 
     @Test

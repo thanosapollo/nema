@@ -12,6 +12,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Scaffold
@@ -339,6 +340,7 @@ private fun AccountConnectionScreen(
                                 onAccepted = { destination = PrimaryDestination.HOME },
                                 modifier = Modifier
                                     .padding(contentPadding)
+                                    .consumeWindowInsets(contentPadding)
                                     .statusBarsPadding(),
                             )
                         }
@@ -443,6 +445,7 @@ private fun AccountConnectionScreen(
                             },
                             modifier = Modifier
                                 .padding(contentPadding)
+                                .consumeWindowInsets(contentPadding)
                                 .statusBarsPadding(),
                         )
                     }
@@ -502,6 +505,7 @@ private fun AccountConnectionScreen(
                             onSignOut = ::signOutSession,
                             modifier = Modifier
                                 .padding(contentPadding)
+                                .consumeWindowInsets(contentPadding)
                                 .statusBarsPadding(),
                         )
                     }

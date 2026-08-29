@@ -38,6 +38,16 @@ class MainActivityInsetContractTest {
     }
 
     @Test
+    fun sessionScaffoldPaddingIsConsumedBeforeScreenInsets() {
+        val activity = java.io.File("src/main/java/org/thanosapollo/nema/MainActivity.kt").readText()
+        val ownedInsets = Regex(
+            """\.padding\(contentPadding\)\s*\.consumeWindowInsets\(contentPadding\)\s*\.statusBarsPadding\(\)""",
+        )
+
+        assertEquals(3, ownedInsets.findAll(activity).count())
+    }
+
+    @Test
     fun chatRouteRestoresOnlyWithinSameProcess() {
         assertEquals(false, shouldRestoreChatRoute(null, "process-b"))
         assertEquals(false, shouldRestoreChatRoute("process-a", "process-b"))
