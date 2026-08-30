@@ -333,6 +333,19 @@ fun DirectChatContent(
                 venueByConversation[conversationKey] = venue
                 val peerKey = conversationKey.copy(thread = null)
                 val peerLabel = state.selectedPeerLabel ?: state.selectedPeer.orEmpty()
+                val conversationInfo = venue.toConversationInfo(
+                    address = selectedPeer,
+                    localNickname = state.selectedPeerLocalNickname,
+                    remoteProfileName = state.selectedPeerDisplayName,
+                )
+                val infoTitle = when (conversationInfo) {
+                    is ConversationInfo.DirectContact -> "Contact info"
+                    is ConversationInfo.Room -> "Room info"
+                }
+                val openInfoDescription = when (conversationInfo) {
+                    is ConversationInfo.DirectContact -> "Open contact info"
+                    is ConversationInfo.Room -> "Open room info"
+                }
                 var showPeerProfile by rememberSaveable(
                     peerKey.accountId,
                     peerKey.canonicalBarePeer,
@@ -378,12 +391,11 @@ fun DirectChatContent(
                     }
                 }
                 if (showPeerProfile) {
-                    PeerProfileContent(
+                    ConversationInfoContent(
                         key = peerKey,
                         blockingSession = blockingSession,
                         label = peerLabel,
-                        remoteDisplayName = state.selectedPeerDisplayName,
-                        localNickname = state.selectedPeerLocalNickname,
+                        info = conversationInfo,
                         photoBytes = state.selectedPeerPhotoBytes,
                         recentThreads = state.recentThreads,
                         onBack = { showPeerProfile = false },
@@ -548,7 +560,7 @@ fun DirectChatContent(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .clickable(role = Role.Button) { showPeerProfile = true }
-                                    .semantics { contentDescription = "Open contact info" },
+                                    .semantics { contentDescription = openInfoDescription },
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 PeerAvatar(
@@ -634,7 +646,7 @@ fun DirectChatContent(
                                 onDismissRequest = { actionsOpen = false },
                             ) {
                                 DropdownMenuItem(
-                                    text = { Text("Contact info") },
+                                    text = { Text(infoTitle) },
                                     onClick = {
                                         actionsOpen = false
                                         showPeerProfile = true
@@ -1015,12 +1027,11 @@ private val VideoCallIcon: ImageVector by lazy {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PeerProfileContent(
+private fun ConversationInfoContent(
     key: DirectConversationKey,
     blockingSession: SessionIdentity?,
     label: String,
-    remoteDisplayName: String?,
-    localNickname: String?,
+    info: ConversationInfo,
     photoBytes: ByteArray?,
     recentThreads: List<RecentThread>,
     onBack: () -> Unit,
@@ -1034,9 +1045,19 @@ private fun PeerProfileContent(
     modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
+    val directInfo = when (info) {
+        is ConversationInfo.DirectContact -> info
+        is ConversationInfo.Room -> null
+    }
+    val infoTagPrefix = when (info) {
+        is ConversationInfo.DirectContact -> "contact"
+        is ConversationInfo.Room -> "room"
+    }
 
     var nicknameOpen by remember { mutableStateOf(false) }
-    var nicknameDraft by remember(localNickname) { mutableStateOf(localNickname.orEmpty()) }
+    var nicknameDraft by remember(directInfo?.localNickname) {
+        mutableStateOf(directInfo?.localNickname.orEmpty())
+    }
     var nicknameSaving by remember { mutableStateOf(false) }
     var nicknameError by remember { mutableStateOf<String?>(null) }
     var blockingState by remember(key, blockingSession) { mutableStateOf<PeerBlockingState?>(null) }
@@ -1048,29 +1069,35 @@ private fun PeerProfileContent(
     var threadNameSaving by remember(key) { mutableStateOf(false) }
     var threadNameError by remember(key) { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(key, blockingSession) {
-        blockingState = null
-        blockingError = null
-        blockingMutation = null
-        blockingBusy = false
-        val session = blockingSession ?: return@LaunchedEffect
-        val loaded = try {
-            onLoadBlocking(session, key)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            if (isCurrentBlockingOwner(session, key)) blockingError = "Blocking unavailable"
-            return@LaunchedEffect
+    when (info) {
+        is ConversationInfo.DirectContact -> LaunchedEffect(key, blockingSession) {
+            blockingState = null
+            blockingError = null
+            blockingMutation = null
+            blockingBusy = false
+            val session = blockingSession ?: return@LaunchedEffect
+            val loaded = try {
+                onLoadBlocking(session, key)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (isCurrentBlockingOwner(session, key)) blockingError = "Blocking unavailable"
+                return@LaunchedEffect
+            }
+            if (isCurrentBlockingOwner(session, key)) blockingState = loaded
         }
-        if (isCurrentBlockingOwner(session, key)) blockingState = loaded
+        is ConversationInfo.Room -> Unit
     }
 
     SettingsProfileScreen(
-        title = "Contact info",
+        title = when (info) {
+            is ConversationInfo.DirectContact -> "Contact info"
+            is ConversationInfo.Room -> "Room info"
+        },
         onBack = onBack,
         backContentDescription = "Back to conversation",
         modifier = modifier,
-        listTag = "contact-info-list",
+        listTag = "$infoTagPrefix-info-list",
         listModifier = Modifier.navigationBarsPadding(),
     ) {
         item {
@@ -1078,7 +1105,7 @@ private fun PeerProfileContent(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 12.dp)
-                    .testTag("contact-profile-header"),
+                    .testTag("$infoTagPrefix-profile-header"),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
@@ -1086,63 +1113,86 @@ private fun PeerProfileContent(
                     label = label,
                     photoBytes = photoBytes,
                     size = 80.dp,
-                    modifier = Modifier.testTag("contact-profile-avatar"),
+                    modifier = Modifier.testTag("$infoTagPrefix-profile-avatar"),
                 )
                 Text(label, style = MaterialTheme.typography.headlineSmall)
             }
         }
-        item {
-            SettingsRow(
-                title = "Nickname",
-                supportingText = localNickname ?: "Not set",
-                onClick = {
-                    nicknameDraft = localNickname.orEmpty()
-                    nicknameError = null
-                    nicknameOpen = true
-                },
-                modifier = Modifier.testTag("settings-row-contact-nickname"),
-                role = Role.Button,
-            )
+        when (info) {
+            is ConversationInfo.DirectContact -> item {
+                SettingsRow(
+                    title = "Nickname",
+                    supportingText = info.localNickname ?: "Not set",
+                    onClick = {
+                        nicknameDraft = info.localNickname.orEmpty()
+                        nicknameError = null
+                        nicknameOpen = true
+                    },
+                    modifier = Modifier.testTag("settings-row-contact-nickname"),
+                    role = Role.Button,
+                )
+            }
+            is ConversationInfo.Room -> Unit
         }
         item {
             SettingsRow(
                 title = "XMPP address",
-                supportingText = key.canonicalBarePeer,
-                modifier = Modifier.testTag("settings-row-contact-address"),
+                supportingText = info.address,
+                modifier = Modifier.testTag("settings-row-$infoTagPrefix-address"),
             )
         }
         onSharePeer?.let { share ->
             item {
                 SettingsRow(
                     title = "Share XMPP address",
-                    supportingText = "xmpp:${key.canonicalBarePeer}",
-                    onClick = { share(key.canonicalBarePeer) },
-                    modifier = Modifier.testTag("settings-row-contact-share"),
+                    supportingText = "xmpp:${info.address}",
+                    onClick = { share(info.address) },
+                    modifier = Modifier.testTag("settings-row-$infoTagPrefix-share"),
                     role = Role.Button,
                 )
             }
         }
-        remoteDisplayName?.takeIf { it.isNotBlank() }?.let { remoteName ->
-            item {
-                SettingsRow(
-                    title = "Remote profile",
-                    supportingText = remoteName,
-                    modifier = Modifier.testTag("settings-row-contact-remote-profile"),
-                )
+        when (info) {
+            is ConversationInfo.DirectContact -> info.remoteProfileName
+                ?.takeIf { it.isNotBlank() }
+                ?.let { remoteName ->
+                    item {
+                        SettingsRow(
+                            title = "Remote profile",
+                            supportingText = remoteName,
+                            modifier = Modifier.testTag("settings-row-contact-remote-profile"),
+                        )
+                    }
+                }
+            is ConversationInfo.Room -> {
+                item {
+                    SettingsRow(
+                        title = "Subject",
+                        supportingText = info.subject?.takeIf { it.isNotBlank() } ?: "Not set",
+                        modifier = Modifier.testTag("settings-row-room-subject"),
+                    )
+                }
+                item {
+                    SettingsRow(
+                        title = "Occupants",
+                        supportingText = "${info.occupantCount} occupants",
+                        modifier = Modifier.testTag("settings-row-room-occupants"),
+                    )
+                }
             }
         }
         item {
             SettingsRow(
                 title = "Encryption",
                 supportingText = "Plaintext",
-                modifier = Modifier.testTag("settings-row-contact-encryption"),
+                modifier = Modifier.testTag("settings-row-$infoTagPrefix-encryption"),
             )
         }
         if (recentThreads.isNotEmpty()) {
             item {
                 SettingsSectionHeader(
                     title = "Recent threads",
-                    modifier = Modifier.testTag("settings-section-contact-recent-threads"),
+                    modifier = Modifier.testTag("settings-section-$infoTagPrefix-recent-threads"),
                 )
             }
             items(
@@ -1151,6 +1201,7 @@ private fun PeerProfileContent(
             ) { recent ->
                 RecentThreadProfileRow(
                     recent = recent,
+                    tag = "settings-row-$infoTagPrefix-thread-${recent.thread.draftKey()}",
                     onOpen = { onOpenThread(recent.thread) },
                     onRename = {
                         threadNameDraft = recent.title
@@ -1160,36 +1211,41 @@ private fun PeerProfileContent(
                 )
             }
         }
-        blockingState?.takeIf(PeerBlockingState::supported)?.let { state ->
-            item {
-                SettingsRow(
-                    title = if (state.blocked) "Unblock" else "Block",
-                    supportingText = if (state.blocked) {
-                        "Blocked by ${state.blockedAddresses.joinToString()}"
-                    } else {
-                        "Stop messages from this address"
-                    },
-                    enabled = !blockingBusy,
-                    onClick = { blockingMutation = !state.blocked },
-                    modifier = Modifier.testTag("settings-row-contact-block"),
-                    tone = SettingsRowTone.Danger,
-                    role = Role.Button,
-                )
+        when (info) {
+            is ConversationInfo.DirectContact -> {
+                blockingState?.takeIf(PeerBlockingState::supported)?.let { state ->
+                    item {
+                        SettingsRow(
+                            title = if (state.blocked) "Unblock" else "Block",
+                            supportingText = if (state.blocked) {
+                                "Blocked by ${state.blockedAddresses.joinToString()}"
+                            } else {
+                                "Stop messages from this address"
+                            },
+                            enabled = !blockingBusy,
+                            onClick = { blockingMutation = !state.blocked },
+                            modifier = Modifier.testTag("settings-row-contact-block"),
+                            tone = SettingsRowTone.Danger,
+                            role = Role.Button,
+                        )
+                    }
+                }
+                blockingError?.let { message ->
+                    item {
+                        Text(
+                            message,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 12.dp),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                }
             }
-        }
-        blockingError?.let { message ->
-            item {
-                Text(
-                    message,
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 12.dp),
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
+            is ConversationInfo.Room -> Unit
         }
     }
 
-    if (nicknameOpen) {
+    if (info is ConversationInfo.DirectContact && nicknameOpen) {
         AlertDialog(
             onDismissRequest = { if (!nicknameSaving) nicknameOpen = false },
             title = { Text("Nickname") },
@@ -1298,7 +1354,7 @@ private fun PeerProfileContent(
         )
     }
 
-    blockingMutation?.let { block ->
+    blockingMutation?.takeIf { info is ConversationInfo.DirectContact }?.let { block ->
         val blockedAddresses = blockingState?.blockedAddresses.orEmpty()
         val unblocksDomain = !block && blockedAddresses.any { it != key.canonicalBarePeer }
         AlertDialog(
@@ -1380,6 +1436,7 @@ private fun PeerProfileContent(
 @Composable
 private fun RecentThreadProfileRow(
     recent: RecentThread,
+    tag: String,
     onOpen: () -> Unit,
     onRename: () -> Unit,
 ) {
@@ -1387,7 +1444,7 @@ private fun RecentThreadProfileRow(
         title = recent.title,
         supportingText = "Replies ${recent.replyCount}",
         onClick = onOpen,
-        modifier = Modifier.testTag("settings-row-contact-thread-${recent.thread.draftKey()}"),
+        modifier = Modifier.testTag(tag),
         role = Role.Button,
         trailingContent = {
             TextButton(

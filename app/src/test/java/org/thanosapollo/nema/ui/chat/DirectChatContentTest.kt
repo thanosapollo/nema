@@ -39,6 +39,7 @@ import androidx.compose.ui.test.assertHeightIsEqualTo
 import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertHasNoClickAction
@@ -215,6 +216,7 @@ class DirectChatContentTest {
         var blockKey: DirectConversationKey? = null
         var blockValue: Boolean? = null
         var sharedPeer: String? = null
+        var blockingLoads = 0
         val thread = ThreadRef(ThreadId.require("topic"))
         composeRule.setContent {
             MaterialTheme {
@@ -236,6 +238,7 @@ class DirectChatContentTest {
                         true
                     },
                     onLoadPeerBlocking = { _, key ->
+                        blockingLoads++
                         blockKey = key
                         PeerBlockingState(supported = true)
                     },
@@ -268,6 +271,7 @@ class DirectChatContentTest {
         ).assert(hasNoRole)
         composeRule.waitUntil { blockKey != null }
         assertEquals(DirectConversationKey(ACCOUNT_A, PEER_A), blockKey)
+        assertEquals(1, blockingLoads)
 
         composeRule.onNodeWithTag("contact-info-list").performScrollToIndex(3)
         composeRule.onNodeWithTag("settings-row-contact-share")
@@ -692,6 +696,187 @@ class DirectChatContentTest {
         composeRule.onNodeWithContentDescription("Conversation actions").performClick()
         composeRule.onNodeWithText("Contact info").performClick()
         composeRule.onNodeWithText("XMPP address").assertIsDisplayed()
+    }
+
+    @Test
+    fun roomInfoUsesRoomLabelsAndShowsCommonAndRoomFactsOnly() {
+        val room = "room@conference.example.org"
+        val thread = ThreadRef(ThreadId.require("room-topic"))
+        var sharedPeer: String? = null
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, room).copy(
+                        selectedPeerDisplayName = "Remote profile must stay hidden",
+                        selectedPeerLocalNickname = "Local nickname must stay hidden",
+                        selectedPeerGroupChat = true,
+                        selectedRoomSubject = "Open hardware",
+                        selectedRoomOccupantCount = 3,
+                        recentThreads = listOf(
+                            RecentThread(
+                                thread = thread,
+                                title = "Room topic",
+                                replyCount = 2,
+                                messageKind = MessageKind.GROUPCHAT,
+                            ),
+                        ),
+                    ),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                    onSharePeer = { sharedPeer = it },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Open room info").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Conversation actions").performClick()
+        composeRule.onNodeWithText("Contact info").assertDoesNotExist()
+        composeRule.onNodeWithText("Room info").performClick()
+        composeRule.onNodeWithText("Room info").assertIsDisplayed()
+        val list = composeRule.onNodeWithTag("room-info-list")
+        list.performScrollToIndex(1)
+        composeRule.onNode(
+            hasTestTag("settings-row-room-address") and
+                hasAnyDescendant(hasText("XMPP address")) and
+                hasAnyDescendant(hasText(room)),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+        list.performScrollToIndex(2)
+        composeRule.onNodeWithTag("settings-row-room-share").performClick()
+        assertEquals(room, sharedPeer)
+        list.performScrollToIndex(3)
+        composeRule.onNode(
+            hasTestTag("settings-row-room-subject") and
+                hasAnyDescendant(hasText("Subject")) and
+                hasAnyDescendant(hasText("Open hardware")),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+        list.performScrollToIndex(4)
+        composeRule.onNode(
+            hasTestTag("settings-row-room-occupants") and
+                hasAnyDescendant(hasText("Occupants")) and
+                hasAnyDescendant(hasText("3 occupants")),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+        list.performScrollToIndex(5)
+        composeRule.onNode(
+            hasTestTag("settings-row-room-encryption") and
+                hasAnyDescendant(hasText("Encryption")) and
+                hasAnyDescendant(hasText("Plaintext")),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+        list.performScrollToIndex(6)
+        composeRule.onNodeWithTag("settings-section-room-recent-threads").assertIsDisplayed()
+        list.performScrollToIndex(7)
+        composeRule.onNodeWithTag("settings-row-room-thread-${thread.draftKey()}").assertIsDisplayed()
+        composeRule.onNodeWithText("Nickname").assertDoesNotExist()
+        composeRule.onNodeWithText("Remote profile").assertDoesNotExist()
+        composeRule.onNodeWithText("Block").assertDoesNotExist()
+        composeRule.onNodeWithText("Unblock").assertDoesNotExist()
+    }
+
+    @Test
+    fun roomInfoNeverInvokesContactEffectsAcrossSubjectAndOccupantUpdates() {
+        val room = "room@conference.example.org"
+        val initial = state(ACCOUNT_A, room).copy(
+            selectedPeerGroupChat = true,
+            selectedRoomSubject = "First subject",
+            selectedRoomOccupantCount = 2,
+        )
+        lateinit var show: (DirectChatState) -> Unit
+        var blockingLoads = 0
+        var blockingMutations = 0
+        var nicknameSaves = 0
+        composeRule.setContent {
+            MaterialTheme {
+                var current by remember { mutableStateOf(initial) }
+                show = { current = it }
+                DirectChatContent(
+                    state = current,
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                    blockingSession = session(1),
+                    onSavePeerNickname = { _, _ ->
+                        nicknameSaves++
+                        true
+                    },
+                    onLoadPeerBlocking = { _, _ ->
+                        blockingLoads++
+                        PeerBlockingState(supported = true)
+                    },
+                    onSetPeerBlocked = { _, _, _ ->
+                        blockingMutations++
+                        PeerBlockingMutationResult.NotAttempted
+                    },
+                )
+            }
+        }
+
+        composeRule.onNode(
+            hasContentDescription("Open room info") or hasContentDescription("Open contact info"),
+        ).performClick()
+        composeRule.waitForIdle()
+        composeRule.runOnIdle {
+            assertEquals(0, blockingLoads)
+            assertEquals(0, blockingMutations)
+            assertEquals(0, nicknameSaves)
+            show(
+                initial.copy(
+                    selectedRoomSubject = "Updated subject",
+                    selectedRoomOccupantCount = 7,
+                ),
+            )
+        }
+        composeRule.onNodeWithText("Updated subject").assertIsDisplayed()
+        composeRule.onNodeWithText("7 occupants").assertIsDisplayed()
+        composeRule.runOnIdle {
+            assertEquals(0, blockingLoads)
+            assertEquals(0, blockingMutations)
+            assertEquals(0, nicknameSaves)
+        }
+    }
+
+    @Test
+    fun roomInfoShowsStableMissingSubjectAndZeroOccupants() {
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, "empty@conference.example.org").copy(
+                        selectedPeerGroupChat = true,
+                        selectedRoomSubject = null,
+                        selectedRoomOccupantCount = 0,
+                    ),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Open room info").performClick()
+        val list = composeRule.onNodeWithTag("room-info-list")
+        list.performScrollToIndex(2)
+        composeRule.onNode(
+            hasTestTag("settings-row-room-subject") and
+                hasAnyDescendant(hasText("Subject")) and
+                hasAnyDescendant(hasText("Not set")),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+        list.performScrollToIndex(3)
+        composeRule.onNode(
+            hasTestTag("settings-row-room-occupants") and
+                hasAnyDescendant(hasText("Occupants")) and
+                hasAnyDescendant(hasText("0 occupants")),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
     }
 
     @Test
