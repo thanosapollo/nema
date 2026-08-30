@@ -11,6 +11,16 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        exclusiveContent {
+            forRepository {
+                maven {
+                    name = "ThanosApolloSmack"
+                    url = uri("https://maven.thanosapollo.org/releases")
+                    mavenContent { releasesOnly() }
+                }
+            }
+            filter { includeGroup("org.thanosapollo.smack") }
+        }
     }
 }
 
