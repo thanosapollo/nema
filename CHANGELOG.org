@@ -1,5 +1,17 @@
 #+TITLE: Nema changelog
 
+* 0.2.0 — 2026-08-30
+
+Second alpha release.
+
++ Add automatic release checks and a Settings journey for downloading, verifying, and installing updates.
++ Verify update package identity, increasing version, checksum, and Android signing lineage before installer handoff.
++ Preserve direct-message thread lineage and reuse an existing thread when replying.
++ Share one typed conversation shell across direct chats and rooms.
++ Unify settings presentation, profile rows, and room information.
+
+Nema remains an experimental plaintext XMPP client. OMEMO and OpenPGP are not implemented.
+
 * 0.1.1 — 2026-08-29
 
 First tagged alpha release on Theodora.
