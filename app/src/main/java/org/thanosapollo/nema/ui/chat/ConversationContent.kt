@@ -223,7 +223,7 @@ internal fun threadRouteRevealStart(
 
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
-fun DirectChatContent(
+fun ConversationContent(
     state: DirectChatState,
     connectionStatus: String,
     onSelectPeer: suspend (String) -> Boolean,

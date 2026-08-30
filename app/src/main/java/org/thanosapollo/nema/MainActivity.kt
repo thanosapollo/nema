@@ -56,7 +56,7 @@ import org.thanosapollo.nema.ui.PrimaryDestination
 import org.thanosapollo.nema.ui.RosterContent
 import org.thanosapollo.nema.ui.selectSessionDestination
 import org.thanosapollo.nema.ui.SessionBottomBar
-import org.thanosapollo.nema.ui.chat.DirectChatContent
+import org.thanosapollo.nema.ui.chat.ConversationContent
 import org.thanosapollo.nema.ui.chat.canReact
 import org.thanosapollo.nema.ui.showLoginSessionChrome
 import org.thanosapollo.nema.update.InstallHandoffLease
@@ -436,7 +436,7 @@ private fun AccountConnectionScreen(
                         }
                     }
                     PrimaryDestination.HOME -> {
-                        DirectChatContent(
+                        ConversationContent(
                             state = chatState,
                             connectionStatus = privacySafeStatus(connectionState),
                             onSelectPeer = presenter::selectPeer,

@@ -22,7 +22,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.thanosapollo.nema.chat.ConversationSummary
 import org.thanosapollo.nema.chat.DirectChatState
-import org.thanosapollo.nema.ui.chat.DirectChatContent
+import org.thanosapollo.nema.ui.chat.ConversationContent
 import kotlinx.coroutines.CompletableDeferred
 
 @RunWith(RobolectricTestRunner::class)
@@ -36,7 +36,7 @@ class HomeContentTest {
         var profileClicks = 0
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = DirectChatState(
                         accountId = "account-a",
                         conversations = listOf(
@@ -73,7 +73,7 @@ class HomeContentTest {
     fun homeShowsUnreadCountOnConversationRow() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = DirectChatState(
                         accountId = "account-a",
                         conversations = listOf(
@@ -105,7 +105,7 @@ class HomeContentTest {
     fun homeGroupPreviewShowsOccupantNotGroupLabel() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = DirectChatState(
                         accountId = "account-a",
                         conversations = listOf(
@@ -139,7 +139,7 @@ class HomeContentTest {
     fun homeDirectOutgoingPreviewShowsYou() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = DirectChatState(
                         accountId = "account-a",
                         conversations = listOf(
@@ -173,7 +173,7 @@ class HomeContentTest {
             var ready by remember { mutableStateOf(false) }
             show = { ready = it }
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = DirectChatState(accountId = "account-a", conversationsReady = ready),
                     connectionStatus = "Connecting",
                     onSelectPeer = { true },
@@ -195,7 +195,7 @@ class HomeContentTest {
     fun cachedConversationsShowBeforeReadyFlag() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = DirectChatState(
                         accountId = "account-a",
                         conversations = listOf(
@@ -224,7 +224,7 @@ class HomeContentTest {
     fun searchFiltersConversationsAndNewChatOpensDialog() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = DirectChatState(
                         accountId = "account-a",
                         conversations = listOf(
@@ -256,7 +256,7 @@ class HomeContentTest {
     fun chatAppBarExposesBackAndKeepsPeerLabel() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = DirectChatState(
                         accountId = "account-a",
                         selectedPeer = "alice@example.org",
@@ -281,7 +281,7 @@ class HomeContentTest {
     fun homeStaysComposedUnderOpenChatWithoutOwningSessionBar() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = DirectChatState(
                         accountId = "account-a",
                         conversations = listOf(
@@ -312,7 +312,7 @@ class HomeContentTest {
         var openedSettings = false
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = DirectChatState(
                         accountId = "account-a",
                         conversationsReady = true,

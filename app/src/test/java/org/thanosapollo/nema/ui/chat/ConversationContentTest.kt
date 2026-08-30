@@ -119,7 +119,7 @@ private val hasNoRole = SemanticsMatcher.keyNotDefined(SemanticsProperties.Role)
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
-class DirectChatContentTest {
+class ConversationContentTest {
     @get:Rule
     val composeRule = createComposeRule()
 
@@ -220,7 +220,7 @@ class DirectChatContentTest {
         val thread = ThreadRef(ThreadId.require("topic"))
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A).copy(
                         selectedThread = thread,
                         selectedPeerDisplayName = "Remote Name",
@@ -306,7 +306,7 @@ class DirectChatContentTest {
         var closeConversation = 0
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A).copy(
                         selectedPeerDisplayName = "Remote Name",
                         recentThreads = listOf(
@@ -386,7 +386,7 @@ class DirectChatContentTest {
         var loadCalls = 0
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -415,7 +415,7 @@ class DirectChatContentTest {
         var saveCalls = 0
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -450,7 +450,7 @@ class DirectChatContentTest {
         var renamed: Pair<ThreadRef, String>? = null
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A).copy(
                         recentThreads = listOf(
                             RecentThread(
@@ -499,7 +499,7 @@ class DirectChatContentTest {
     fun domainBlockConfirmationNamesDomainWideUnblock() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -538,7 +538,7 @@ class DirectChatContentTest {
             MaterialTheme {
                 var current by remember { mutableStateOf(state(ACCOUNT_A, PEER_A)) }
                 show = { current = it }
-                DirectChatContent(
+                ConversationContent(
                     state = current,
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -587,7 +587,7 @@ class DirectChatContentTest {
             MaterialTheme {
                 var generation by remember { mutableStateOf(1L) }
                 reconnect = { generation = 2L }
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -627,7 +627,7 @@ class DirectChatContentTest {
             MaterialTheme {
                 var generation by remember { mutableStateOf(1L) }
                 reconnect = { generation = 2L }
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -682,7 +682,7 @@ class DirectChatContentTest {
     fun conversationOverflowOpensContactInfoBeforeThreadActions() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -705,7 +705,7 @@ class DirectChatContentTest {
         var sharedPeer: String? = null
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, room).copy(
                         selectedPeerDisplayName = "Remote profile must stay hidden",
                         selectedPeerLocalNickname = "Local nickname must stay hidden",
@@ -794,7 +794,7 @@ class DirectChatContentTest {
             MaterialTheme {
                 var current by remember { mutableStateOf(initial) }
                 show = { current = it }
-                DirectChatContent(
+                ConversationContent(
                     state = current,
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -846,7 +846,7 @@ class DirectChatContentTest {
     fun roomInfoShowsStableMissingSubjectAndZeroOccupants() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, "empty@conference.example.org").copy(
                         selectedPeerGroupChat = true,
                         selectedRoomSubject = null,
@@ -951,7 +951,7 @@ class DirectChatContentTest {
                 }
                 show = { current = it }
                 MaterialTheme {
-                    DirectChatContent(
+                    ConversationContent(
                         state = current,
                         connectionStatus = "Connected",
                         onSelectPeer = { true },
@@ -987,7 +987,7 @@ class DirectChatContentTest {
         var closeConversation = 0
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -1047,7 +1047,7 @@ class DirectChatContentTest {
             "please ignore that and continue discussing open hardware\n\nCode of Conduct:\n1. Stay on topic"
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, "room@conference.example.org").copy(
                         selectedPeerGroupChat = true,
                         selectedRoomSubject = subject,
@@ -1079,7 +1079,7 @@ class DirectChatContentTest {
             MaterialTheme {
                 var current by remember { mutableStateOf(room) }
                 show = { current = it }
-                DirectChatContent(
+                ConversationContent(
                     state = current,
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -1389,7 +1389,7 @@ class DirectChatContentTest {
     fun quoteActionPlacesQuoteBeforeDraftAndLeavesAnswerOutsideQuote() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A, draft = "my answer").copy(
                         messages = listOf(message("original", outgoing = false)),
                     ),
@@ -1542,7 +1542,7 @@ class DirectChatContentTest {
     fun typingIndicatorShowsInTimelineNotTopBar() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A).copy(
                         messages = listOf(message("live", outgoing = false)),
                         typingLabel = "Talos is typing...",
@@ -1758,7 +1758,7 @@ class DirectChatContentTest {
         )
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A).copy(
                         messages = listOf(editable),
                         draft = "unrelated draft",
@@ -1833,7 +1833,7 @@ class DirectChatContentTest {
         )
         restoration.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A).copy(
                         messages = listOf(editable),
                         draft = "unrelated draft",
@@ -1897,7 +1897,7 @@ class DirectChatContentTest {
         )
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A).copy(
                         messages = listOf(editable, replyTarget),
                         draft = "unrelated draft",
@@ -1950,7 +1950,7 @@ class DirectChatContentTest {
         )
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A).copy(messages = listOf(editable), draft = "ordinary draft"),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -1978,7 +1978,7 @@ class DirectChatContentTest {
         )
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A).copy(messages = listOf(editable), draft = "ordinary draft"),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -2095,7 +2095,7 @@ class DirectChatContentTest {
         val sendResult = CompletableDeferred<Boolean>()
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A, draft = "new message").copy(
                         messages = (1..100).map { number ->
                             message("message-$number", outgoing = false)
@@ -2124,7 +2124,7 @@ class DirectChatContentTest {
         val sendResult = CompletableDeferred<Boolean>()
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A, draft = "unsent message").copy(
                         messages = (1..100).map { number ->
                             message("message-$number", outgoing = false)
@@ -2160,7 +2160,7 @@ class DirectChatContentTest {
     fun synchronousSendExceptionShowsFailureAndPreservesDraft() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A, "sync draft"),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -2182,7 +2182,7 @@ class DirectChatContentTest {
         val result = CompletableDeferred<Boolean>()
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A, "deferred draft"),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -2212,7 +2212,7 @@ class DirectChatContentTest {
         composeRule.setContent {
             CompositionLocalProvider(LocalActivityResultRegistryOwner provides resultOwner) {
                 MaterialTheme {
-                    DirectChatContent(
+                    ConversationContent(
                         state = state(ACCOUNT_A, PEER_A, "attachment draft"),
                         connectionStatus = "Connected",
                         onSelectPeer = { true },
@@ -2245,7 +2245,7 @@ class DirectChatContentTest {
         var sends = 0
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A, draft = "send once"),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -2283,7 +2283,7 @@ class DirectChatContentTest {
     fun editingClearsSendFailure() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A, "failed draft"),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -2310,7 +2310,7 @@ class DirectChatContentTest {
             MaterialTheme {
                 var current by remember { mutableStateOf(state(ACCOUNT_A, PEER_A, "old draft")) }
                 show = { current = it }
-                DirectChatContent(
+                ConversationContent(
                     state = current,
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -2350,7 +2350,7 @@ class DirectChatContentTest {
         var sends = 0
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A, draft = "send once"),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -2384,7 +2384,7 @@ class DirectChatContentTest {
             MaterialTheme {
                 var current by remember { mutableStateOf(conversation) }
                 show = { current = it }
-                DirectChatContent(
+                ConversationContent(
                     state = current,
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -2424,7 +2424,7 @@ class DirectChatContentTest {
             MaterialTheme {
                 var current by remember { mutableStateOf(conversation) }
                 show = { current = it }
-                DirectChatContent(
+                ConversationContent(
                     state = current,
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -2455,7 +2455,7 @@ class DirectChatContentTest {
         val sendResult = CompletableDeferred<Boolean>()
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A).copy(
                         messages = (1..100).map { number ->
                             message("message-$number", outgoing = false)
@@ -2490,7 +2490,7 @@ class DirectChatContentTest {
         var threadSends = 0
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A, draft = "root"),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -2524,7 +2524,7 @@ class DirectChatContentTest {
         var sends = 0
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A, draft = "first"),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -2647,7 +2647,7 @@ class DirectChatContentTest {
         var threaded: DraftSnapshot? = null
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A, "root"),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -2681,7 +2681,7 @@ class DirectChatContentTest {
     fun emptyComposerKeepsSendActionDisabled() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -2760,7 +2760,7 @@ class DirectChatContentTest {
                     mutableStateOf(state(ACCOUNT_A, PEER_A).copy(selectedPeer = null))
                 }
                 show = { current = it }
-                DirectChatContent(
+                ConversationContent(
                     state = current,
                     connectionStatus = "Connected",
                     onSelectPeer = {
@@ -2795,7 +2795,7 @@ class DirectChatContentTest {
 
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A, "saved"),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -2824,7 +2824,7 @@ class DirectChatContentTest {
 
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -2855,7 +2855,7 @@ class DirectChatContentTest {
             MaterialTheme {
                 var current by remember { mutableStateOf(conversationA) }
                 show = { current = it }
-                DirectChatContent(
+                ConversationContent(
                     state = current,
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -2895,7 +2895,7 @@ class DirectChatContentTest {
             MaterialTheme {
                 var current by remember { mutableStateOf(direct) }
                 show = { current = it }
-                DirectChatContent(
+                ConversationContent(
                     state = current,
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -2938,7 +2938,7 @@ class DirectChatContentTest {
 
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -2978,7 +2978,7 @@ class DirectChatContentTest {
 
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -3011,7 +3011,7 @@ class DirectChatContentTest {
 
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -3042,7 +3042,7 @@ class DirectChatContentTest {
             MaterialTheme {
                 var state by remember { mutableStateOf(state(ACCOUNT_A, PEER_A)) }
                 show = { state = it }
-                DirectChatContent(
+                ConversationContent(
                     state = state,
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -3094,7 +3094,7 @@ class DirectChatContentTest {
             MaterialTheme {
                 var state by remember { mutableStateOf(state(ACCOUNT_A, PEER_A, "account A draft")) }
                 show = { state = it }
-                DirectChatContent(
+                ConversationContent(
                     state = state,
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -3150,7 +3150,7 @@ class DirectChatContentTest {
                     )
                 }
                 show = { state = it }
-                DirectChatContent(
+                ConversationContent(
                     state = state,
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -3196,7 +3196,7 @@ class DirectChatContentTest {
 
         restorationTester.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A, "room draft"),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -3239,7 +3239,7 @@ class DirectChatContentTest {
 
         restorationTester.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = restoredState,
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -3279,7 +3279,7 @@ class DirectChatContentTest {
 
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A, "first"),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -3307,7 +3307,7 @@ class DirectChatContentTest {
     fun replyAsThreadIsHiddenWithoutTrustedReference() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A).copy(
                         messages = listOf(message("untrusted message", outgoing = false)),
                     ),
@@ -3331,7 +3331,7 @@ class DirectChatContentTest {
     fun replyAsThreadIsHiddenForGroupChatEvenWithTrustedReference() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A).copy(
                         selectedPeerGroupChat = true,
                         messages = listOf(
@@ -3361,7 +3361,7 @@ class DirectChatContentTest {
     fun replyAsThreadIsHiddenForChatRowInsideRoomConversation() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A).copy(
                         selectedPeerGroupChat = true,
                         messages = listOf(
@@ -3392,7 +3392,7 @@ class DirectChatContentTest {
         var succeeds = false
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A).copy(
                         messages = listOf(
                             message("thread target", outgoing = false).copy(replyReferenceId = "wire-id"),
@@ -3430,7 +3430,7 @@ class DirectChatContentTest {
         var opened: ThreadRef? = null
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A).copy(
                         messages = listOf(
                             message("root body", outgoing = false).copy(
@@ -3519,7 +3519,7 @@ class DirectChatContentTest {
         composeRule.setContent {
             MaterialTheme {
                 var current by remember { mutableStateOf(parent) }
-                DirectChatContent(
+                ConversationContent(
                     state = current,
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -3583,7 +3583,7 @@ class DirectChatContentTest {
                     )
                 }
                 show = { state = it }
-                DirectChatContent(
+                ConversationContent(
                     state = state,
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -3626,7 +3626,7 @@ class DirectChatContentTest {
     fun inThreadAppBarShowsThreadSubtitleAndBackToConversation() {
         composeRule.setContent {
             MaterialTheme {
-                DirectChatContent(
+                ConversationContent(
                     state = state(ACCOUNT_A, PEER_A).copy(
                         selectedThread = ThreadRef(ThreadId.require("topic")),
                     ),
