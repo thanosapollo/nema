@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.SemanticsMatcher
@@ -40,6 +41,7 @@ import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsNotFocused
@@ -110,6 +112,9 @@ import org.thanosapollo.nema.xmpp.blocking.PeerBlockingMutationResult
 import org.thanosapollo.nema.xmpp.httpupload.UploadedFile
 import org.thanosapollo.nema.xmpp.transport.AccountId
 import org.thanosapollo.nema.xmpp.transport.ConnectionGeneration
+
+private val hasButtonRole = SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button)
+private val hasNoRole = SemanticsMatcher.keyNotDefined(SemanticsProperties.Role)
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
@@ -254,19 +259,26 @@ class DirectChatContentTest {
         composeRule.onNodeWithContentDescription("Open contact info").performClick()
         composeRule.onNodeWithText("Contact info").assertIsDisplayed()
         composeRule.onNodeWithText(PEER_A).assertIsDisplayed()
+        composeRule.onNodeWithTag("contact-info-list").performScrollToIndex(4)
         composeRule.onNodeWithText("Remote Name").assertIsDisplayed()
         composeRule.onNodeWithTag("contact-info-list").performScrollToIndex(5)
         composeRule.onNodeWithText("Plaintext").assertIsDisplayed()
-        composeRule.onNodeWithTag("encryption-info").assert(
+        composeRule.onNodeWithTag("settings-row-contact-encryption").assert(
             SemanticsMatcher("has no click action") { !it.config.contains(SemanticsActions.OnClick) },
-        )
+        ).assert(hasNoRole)
         composeRule.waitUntil { blockKey != null }
         assertEquals(DirectConversationKey(ACCOUNT_A, PEER_A), blockKey)
 
-        composeRule.onNodeWithTag("share-xmpp-action").performClick()
+        composeRule.onNodeWithTag("contact-info-list").performScrollToIndex(3)
+        composeRule.onNodeWithTag("settings-row-contact-share")
+            .assert(hasButtonRole)
+            .performClick()
         assertEquals(PEER_A, sharedPeer)
 
-        composeRule.onNodeWithTag("nickname-action").performClick()
+        composeRule.onNodeWithTag("contact-info-list").performScrollToIndex(1)
+        composeRule.onNodeWithTag("settings-row-contact-nickname")
+            .assert(hasButtonRole)
+            .performClick()
         composeRule.onNodeWithTag("nickname-input").performTextReplacement("Chosen")
         composeRule.onNodeWithText("Save").performClick()
         composeRule.waitUntil { nickname != null }
@@ -274,11 +286,154 @@ class DirectChatContentTest {
         assertEquals("Chosen", nickname)
 
         composeRule.onNodeWithTag("contact-info-list").performScrollToIndex(6)
-        composeRule.onNodeWithTag("block-action").performClick()
+        composeRule.onNodeWithTag("settings-row-contact-block")
+            .assert(hasButtonRole)
+            .performClick()
         composeRule.onNodeWithTag("confirm-block").performClick()
         composeRule.waitUntil { blockValue != null }
         assertEquals(DirectConversationKey(ACCOUNT_A, PEER_A), blockKey)
         assertEquals(true, blockValue)
+    }
+
+    @Test
+    fun contactInfoUsesSharedTaggedShellHeadersAndActionSemantics() {
+        val thread = ThreadRef(ThreadId.require("shared-row-thread"))
+        var shared = 0
+        var closeConversation = 0
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A).copy(
+                        selectedPeerDisplayName = "Remote Name",
+                        recentThreads = listOf(
+                            RecentThread(
+                                thread = thread,
+                                title = "Shared row thread",
+                                replyCount = 2,
+                                messageKind = MessageKind.CHAT,
+                            ),
+                        ),
+                    ),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = { closeConversation++ },
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                    onSharePeer = { shared++ },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Open contact info").performClick()
+        composeRule.onNodeWithTag("contact-profile-header").assertIsDisplayed()
+        composeRule.onNode(
+            hasTestTag("contact-profile-header") and
+                hasAnyDescendant(hasTestTag("contact-profile-avatar")),
+            useUnmergedTree = true,
+        ).assertIsDisplayed()
+            .assertHasNoClickAction()
+            .assert(hasNoRole)
+        val list = composeRule.onNodeWithTag("contact-info-list")
+        list.performScrollToIndex(1)
+        composeRule.onNodeWithTag("settings-row-contact-nickname")
+            .assertHeightIsAtLeast(64.dp)
+            .assertHasClickAction()
+            .assert(hasButtonRole)
+        list.performScrollToIndex(2)
+        composeRule.onNodeWithTag("settings-row-contact-address")
+            .assertHeightIsAtLeast(64.dp)
+            .assertHasNoClickAction()
+            .assert(hasNoRole)
+        list.performScrollToIndex(3)
+        composeRule.onNodeWithTag("settings-row-contact-share")
+            .assertHeightIsAtLeast(64.dp)
+            .assertHasClickAction()
+            .assert(hasButtonRole)
+            .performClick()
+        list.performScrollToIndex(4)
+        composeRule.onNodeWithTag("settings-row-contact-remote-profile")
+            .assertHeightIsAtLeast(64.dp)
+            .assertHasNoClickAction()
+            .assert(hasNoRole)
+        list.performScrollToIndex(5)
+        composeRule.onNodeWithTag("settings-row-contact-encryption")
+            .assertHeightIsAtLeast(64.dp)
+            .assertHasNoClickAction()
+            .assert(hasNoRole)
+        list.performScrollToIndex(6)
+        composeRule.onNodeWithTag("settings-section-contact-recent-threads")
+            .assertIsDisplayed()
+            .assertHasNoClickAction()
+            .assert(hasNoRole)
+        list.performScrollToIndex(7)
+        composeRule.onNodeWithTag("settings-row-contact-thread-${thread.draftKey()}")
+            .assertHeightIsAtLeast(64.dp)
+            .assertHasClickAction()
+            .assert(hasButtonRole)
+
+        assertEquals(1, shared)
+        composeRule.onNodeWithContentDescription("Back to conversation").performClick()
+        composeRule.onNodeWithTag("contact-info-list").assertDoesNotExist()
+        assertEquals(0, closeConversation)
+    }
+
+    @Test
+    fun unsupportedBlockingLoadsOnceWithoutExposingMutationAction() {
+        var loadCalls = 0
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                    blockingSession = session(1),
+                    onLoadPeerBlocking = { _, _ ->
+                        loadCalls++
+                        PeerBlockingState(supported = false)
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Open contact info").performClick()
+        composeRule.waitForIdle()
+        composeRule.waitUntil { loadCalls > 0 }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("settings-row-contact-block").assertDoesNotExist()
+        assertEquals(1, loadCalls)
+    }
+
+    @Test
+    fun nicknameSaveFailureStaysInDialogAndInvokesOwnerOnce() {
+        var saveCalls = 0
+        composeRule.setContent {
+            MaterialTheme {
+                DirectChatContent(
+                    state = state(ACCOUNT_A, PEER_A),
+                    connectionStatus = "Connected",
+                    onSelectPeer = { true },
+                    onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                    onSavePeerNickname = { _, _ ->
+                        saveCalls++
+                        false
+                    },
+                )
+            }
+        }
+
+        composeRule.onNodeWithContentDescription("Open contact info").performClick()
+        composeRule.onNodeWithTag("contact-info-list").performScrollToIndex(1)
+        composeRule.onNodeWithTag("settings-row-contact-nickname").performClick()
+        composeRule.onNodeWithTag("nickname-input").performTextReplacement("Not saved")
+        composeRule.onNodeWithText("Save").performClick()
+        composeRule.onNodeWithText("Nickname was not saved").assertIsDisplayed()
+        composeRule.onNodeWithTag("nickname-input").assertIsDisplayed()
+        assertEquals(1, saveCalls)
     }
 
     @Test
@@ -331,7 +486,7 @@ class DirectChatContentTest {
         composeRule.waitUntil { renamed != null }
         assertEquals(thread to "Planning", renamed)
 
-        composeRule.onNodeWithTag("recent-thread-${thread.draftKey()}").performClick()
+        composeRule.onNodeWithTag("settings-row-contact-thread-${thread.draftKey()}").performClick()
         composeRule.waitUntil { opened != null }
         assertEquals(thread, opened)
     }
@@ -358,7 +513,9 @@ class DirectChatContentTest {
         composeRule.onNodeWithContentDescription("Open contact info").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("contact-info-list").performScrollToIndex(4)
-        composeRule.onNodeWithTag("block-action").performClick()
+        composeRule.onNodeWithTag("settings-row-contact-block")
+            .assert(hasButtonRole)
+            .performClick()
 
         composeRule.onNodeWithText("Unblock domain?").assertIsDisplayed()
         composeRule.onNodeWithText(
@@ -397,22 +554,26 @@ class DirectChatContentTest {
         composeRule.onNodeWithContentDescription("Open contact info").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("contact-info-list").performScrollToIndex(4)
-        composeRule.onNodeWithTag("block-action").performClick()
+        composeRule.onNodeWithTag("settings-row-contact-block").performClick()
         composeRule.onNodeWithTag("confirm-block").performClick()
         composeRule.waitUntil { mutationStarted.isCompleted }
+        composeRule.onNodeWithTag("settings-row-contact-block")
+            .assertIsNotEnabled()
+            .assertHasNoClickAction()
+            .assert(hasButtonRole)
 
         composeRule.runOnIdle { show(state(ACCOUNT_B, PEER_B)) }
         composeRule.onNodeWithContentDescription("Open contact info").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("contact-info-list").performScrollToIndex(4)
-        composeRule.onNodeWithTag("block-action").assertIsDisplayed()
+        composeRule.onNodeWithTag("settings-row-contact-block").assertIsDisplayed()
 
         mutationResult.complete(PeerBlockingMutationResult.Uncertain)
         composeRule.waitForIdle()
 
         composeRule.onNodeWithText("Block outcome unknown. Reopen contact info to refresh.")
             .assertDoesNotExist()
-        composeRule.onNodeWithTag("block-action").assertIsDisplayed()
+        composeRule.onNodeWithTag("settings-row-contact-block").assertIsDisplayed()
     }
 
     @Test
@@ -443,6 +604,7 @@ class DirectChatContentTest {
 
         composeRule.onNodeWithContentDescription("Open contact info").performClick()
         composeRule.waitForIdle()
+        composeRule.onNodeWithTag("contact-info-list").performScrollToIndex(4)
         composeRule.onNodeWithText("Unblock").assertIsDisplayed()
 
         composeRule.runOnIdle(reconnect)
@@ -491,15 +653,16 @@ class DirectChatContentTest {
 
         composeRule.onNodeWithContentDescription("Open contact info").performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("block-action").performClick()
+        composeRule.onNodeWithTag("contact-info-list").performScrollToIndex(4)
+        composeRule.onNodeWithTag("settings-row-contact-block").performClick()
         composeRule.onNodeWithTag("confirm-block").performClick()
         composeRule.waitUntil { oldMutationStarted.isCompleted }
 
         composeRule.runOnIdle(reconnect)
         composeRule.waitUntil {
-            composeRule.onAllNodesWithTag("block-action").fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithTag("settings-row-contact-block").fetchSemanticsNodes().isNotEmpty()
         }
-        composeRule.onNodeWithTag("block-action").performClick()
+        composeRule.onNodeWithTag("settings-row-contact-block").performClick()
         composeRule.onNodeWithTag("confirm-block").performClick()
         composeRule.onNodeWithText("Unblock").assertIsDisplayed()
 

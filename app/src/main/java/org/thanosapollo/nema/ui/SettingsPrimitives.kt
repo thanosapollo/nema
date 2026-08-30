@@ -44,6 +44,7 @@ enum class SettingsRowTone {
 fun SettingsProfileScreen(
     title: String,
     onBack: (() -> Unit)? = null,
+    backContentDescription: String = "Back",
     modifier: Modifier = Modifier,
     listTag: String? = null,
     listModifier: Modifier = Modifier,
@@ -55,7 +56,10 @@ fun SettingsProfileScreen(
             navigationIcon = {
                 if (onBack != null) {
                     IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        Icon(
+                            Icons.AutoMirrored.Filled.ArrowBack,
+                            contentDescription = backContentDescription,
+                        )
                     }
                 }
             },

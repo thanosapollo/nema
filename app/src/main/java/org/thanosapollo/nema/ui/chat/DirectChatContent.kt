@@ -150,6 +150,10 @@ import org.thanosapollo.nema.thread.ThreadId
 import org.thanosapollo.nema.thread.ThreadRef
 import org.thanosapollo.nema.thread.draftKey
 import org.thanosapollo.nema.ui.HomeContent
+import org.thanosapollo.nema.ui.SettingsProfileScreen
+import org.thanosapollo.nema.ui.SettingsRow
+import org.thanosapollo.nema.ui.SettingsRowTone
+import org.thanosapollo.nema.ui.SettingsSectionHeader
 import org.thanosapollo.nema.ui.quietConnectionStatus
 import org.thanosapollo.nema.ui.theme.LocalChatBackgroundUri
 import org.thanosapollo.nema.ui.theme.readableOn
@@ -1061,131 +1065,126 @@ private fun PeerProfileContent(
         if (isCurrentBlockingOwner(session, key)) blockingState = loaded
     }
 
-    Column(modifier) {
-        TopAppBar(
-            title = { Text("Contact info") },
-            navigationIcon = {
-                IconButton(onClick = onBack) {
-                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back to conversation")
-                }
-            },
-            colors = TopAppBarDefaults.topAppBarColors(
-                containerColor = MaterialTheme.colorScheme.surface,
-            ),
-            windowInsets = WindowInsets(0, 0, 0, 0),
-        )
-        LazyColumn(
-            Modifier
-                .fillMaxSize()
-                .navigationBarsPadding()
-                .testTag("contact-info-list"),
-        ) {
-            item {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 12.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    PeerAvatar(label = label, photoBytes = photoBytes, size = 80.dp)
-                    Text(label, style = MaterialTheme.typography.headlineSmall)
-                }
+    SettingsProfileScreen(
+        title = "Contact info",
+        onBack = onBack,
+        backContentDescription = "Back to conversation",
+        modifier = modifier,
+        listTag = "contact-info-list",
+        listModifier = Modifier.navigationBarsPadding(),
+    ) {
+        item {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 12.dp)
+                    .testTag("contact-profile-header"),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                PeerAvatar(
+                    label = label,
+                    photoBytes = photoBytes,
+                    size = 80.dp,
+                    modifier = Modifier.testTag("contact-profile-avatar"),
+                )
+                Text(label, style = MaterialTheme.typography.headlineSmall)
             }
+        }
+        item {
+            SettingsRow(
+                title = "Nickname",
+                supportingText = localNickname ?: "Not set",
+                onClick = {
+                    nicknameDraft = localNickname.orEmpty()
+                    nicknameError = null
+                    nicknameOpen = true
+                },
+                modifier = Modifier.testTag("settings-row-contact-nickname"),
+                role = Role.Button,
+            )
+        }
+        item {
+            SettingsRow(
+                title = "XMPP address",
+                supportingText = key.canonicalBarePeer,
+                modifier = Modifier.testTag("settings-row-contact-address"),
+            )
+        }
+        onSharePeer?.let { share ->
             item {
-                ProfileRow(
-                    title = "Nickname",
-                    value = localNickname ?: "Not set",
-                    onClick = {
-                        nicknameDraft = localNickname.orEmpty()
-                        nicknameError = null
-                        nicknameOpen = true
+                SettingsRow(
+                    title = "Share XMPP address",
+                    supportingText = "xmpp:${key.canonicalBarePeer}",
+                    onClick = { share(key.canonicalBarePeer) },
+                    modifier = Modifier.testTag("settings-row-contact-share"),
+                    role = Role.Button,
+                )
+            }
+        }
+        remoteDisplayName?.takeIf { it.isNotBlank() }?.let { remoteName ->
+            item {
+                SettingsRow(
+                    title = "Remote profile",
+                    supportingText = remoteName,
+                    modifier = Modifier.testTag("settings-row-contact-remote-profile"),
+                )
+            }
+        }
+        item {
+            SettingsRow(
+                title = "Encryption",
+                supportingText = "Plaintext",
+                modifier = Modifier.testTag("settings-row-contact-encryption"),
+            )
+        }
+        if (recentThreads.isNotEmpty()) {
+            item {
+                SettingsSectionHeader(
+                    title = "Recent threads",
+                    modifier = Modifier.testTag("settings-section-contact-recent-threads"),
+                )
+            }
+            items(
+                items = recentThreads,
+                key = { it.thread.draftKey() },
+            ) { recent ->
+                RecentThreadProfileRow(
+                    recent = recent,
+                    onOpen = { onOpenThread(recent.thread) },
+                    onRename = {
+                        threadNameDraft = recent.title
+                        threadNameError = null
+                        renamingThread = recent
                     },
-                    modifier = Modifier.testTag("nickname-action"),
                 )
             }
+        }
+        blockingState?.takeIf(PeerBlockingState::supported)?.let { state ->
             item {
-                ProfileRow(
-                    title = "XMPP address",
-                    value = key.canonicalBarePeer,
+                SettingsRow(
+                    title = if (state.blocked) "Unblock" else "Block",
+                    supportingText = if (state.blocked) {
+                        "Blocked by ${state.blockedAddresses.joinToString()}"
+                    } else {
+                        "Stop messages from this address"
+                    },
+                    enabled = !blockingBusy,
+                    onClick = { blockingMutation = !state.blocked },
+                    modifier = Modifier.testTag("settings-row-contact-block"),
+                    tone = SettingsRowTone.Danger,
+                    role = Role.Button,
                 )
             }
-            onSharePeer?.let { share ->
-                item {
-                    ProfileRow(
-                        title = "Share XMPP address",
-                        value = "xmpp:${key.canonicalBarePeer}",
-                        onClick = { share(key.canonicalBarePeer) },
-                        modifier = Modifier.testTag("share-xmpp-action"),
-                    )
-                }
-            }
-            remoteDisplayName?.takeIf { it.isNotBlank() }?.let { remoteName ->
-                item {
-                    ProfileRow(
-                        title = "Remote profile",
-                        value = remoteName,
-                    )
-                }
-            }
+        }
+        blockingError?.let { message ->
             item {
-                ProfileRow(
-                    title = "Encryption",
-                    value = "Plaintext",
-                    modifier = Modifier.testTag("encryption-info"),
+                Text(
+                    message,
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 12.dp),
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
                 )
-            }
-            if (recentThreads.isNotEmpty()) {
-                item {
-                    Text(
-                        "Recent threads",
-                        modifier = Modifier
-                            .padding(horizontal = 20.dp, vertical = 12.dp)
-                            .testTag("recent-threads-heading"),
-                        color = MaterialTheme.colorScheme.primary,
-                        style = MaterialTheme.typography.titleSmall,
-                    )
-                }
-                items(
-                    items = recentThreads,
-                    key = { it.thread.draftKey() },
-                ) { recent ->
-                    RecentThreadProfileRow(
-                        recent = recent,
-                        onOpen = { onOpenThread(recent.thread) },
-                        onRename = {
-                            threadNameDraft = recent.title
-                            threadNameError = null
-                            renamingThread = recent
-                        },
-                    )
-                }
-            }
-            blockingState?.takeIf(PeerBlockingState::supported)?.let { state ->
-                item {
-                    ProfileRow(
-                        title = if (state.blocked) "Unblock" else "Block",
-                        value = if (state.blocked) {
-                            "Blocked by ${state.blockedAddresses.joinToString()}"
-                        } else {
-                            "Stop messages from this address"
-                        },
-                        enabled = !blockingBusy,
-                        onClick = { blockingMutation = !state.blocked },
-                        modifier = Modifier.testTag("block-action"),
-                        titleColor = MaterialTheme.colorScheme.error,
-                    )
-                }
-            }
-            blockingError?.let { message ->
-                item {
-                    Text(
-                        message,
-                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                        color = MaterialTheme.colorScheme.error,
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                }
             }
         }
     }
@@ -1379,76 +1378,24 @@ private fun PeerProfileContent(
 }
 
 @Composable
-private fun ProfileRow(
-    title: String,
-    value: String,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-    onClick: (() -> Unit)? = null,
-    titleColor: Color = MaterialTheme.colorScheme.onSurface,
-) {
-    val rowModifier = if (onClick == null) {
-        modifier
-    } else {
-        modifier.clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-    }
-    Row(
-        modifier = rowModifier
-            .fillMaxWidth()
-            .height(64.dp)
-            .padding(horizontal = 20.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(title, color = titleColor, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                value,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-    }
-}
-
-@Composable
 private fun RecentThreadProfileRow(
     recent: RecentThread,
     onOpen: () -> Unit,
     onRename: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = 64.dp)
-            .padding(start = 20.dp, end = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .clickable(role = Role.Button, onClick = onOpen)
-                .padding(vertical = 10.dp)
-                .testTag("recent-thread-${recent.thread.draftKey()}"),
-        ) {
-            Text(
-                recent.title,
-                style = MaterialTheme.typography.bodyLarge,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                "Replies ${recent.replyCount}",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-        TextButton(
-            onClick = onRename,
-            modifier = Modifier.testTag("rename-thread-${recent.thread.draftKey()}"),
-        ) { Text("Rename") }
-    }
+    SettingsRow(
+        title = recent.title,
+        supportingText = "Replies ${recent.replyCount}",
+        onClick = onOpen,
+        modifier = Modifier.testTag("settings-row-contact-thread-${recent.thread.draftKey()}"),
+        role = Role.Button,
+        trailingContent = {
+            TextButton(
+                onClick = onRename,
+                modifier = Modifier.testTag("rename-thread-${recent.thread.draftKey()}"),
+            ) { Text("Rename") }
+        },
+    )
 }
 
 @Composable

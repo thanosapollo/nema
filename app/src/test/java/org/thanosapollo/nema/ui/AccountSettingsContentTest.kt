@@ -16,9 +16,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHeightIsAtLeast
+import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertHasNoClickAction
+import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.hasAnyDescendant
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -44,6 +49,9 @@ import org.thanosapollo.nema.account.AccountConfiguration
 import org.thanosapollo.nema.update.UpdateUiModel
 import org.thanosapollo.nema.ui.theme.PaletteCatalog
 import org.thanosapollo.nema.xmpp.transport.AccountId
+
+private val hasButtonRole = SemanticsMatcher.expectValue(SemanticsProperties.Role, Role.Button)
+private val hasNoRole = SemanticsMatcher.keyNotDefined(SemanticsProperties.Role)
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
@@ -78,10 +86,17 @@ class AccountSettingsContentTest {
         list.performScrollToIndex(8)
         composeRule.onNodeWithText("Current version: Nema 0.1.1 (2)").assertIsDisplayed()
         composeRule.onNodeWithText("Nema 0.2 is available").assertIsDisplayed()
+        composeRule.onNodeWithTag("settings-row-update-status")
+            .assertHasNoClickAction()
+            .assert(hasNoRole)
         list.performScrollToIndex(9)
-        composeRule.onNodeWithTag("settings-row-check-update").performClick()
+        composeRule.onNodeWithTag("settings-row-check-update")
+            .assert(hasButtonRole)
+            .performClick()
         list.performScrollToIndex(10)
-        composeRule.onNodeWithTag("settings-row-download-update").performClick()
+        composeRule.onNodeWithTag("settings-row-download-update")
+            .assert(hasButtonRole)
+            .performClick()
         composeRule.onNodeWithText("Install update").assertDoesNotExist()
         assertEquals(1, checks)
         assertEquals(1, downloads)
@@ -119,9 +134,12 @@ class AccountSettingsContentTest {
         composeRule.onNodeWithTag("settings-row-check-update")
             .assertIsNotEnabled()
             .assertHasNoClickAction()
+            .assert(hasButtonRole)
         composeRule.onNodeWithText("Download update").assertDoesNotExist()
         list.performScrollToIndex(10)
-        composeRule.onNodeWithTag("settings-row-install-update").performClick()
+        composeRule.onNodeWithTag("settings-row-install-update")
+            .assert(hasButtonRole)
+            .performClick()
         assertEquals(0, checks)
         assertEquals(0, downloads)
         assertEquals(1, installs)
@@ -137,19 +155,28 @@ class AccountSettingsContentTest {
 
         val list = composeRule.onNodeWithTag("settings-list")
         list.performScrollToIndex(0)
-        composeRule.onNodeWithTag("settings-row-themes").assertHeightIsAtLeast(64.dp)
+        composeRule.onNodeWithTag("settings-row-themes")
+            .assertHeightIsAtLeast(64.dp)
+            .assert(hasButtonRole)
         list.performScrollToIndex(1)
         composeRule.onNodeWithText("Accounts").assertIsDisplayed()
         list.performScrollToIndex(2)
         composeRule.onNodeWithTag("settings-section-privacy").assertIsDisplayed()
         list.performScrollToIndex(3)
-        composeRule.onNodeWithTag("settings-row-read-receipts").assertHeightIsAtLeast(64.dp)
+        composeRule.onNodeWithTag("settings-row-read-receipts")
+            .assertHeightIsAtLeast(64.dp)
+            .assertHasNoClickAction()
+            .assert(hasNoRole)
         list.performScrollToIndex(4)
         composeRule.onNodeWithTag("settings-section-session").assertIsDisplayed()
         list.performScrollToIndex(5)
-        composeRule.onNodeWithTag("settings-row-stop").assertHeightIsAtLeast(64.dp)
+        composeRule.onNodeWithTag("settings-row-stop")
+            .assertHeightIsAtLeast(64.dp)
+            .assert(hasButtonRole)
         list.performScrollToIndex(6)
-        composeRule.onNodeWithTag("settings-row-sign-out").assertHeightIsAtLeast(64.dp)
+        composeRule.onNodeWithTag("settings-row-sign-out")
+            .assertHeightIsAtLeast(64.dp)
+            .assert(hasButtonRole)
     }
 
     @Test
@@ -369,6 +396,51 @@ class AccountsContentTest {
     val composeRule = createComposeRule()
 
     @Test
+    fun accountsUseSharedTaggedRowsWithAvatarSelectionAndExactCallbacks() {
+        val selected = mutableListOf<AccountId>()
+        var addCalls = 0
+        composeRule.setContent {
+            MaterialTheme {
+                AccountsContent(
+                    accounts = listOf(account(FIRST), account(SECOND)),
+                    activeAccountId = FIRST,
+                    switching = false,
+                    onSelectAccount = { selected += it },
+                    onAddAccount = { addCalls++ },
+                )
+            }
+        }
+
+        composeRule.onNodeWithTag("settings-section-accounts").assertIsDisplayed()
+        composeRule.onNode(
+            hasTestTag("settings-row-account-first") and
+                hasAnyDescendant(hasTestTag("account-avatar-first")),
+            useUnmergedTree = true,
+        )
+            .assertHeightIsAtLeast(64.dp)
+            .assertIsSelected()
+            .assertIsNotEnabled()
+            .assertHasNoClickAction()
+            .assert(hasNoRole)
+        composeRule.onNodeWithTag("settings-row-account-second")
+            .assertHeightIsAtLeast(64.dp)
+            .assertIsNotSelected()
+            .assertIsEnabled()
+            .assertHasClickAction()
+            .assert(hasNoRole)
+            .performClick()
+        composeRule.onNodeWithTag("settings-row-add-account")
+            .assertHeightIsAtLeast(64.dp)
+            .assertIsEnabled()
+            .assertHasClickAction()
+            .assert(hasButtonRole)
+            .performClick()
+
+        assertEquals(listOf(SECOND), selected)
+        assertEquals(1, addCalls)
+    }
+
+    @Test
     fun accountsSelectsConfiguredAccountAndOffersAddAccount() {
         val selected = mutableListOf<AccountId>()
         var addCalls = 0
@@ -407,8 +479,13 @@ class AccountsContentTest {
         }
 
         composeRule.onNodeWithText("Switching account").assertIsDisplayed()
-        composeRule.onNodeWithText("Switch to second@example.org").assertIsNotEnabled()
-        composeRule.onNodeWithText("Add account").assertIsNotEnabled()
+        composeRule.onNodeWithTag("settings-row-account-second")
+            .assertIsNotEnabled()
+            .assertHasNoClickAction()
+        composeRule.onNodeWithTag("settings-row-add-account")
+            .assertIsNotEnabled()
+            .assertHasNoClickAction()
+            .assert(hasButtonRole)
     }
 
     private fun account(id: AccountId) = AccountConfiguration.create(

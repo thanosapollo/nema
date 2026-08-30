@@ -7,6 +7,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import org.thanosapollo.nema.account.AccountConfiguration
 import org.thanosapollo.nema.ui.theme.AppearanceScope
 import org.thanosapollo.nema.ui.theme.AppearanceSpec
@@ -74,6 +75,7 @@ fun AccountSettingsContent(
                     title = "Themes",
                     onClick = openThemes,
                     modifier = Modifier.testTag("settings-row-themes"),
+                    role = Role.Button,
                 )
             }
             item {
@@ -117,6 +119,7 @@ fun AccountSettingsContent(
                     title = "Stop",
                     onClick = onStop,
                     modifier = Modifier.testTag("settings-row-stop"),
+                    role = Role.Button,
                 )
             }
             item {
@@ -125,6 +128,7 @@ fun AccountSettingsContent(
                     onClick = onSignOut,
                     modifier = Modifier.testTag("settings-row-sign-out"),
                     tone = SettingsRowTone.Danger,
+                    role = Role.Button,
                 )
             }
             update?.let { model ->
@@ -147,6 +151,7 @@ fun AccountSettingsContent(
                         enabled = model.canCheck,
                         onClick = onCheckForUpdates,
                         modifier = Modifier.testTag("settings-row-check-update"),
+                        role = Role.Button,
                     )
                 }
                 if (model.canDownload) {
@@ -155,6 +160,7 @@ fun AccountSettingsContent(
                             title = "Download update",
                             onClick = onDownloadUpdate,
                             modifier = Modifier.testTag("settings-row-download-update"),
+                            role = Role.Button,
                         )
                     }
                 }
@@ -164,6 +170,7 @@ fun AccountSettingsContent(
                             title = "Install update",
                             onClick = onInstallUpdate,
                             modifier = Modifier.testTag("settings-row-install-update"),
+                            role = Role.Button,
                         )
                     }
                 }
