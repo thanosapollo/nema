@@ -1943,7 +1943,6 @@ class ConversationContentTest {
             key = key,
             body = "corrected body",
             revision = 7,
-            failureRevision = null,
             correction = correction,
             correctionBackup = backup,
         )
@@ -3154,7 +3153,7 @@ class ConversationContentTest {
     }
 
     @Test
-    fun cancelledDraftResultDoesNotReportFailureOrClearBody() {
+    fun cancelledDraftResultReportsFailureWithoutClearingBody() {
         val draftResult = CompletableDeferred<Boolean>()
 
         composeRule.setContent {
@@ -3175,7 +3174,7 @@ class ConversationContentTest {
         composeRule.waitForIdle()
 
         composeRule.onNodeWithText("visible").assertIsDisplayed()
-        composeRule.onNodeWithText("Draft not saved").assertDoesNotExist()
+        composeRule.onNodeWithText("Draft not saved").assertIsDisplayed()
     }
 
     @Test

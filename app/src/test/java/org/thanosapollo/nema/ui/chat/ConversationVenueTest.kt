@@ -45,7 +45,6 @@ class ConversationVenueTest {
             key = DirectConversationKey("account@example.org", "peer@example.org"),
             body = "hello",
             revision = 1,
-            failureRevision = null,
         )
 
         assertFalse(composer.toDraftSnapshot(ConversationVenue.Direct).groupChat)

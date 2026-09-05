@@ -131,6 +131,7 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -273,7 +274,7 @@ fun ConversationContent(
         var pendingSendIdentities by composerOwner.pendingSendIdentities
         var completedSendSnapshots by composerOwner.completedSendSnapshots
         var failedSendIdentities by composerOwner.failedSendIdentities
-        var pendingDraftIdentities by composerOwner.pendingDraftIdentities
+        val pendingDraftAttempts by composerOwner.pendingDraftAttempts
         var composerStates by composerOwner.composerStates
         val venueByConversation = composerOwner.venueByConversation
         LaunchedEffect(state.pendingSendIdentities, state.completedSendSnapshots) {
@@ -431,38 +432,24 @@ fun ConversationContent(
                 } else {
                 val status = quietConnectionStatus(connectionStatus)
                 var actionsOpen by remember { mutableStateOf(false) }
-                var composer by rememberSaveable(
-                    conversationKey,
-                    saver = composerStateSaver(conversationKey),
-                ) {
-                    mutableStateOf(
-                        composerStates[conversationKey] ?: ComposerState(
-                            conversationKey,
-                            state.draft,
-                            0L,
-                            null,
-                            reply = state.draftReply,
-                            attachmentUrl = state.draftAttachmentUrl,
-                            attachmentName = state.draftAttachmentName,
-                            attachmentMime = state.draftAttachmentMime,
-                            attachmentSize = state.draftAttachmentSize,
-                        ),
+                if (conversationKey !in composerStates) {
+                    composerStates += conversationKey to ComposerState(
+                        conversationKey,
+                        state.draft,
+                        0L,
+                        reply = state.draftReply,
+                        attachmentUrl = state.draftAttachmentUrl,
+                        attachmentName = state.draftAttachmentName,
+                        attachmentMime = state.draftAttachmentMime,
+                        attachmentSize = state.draftAttachmentSize,
                     )
                 }
+                val composer = composerStates.getValue(conversationKey)
                 fun setComposer(next: ComposerState) {
                     if (next.key == composer.key && next.revision != composer.revision) {
                         failedSendIdentities = failedSendIdentities.filterNot { it.key == next.key }.toSet()
                     }
-                    composer = next
                     composerStates += conversationKey to next
-                }
-                LaunchedEffect(conversationKey, composerStates[conversationKey]) {
-                    val retained = composerStates[conversationKey]
-                    if (retained == null) {
-                        composerStates += conversationKey to composer
-                    } else if (retained != composer) {
-                        composer = retained
-                    }
                 }
                 val composerFocus = remember(conversationKey) { FocusRequester() }
                 var latestFocusRequest by remember(conversationKey) { mutableStateOf(0L) }
@@ -505,7 +492,7 @@ fun ConversationContent(
                                     attachmentMime = uploaded.mime,
                                     attachmentSize = uploaded.size,
                                     revision = current.revision + 1,
-                                    failureRevision = null,
+                                    ordinaryRevision = current.ordinaryRevision + if (current.correction == null) 1 else 0,
                                 ),
                             )
                         }
@@ -520,29 +507,11 @@ fun ConversationContent(
                     }
                 }
                 fun updateComposer(next: ComposerState) {
-                    setComposer(next)
-                    if (next.correction != null) return
-                    val snapshot = next.toDraftSnapshot(venue)
-                    val identity = PendingSendIdentity(snapshot.key, snapshot.composerRevision)
-                    val action = onDraftChange(snapshot)
-                    pendingDraftIdentities += identity
-                    composerOwner.scope.launch {
-                        val applied = try {
-                            action.await()
-                        } catch (cancelled: CancellationException) {
-                            pendingDraftIdentities -= identity
-                            throw cancelled
-                        } catch (_: Exception) {
-                            false
-                        }
-                        pendingDraftIdentities -= identity
-                        val current = composerStates[snapshot.key]
-                        if (current?.matches(snapshot) == true) {
-                            composerStates += snapshot.key to current.copy(
-                                failureRevision = snapshot.composerRevision.takeUnless { applied },
-                            )
-                        }
-                    }
+                    val edited = if (next.correction == null) {
+                        next.copy(ordinaryRevision = next.ordinaryRevision + 1)
+                    } else next
+                    setComposer(edited)
+                    if (edited.correction == null) composerOwner.saveOrdinary(edited, venue, onDraftChange)
                 }
                 Column(
                     modifier = Modifier
@@ -687,9 +656,8 @@ fun ConversationContent(
                         windowInsets = WindowInsets(0, 0, 0, 0),
                     )
                     key(conversationKey) {
-                        val editActionsEnabled = composer.failureRevision == null &&
-                            pendingSendIdentities.none { it.key == conversationKey } &&
-                            pendingDraftIdentities.none { it.key == conversationKey }
+                        val editActionsEnabled = !composer.ordinarySaveUnconfirmed &&
+                            pendingSendIdentities.none { it.key == conversationKey }
                         MessageTimeline(
                             messages = state.messages,
                             venue = venue,
@@ -720,7 +688,6 @@ fun ConversationContent(
                                             senderLabel = message.senderLabel(),
                                         ),
                                         revision = base.revision + 1,
-                                        failureRevision = null,
                                     ),
                                 )
                                 focusComposerWhenReady = true
@@ -736,7 +703,6 @@ fun ConversationContent(
                                             if (answer != null) append(answer)
                                         },
                                         revision = base.revision + 1,
-                                        failureRevision = null,
                                     ),
                                 )
                                 focusComposerWhenReady = true
@@ -818,7 +784,7 @@ fun ConversationContent(
                                 }
                             }
                         }
-                        val draftSaveIsError = composer.failureRevision == composer.revision
+                        val draftSaveIsError = composer.ordinarySaveUnconfirmed && conversationKey !in pendingDraftAttempts
                         val sendIsError = PendingSendIdentity(conversationKey, composer.revision) in failedSendIdentities
                         Surface(
                             modifier = Modifier
@@ -884,7 +850,6 @@ fun ConversationContent(
                                                         composer.copy(
                                                             reply = null,
                                                             revision = composer.revision + 1,
-                                                            failureRevision = null,
                                                         ),
                                                     )
                                                 },
@@ -899,7 +864,6 @@ fun ConversationContent(
                                             composer.copy(
                                                 body = it,
                                                 revision = composer.revision + 1,
-                                                failureRevision = null,
                                             ),
                                         )
                                     },
@@ -1525,8 +1489,43 @@ class ComposerOwner internal constructor(internal val scope: kotlinx.coroutines.
     internal val pendingSendIdentities = mutableStateOf(emptySet<PendingSendIdentity>())
     internal val completedSendSnapshots = mutableStateOf(emptyMap<PendingSendIdentity, DraftSnapshot>())
     internal val failedSendIdentities = mutableStateOf(emptySet<PendingSendIdentity>())
-    internal val pendingDraftIdentities = mutableStateOf(emptySet<PendingSendIdentity>())
+    internal val pendingDraftAttempts = mutableStateOf(emptyMap<DirectConversationKey, Any>())
     internal val venueByConversation = mutableMapOf<DirectConversationKey, ConversationVenue>()
+
+    internal fun saveOrdinary(
+        next: ComposerState,
+        venue: ConversationVenue,
+        onDraftChange: (DraftSnapshot) -> Deferred<Boolean>,
+    ) {
+        if (!scope.coroutineContext.isActive) return
+        val token = Any()
+        composerStates.value += next.key to next.copy(ordinarySaveUnconfirmed = true)
+        pendingDraftAttempts.value += next.key to token
+        fun settle(applied: Boolean) {
+            if (!scope.coroutineContext.isActive || pendingDraftAttempts.value[next.key] !== token) return
+            pendingDraftAttempts.value -= next.key
+            val current = composerStates.value[next.key] ?: return
+            if (current.ordinaryRevision != next.ordinaryRevision) return
+            composerStates.value += next.key to current.copy(ordinarySaveUnconfirmed = !applied)
+        }
+        val action = try {
+            onDraftChange(next.ordinarySnapshot(venue))
+        } catch (_: Exception) {
+            settle(false)
+            return
+        }
+        scope.launch {
+            val applied = try {
+                action.await()
+            } catch (cancelled: CancellationException) {
+                settle(false)
+                throw cancelled
+            } catch (_: Exception) {
+                false
+            }
+            settle(applied)
+        }
+    }
 }
 
 @Composable
@@ -1550,13 +1549,14 @@ fun rememberComposerOwner(accountId: String): ComposerOwner = key(accountId) {
     )) { ComposerOwner(scope) }
 }
 
-private const val COMPOSER_STATE_VERSION = 4
+private const val COMPOSER_STATE_VERSION = 5
 
 internal data class ComposerState(
     val key: DirectConversationKey,
     val body: String,
     val revision: Long,
-    val failureRevision: Long?,
+    val ordinarySaveUnconfirmed: Boolean = false,
+    val ordinaryRevision: Long = revision,
     val attachmentUrl: String? = null,
     val attachmentName: String? = null,
     val attachmentMime: String? = null,
@@ -1565,6 +1565,10 @@ internal data class ComposerState(
     val correction: DraftCorrection? = null,
     val correctionBackup: ComposerBackup? = null,
 ) {
+    internal fun ordinarySnapshot(venue: ConversationVenue): DraftSnapshot =
+        (if (correction == null) this else cancelCorrection()).toDraftSnapshot(venue)
+            .copy(composerRevision = ordinaryRevision)
+
     fun toDraftSnapshot(venue: ConversationVenue): DraftSnapshot = DraftSnapshot(
         key = key,
         body = body,
@@ -1591,7 +1595,7 @@ internal data class ComposerBackup(
     val reply: DraftReply?,
 )
 
-private fun ComposerState.beginCorrection(target: DraftCorrection, correctedBody: String): ComposerState {
+internal fun ComposerState.beginCorrection(target: DraftCorrection, correctedBody: String): ComposerState {
     val backup = correctionBackup ?: ComposerBackup(
         body = body,
         attachmentUrl = attachmentUrl,
@@ -1610,11 +1614,10 @@ private fun ComposerState.beginCorrection(target: DraftCorrection, correctedBody
         correction = target,
         correctionBackup = backup,
         revision = revision + 1,
-        failureRevision = null,
     )
 }
 
-private fun ComposerState.cancelCorrection(): ComposerState {
+internal fun ComposerState.cancelCorrection(): ComposerState {
     val backup = correctionBackup ?: return copy(correction = null, correctionBackup = null)
     return copy(
         body = backup.body,
@@ -1626,11 +1629,10 @@ private fun ComposerState.cancelCorrection(): ComposerState {
         correction = null,
         correctionBackup = null,
         revision = revision + 1,
-        failureRevision = null,
     )
 }
 
-private fun ComposerState.clearAfterSend(snapshot: DraftSnapshot, venue: ConversationVenue): ComposerState =
+internal fun ComposerState.clearAfterSend(snapshot: DraftSnapshot, venue: ConversationVenue): ComposerState =
     if (toDraftSnapshot(venue) == snapshot) {
         if (snapshot.correction != null) cancelCorrection() else copy(
             body = "",
@@ -1640,22 +1642,12 @@ private fun ComposerState.clearAfterSend(snapshot: DraftSnapshot, venue: Convers
             attachmentSize = null,
             reply = null,
             revision = revision + 1,
-            failureRevision = null,
+            ordinaryRevision = ordinaryRevision + 1,
+            ordinarySaveUnconfirmed = false,
         )
     } else {
         this
     }
-
-private fun ComposerState.matches(snapshot: DraftSnapshot): Boolean =
-    key == snapshot.key &&
-        revision == snapshot.composerRevision &&
-        body == snapshot.body &&
-        attachmentUrl == snapshot.attachmentUrl &&
-        attachmentName == snapshot.attachmentName &&
-        attachmentMime == snapshot.attachmentMime &&
-        attachmentSize == snapshot.attachmentSize &&
-        reply == snapshot.reply &&
-        correction == snapshot.correction
 
 internal fun composerStateSaver(
     expectedKey: DirectConversationKey?,
@@ -1670,7 +1662,7 @@ internal fun composerStateSaver(
             state.key.thread?.parentId?.value,
             state.body,
             state.revision,
-            state.failureRevision,
+            state.ordinarySaveUnconfirmed,
             state.attachmentUrl,
             state.attachmentName,
             state.attachmentMime,
@@ -1691,11 +1683,13 @@ internal fun composerStateSaver(
             state.correctionBackup?.reply?.to,
             state.correctionBackup?.reply?.body,
             state.correctionBackup?.reply?.senderLabel,
+            state.ordinaryRevision,
         )
     },
     restore = restore@{ saved ->
         val values = saved as? List<*> ?: return@restore null
-        if (values.size != 28 || values[0] != COMPOSER_STATE_VERSION) return@restore null
+        val legacy = values.size == 28 && values[0] == 4
+        if (!legacy && (values.size != 29 || values[0] != COMPOSER_STATE_VERSION)) return@restore null
         val accountId = values[1] as? String ?: return@restore null
         val peer = values[2] as? String ?: return@restore null
         if ((3..4).any { values[it] != null && values[it] !is String }) return@restore null
@@ -1710,11 +1704,13 @@ internal fun composerStateSaver(
         }
         val body = values[5] as? String ?: return@restore null
         val revision = values[6] as? Long ?: return@restore null
-        if (values[7] != null && values[7] !is Long) return@restore null
-        val failureRevision = values[7] as Long?
-        if (revision < 0 || (failureRevision != null && failureRevision != revision)) {
-            return@restore null
-        }
+        if (revision < 0) return@restore null
+        val unconfirmed = if (legacy) {
+            if (values[7] != null && values[7] != revision) return@restore null
+            true
+        } else values[7] as? Boolean ?: return@restore null
+        val ordinaryRevision = if (legacy) revision else values[28] as? Long ?: return@restore null
+        if (ordinaryRevision < 0) return@restore null
         if ((8..10).any { values[it] != null && values[it] !is String }) return@restore null
         if (values[11] != null && values[11] !is Long) return@restore null
         if ((12..15).any { values[it] != null && values[it] !is String }) return@restore null
@@ -1755,7 +1751,8 @@ internal fun composerStateSaver(
                 key = key,
                 body = body,
                 revision = revision,
-                failureRevision = failureRevision,
+                ordinarySaveUnconfirmed = unconfirmed,
+                ordinaryRevision = ordinaryRevision,
                 attachmentUrl = values[8] as String?,
                 attachmentName = values[9] as String?,
                 attachmentMime = values[10] as String?,

@@ -95,6 +95,37 @@ class ComposerRetentionTest {
         }
     }
 
+    @Test fun restoringPendingSaveShowsRecoverableFailureAndIgnoresOldCompletion() {
+        RoutePresentationFixture().use { fixture ->
+            val presenter = fixture.presenter()
+            val restoration = androidx.compose.ui.test.junit4.StateRestorationTester(composeRule)
+            val pending = CompletableDeferred<Boolean>()
+            lateinit var owner: ComposerOwner
+            restoration.setContent {
+                val current by presenter.state.collectAsState()
+                owner = rememberComposerOwner(current.accountId)
+                MaterialTheme {
+                    ConversationContent(state = current, composerOwner = owner, connectionStatus = "Connected",
+                        onSelectPeer = presenter::selectPeer, onCloseConversation = presenter::closeConversation,
+                        onDraftChange = { pending }, onSend = presenter::sendDraft)
+                }
+            }
+            runBlocking { presenter.selectPeer(fixture.peer) }
+            composeRule.waitUntil { presenter.state.value.contentStatus == ChatContentStatus.Ready }
+            composeRule.onNodeWithTag("message-composer").performTextReplacement("exact pending input")
+            composeRule.onNodeWithText("Draft not saved").assertDoesNotExist()
+            restoration.emulateSavedInstanceStateRestore()
+            composeRule.onNodeWithTag("message-composer").assertTextEquals("exact pending input")
+            composeRule.onNodeWithText("Draft not saved").assertExists()
+            composeRule.runOnIdle {
+                assertTrue(owner.pendingDraftAttempts.value.isEmpty())
+                pending.complete(true)
+            }
+            composeRule.waitForIdle()
+            composeRule.onNodeWithText("Draft not saved").assertExists()
+        }
+    }
+
     @Test fun presenterSendSettlesWhileHomeIsAbsent() {
         RoutePresentationFixture().use { fixture ->
             val presenter = fixture.presenter()
@@ -227,8 +258,8 @@ class ComposerRetentionTest {
                 assertEquals("file.pdf", entry.attachmentName)
                 assertEquals("application/pdf", entry.attachmentMime)
                 assertEquals(19L, entry.attachmentSize)
-                assertEquals(if (result == true) null else entry.revision, entry.failureRevision)
-                assertTrue(retained.pendingDraftIdentities.value.isEmpty())
+                assertEquals(result != true, entry.ordinarySaveUnconfirmed)
+                assertTrue(retained.pendingDraftAttempts.value.isEmpty())
             }
         }
     }
