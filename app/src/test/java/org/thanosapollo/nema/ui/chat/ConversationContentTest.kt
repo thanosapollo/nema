@@ -1961,6 +1961,7 @@ class ConversationContentTest {
 
     @Test
     fun editModeSurvivesStateRestorationAndCancelRestoresDraft() {
+        val home = mutableStateOf(true)
         val restoration = StateRestorationTester(composeRule)
         val sent = mutableListOf<DraftSnapshot>()
         val savedDrafts = mutableListOf<DraftSnapshot>()
@@ -1970,12 +1971,18 @@ class ConversationContentTest {
             correctionReferenceId = "original-wire-id",
         )
         restoration.setContent {
+            val composerOwner = rememberComposerOwner(ACCOUNT_A)
             MaterialTheme {
-                ConversationContent(
+                if (home.value) ConversationContent(
+                    composerOwner = composerOwner,
                     state = state(ACCOUNT_A, PEER_A).copy(
                         messages = listOf(editable),
                         draft = "unrelated draft",
                         draftReply = backupReply,
+                        draftAttachmentUrl = "https://example.org/backup",
+                        draftAttachmentName = "backup.txt",
+                        draftAttachmentMime = "text/plain",
+                        draftAttachmentSize = 7L,
                     ),
                     connectionStatus = "Connected",
                     onSelectPeer = { true },
@@ -1995,7 +2002,10 @@ class ConversationContentTest {
         composeRule.onNodeWithText("original text").performTouchInput { longClick() }
         composeRule.onNodeWithText("Edit").performClick()
         composeRule.onNodeWithTag("message-composer").performTextReplacement("corrected text")
+        composeRule.runOnIdle { home.value = false }
+        composeRule.onNodeWithTag("message-composer").assertDoesNotExist()
         restoration.emulateSavedInstanceStateRestore()
+        composeRule.runOnIdle { home.value = true }
 
         composeRule.onNodeWithText("Editing message").assertIsDisplayed()
         composeRule.onNodeWithTag("message-composer").assertTextEquals("corrected text")
@@ -2015,10 +2025,10 @@ class ConversationContentTest {
         val restored = sent.last()
         assertEquals("unrelated draft", restored.body)
         assertEquals(backupReply, restored.reply)
-        assertNull(restored.attachmentUrl)
-        assertNull(restored.attachmentName)
-        assertNull(restored.attachmentMime)
-        assertNull(restored.attachmentSize)
+        assertEquals("https://example.org/backup", restored.attachmentUrl)
+        assertEquals("backup.txt", restored.attachmentName)
+        assertEquals("text/plain", restored.attachmentMime)
+        assertEquals(7L, restored.attachmentSize)
         assertNull(restored.correction)
     }
 

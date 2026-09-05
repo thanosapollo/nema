@@ -265,28 +265,17 @@ fun ConversationContent(
     onMessageDisplayed: suspend (TimelineMessage) -> Boolean = { false },
     onReact: suspend (TimelineMessage, String) -> Boolean = { _, _ -> false },
     modifier: Modifier = Modifier,
+    composerOwner: ComposerOwner = rememberComposerOwner(state.accountId),
 ) {
     val venue = state.conversationVenue()
     key(state.accountId) {
         val scope = rememberCoroutineScope()
-        var pendingSendIdentities by remember(state.accountId) {
-            mutableStateOf(emptySet<PendingSendIdentity>())
-        }
-        var completedSendSnapshots by remember(state.accountId) {
-            mutableStateOf(emptyMap<PendingSendIdentity, DraftSnapshot>())
-        }
-        var failedSendIdentities by remember(state.accountId) {
-            mutableStateOf(emptySet<PendingSendIdentity>())
-        }
-        var pendingDraftIdentities by remember(state.accountId) {
-            mutableStateOf(emptySet<PendingSendIdentity>())
-        }
-        var composerStates by remember(state.accountId) {
-            mutableStateOf(emptyMap<DirectConversationKey, ComposerState>())
-        }
-        val venueByConversation = remember(state.accountId) {
-            mutableMapOf<DirectConversationKey, ConversationVenue>()
-        }
+        var pendingSendIdentities by composerOwner.pendingSendIdentities
+        var completedSendSnapshots by composerOwner.completedSendSnapshots
+        var failedSendIdentities by composerOwner.failedSendIdentities
+        var pendingDraftIdentities by composerOwner.pendingDraftIdentities
+        var composerStates by composerOwner.composerStates
+        val venueByConversation = composerOwner.venueByConversation
         LaunchedEffect(state.pendingSendIdentities, state.completedSendSnapshots) {
             pendingSendIdentities = pendingSendIdentities + state.pendingSendIdentities
             completedSendSnapshots = completedSendSnapshots + state.completedSendSnapshots
@@ -453,6 +442,10 @@ fun ConversationContent(
                             0L,
                             null,
                             reply = state.draftReply,
+                            attachmentUrl = state.draftAttachmentUrl,
+                            attachmentName = state.draftAttachmentName,
+                            attachmentMime = state.draftAttachmentMime,
+                            attachmentSize = state.draftAttachmentSize,
                         ),
                     )
                 }
@@ -533,7 +526,7 @@ fun ConversationContent(
                     val identity = PendingSendIdentity(snapshot.key, snapshot.composerRevision)
                     val action = onDraftChange(snapshot)
                     pendingDraftIdentities += identity
-                    scope.launch {
+                    composerOwner.scope.launch {
                         val applied = try {
                             action.await()
                         } catch (cancelled: CancellationException) {
@@ -807,7 +800,7 @@ fun ConversationContent(
                                 markFailed()
                                 return
                             }
-                            scope.launch {
+                            composerOwner.scope.launch {
                                 val applied = try {
                                     send.await()
                                 } catch (cancelled: CancellationException) {
@@ -1526,6 +1519,37 @@ internal suspend fun <T> InputStream.useCancellable(block: (InputStream) -> T): 
 private const val MAX_BACKGROUND_EDGE = 2048
 private const val NEAR_LATEST_ITEM_THRESHOLD = 1
 
+/** Account-owned provisional input; this owner must outlive primary destinations. */
+class ComposerOwner internal constructor(internal val scope: kotlinx.coroutines.CoroutineScope) {
+    internal val composerStates = mutableStateOf(emptyMap<DirectConversationKey, ComposerState>())
+    internal val pendingSendIdentities = mutableStateOf(emptySet<PendingSendIdentity>())
+    internal val completedSendSnapshots = mutableStateOf(emptyMap<PendingSendIdentity, DraftSnapshot>())
+    internal val failedSendIdentities = mutableStateOf(emptySet<PendingSendIdentity>())
+    internal val pendingDraftIdentities = mutableStateOf(emptySet<PendingSendIdentity>())
+    internal val venueByConversation = mutableMapOf<DirectConversationKey, ConversationVenue>()
+}
+
+@Composable
+fun rememberComposerOwner(accountId: String): ComposerOwner = key(accountId) {
+    val scope = rememberCoroutineScope()
+    rememberSaveable(accountId, saver = Saver<ComposerOwner, Any>(
+        save = { owner ->
+            owner.composerStates.value.values.map { composer ->
+                with(composerStateSaver(composer.key)) { save(mutableStateOf(composer)) }
+            }
+        },
+        restore = { saved ->
+            val entries = (saved as? List<*>)?.mapNotNull { row ->
+                row?.let { composerStateSaver(null).restore(it)?.value }
+                    ?.takeIf { it.key.accountId == accountId }
+            }.orEmpty()
+            ComposerOwner(scope).also { owner ->
+                owner.composerStates.value = entries.associateBy { it.key }
+            }
+        },
+    )) { ComposerOwner(scope) }
+}
+
 private const val COMPOSER_STATE_VERSION = 4
 
 internal data class ComposerState(
@@ -1634,7 +1658,7 @@ private fun ComposerState.matches(snapshot: DraftSnapshot): Boolean =
         correction == snapshot.correction
 
 internal fun composerStateSaver(
-    expectedKey: DirectConversationKey,
+    expectedKey: DirectConversationKey?,
 ): Saver<MutableState<ComposerState>, Any> = Saver(
     save = { holder ->
         val state = holder.value
@@ -1725,7 +1749,7 @@ internal fun composerStateSaver(
             canonicalBarePeer = peer,
             thread = threadId?.let { ThreadRef(it, parentId) },
         )
-        if (key != expectedKey) return@restore null
+        if (expectedKey != null && key != expectedKey) return@restore null
         mutableStateOf(
             ComposerState(
                 key = key,

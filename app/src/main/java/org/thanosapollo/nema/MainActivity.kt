@@ -370,6 +370,7 @@ private fun AccountConnectionScreen(
             onDispose(presenter::close)
         }
         val chatState by presenter.state.collectAsState()
+        val composerOwner = org.thanosapollo.nema.ui.chat.rememberComposerOwner(account.id.value)
         DisposableEffect(account.id) {
             onDispose { application.sessionRuntime.visiblePeer.set(null) }
         }
@@ -440,6 +441,7 @@ private fun AccountConnectionScreen(
                     PrimaryDestination.HOME -> {
                         ConversationContent(
                             state = chatState,
+                            composerOwner = composerOwner,
                             connectionStatus = privacySafeStatus(connectionState),
                             onSelectPeer = presenter::selectPeer,
                             onJoinRoom = presenter::joinRoom,

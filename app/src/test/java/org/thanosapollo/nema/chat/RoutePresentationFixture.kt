@@ -19,10 +19,11 @@ import org.thanosapollo.nema.storage.NemaDatabase
 import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.xmpp.transport.AccountId
 
-internal class RoutePresentationFixture : AutoCloseable {
+internal class RoutePresentationFixture(databaseName: String? = null, seed: Boolean = true) : AutoCloseable {
     val gate = RouteQueryGate()
     private val context = ApplicationProvider.getApplicationContext<Context>()
-    val database = Room.inMemoryDatabaseBuilder(context, NemaDatabase::class.java)
+    val database = (if (databaseName == null) Room.inMemoryDatabaseBuilder(context, NemaDatabase::class.java)
+        else Room.databaseBuilder(context, NemaDatabase::class.java, databaseName))
         .setQueryCoroutineContext(gate).allowMainThreadQueries().build()
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
     val repository = ChatRepository(database)
@@ -37,7 +38,7 @@ internal class RoutePresentationFixture : AutoCloseable {
     val other = "b@example.org"
 
     init {
-        runBlocking {
+        if (seed) runBlocking {
             for (id in listOf(account, "replacement")) {
                 database.accountDao().upsert(AccountEntity(id, "$id@example.org", id, null, "example.org", null, null))
             }
