@@ -2121,7 +2121,15 @@ internal fun MessageTimeline(
                                     }
                                 }
                                 message.delivery?.visibleLabel()?.let { label ->
-                                    Text(label, style = MaterialTheme.typography.labelSmall)
+                                    Text(
+                                        label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (message.delivery == DeliveryPresentation.UNCERTAIN) {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        } else {
+                                            androidx.compose.ui.graphics.Color.Unspecified
+                                        },
+                                    )
                                 }
                                 val check = message.delivery?.receiptCheck(bubbleContainerColor.toArgb())
                                 if (message.sentAtEpochMs != null || check != null) {
@@ -2472,9 +2480,9 @@ private fun DeliveryPresentation.visibleLabel(): String? = when (this) {
     DeliveryPresentation.SENT,
     DeliveryPresentation.CONFIRMED,
     -> "Sent"
+    DeliveryPresentation.UNCERTAIN -> "Delivery unknown"
     DeliveryPresentation.DELIVERED,
-    DeliveryPresentation.READ,
-    DeliveryPresentation.UNCERTAIN -> null
+    DeliveryPresentation.READ -> null
 }
 
 private data class ReceiptCheck(val description: String, val color: Color)
