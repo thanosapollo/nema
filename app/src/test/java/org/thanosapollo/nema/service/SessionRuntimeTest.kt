@@ -6,6 +6,7 @@ import androidx.test.core.app.ApplicationProvider
 import java.util.UUID
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -15,6 +16,8 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -566,12 +569,16 @@ class SessionRuntimeTest {
         credentials.store(active.id, "secret".toCharArray())
         assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
         val connection = connections.created.single()
+        // Startup restoration reads outside the mutation lock; let it finish before arming the gate.
+        withContext(Dispatchers.Default) {
+            withTimeout(5_000) { connection.initialBookmarkReadCompleted.await() }
+        }
         val releaseFirstRead = CompletableDeferred<Unit>()
         connection.nextBookmarkReadGate = releaseFirstRead
         val room = "coven@conference.example.org"
 
         assertTrue(runtime.joinMuc(room, nick = "Old"))
-        runCurrent()
+        withTimeout(5_000) { connection.gatedBookmarkReadEntered.await() }
         assertTrue(runtime.joinMuc(room, nick = "New"))
         runCurrent()
         assertTrue(connection.publishedBookmarks.isEmpty())
@@ -1552,6 +1559,8 @@ class SessionRuntimeTest {
         lateinit var attemptIdentity: SessionAttemptIdentity
         var bookmarks: List<RoomBookmark> = emptyList()
         var bookmarkReadComplete = true
+        val initialBookmarkReadCompleted = CompletableDeferred<Unit>()
+        val gatedBookmarkReadEntered = CompletableDeferred<Unit>()
         var nextBookmarkReadGate: CompletableDeferred<Unit>? = null
         val publishedBookmarks = mutableListOf<RoomBookmark>()
         val sentSignals = mutableListOf<OutgoingMessageSignal>()
@@ -1616,8 +1625,13 @@ class SessionRuntimeTest {
         ): RoomBookmarkSnapshot {
             val gate = nextBookmarkReadGate
             nextBookmarkReadGate = null
-            gate?.await()
-            return RoomBookmarkSnapshot(bookmarks, complete = bookmarkReadComplete)
+            if (gate != null) {
+                gatedBookmarkReadEntered.complete(Unit)
+                gate.await()
+            }
+            val snapshot = RoomBookmarkSnapshot(bookmarks, complete = bookmarkReadComplete)
+            initialBookmarkReadCompleted.complete(Unit)
+            return snapshot
         }
 
         override suspend fun publishRoomBookmark(
