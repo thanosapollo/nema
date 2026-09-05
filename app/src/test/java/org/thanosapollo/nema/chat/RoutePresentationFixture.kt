@@ -56,6 +56,15 @@ internal class RoutePresentationFixture(databaseName: String? = null, seed: Bool
         }
     }
 
+    suspend fun seedEditableMessage() {
+        val store = MessageStore(database)
+        store.composeDirectDraft(accountId = account, operationId = "editable-wire", localMessageId = "editable",
+            originId = "editable-origin", peerJid = peer, senderJid = "$account@example.org", body = "editable original")
+        val outbox = requireNotNull(store.outbox(account, "editable-wire"))
+        database.messageDao().updateOutbox(outbox.copy(status = org.thanosapollo.nema.storage.OutboxStatus.ACKNOWLEDGED))
+        repository.saveDraft(DirectConversationKey(account, peer), "stored A", DraftReply("reply", peer, "quoted", "A"))
+    }
+
     fun presenter(id: String = account) = DirectChatPresenter(
         AccountConfiguration.create(AccountId.require(id), "$id@example.org", id, null, "example.org", null),
         repository, scope,

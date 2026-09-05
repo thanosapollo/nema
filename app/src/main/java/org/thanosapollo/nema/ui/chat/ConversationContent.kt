@@ -467,35 +467,43 @@ fun ConversationContent(
                 }
                 val keyboard = LocalSoftwareKeyboardController.current
                 val resolver = LocalContext.current.contentResolver
-                val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-                    if (uri == null) return@rememberLauncherForActivityResult
-                    scope.launch {
-                        val name = slotFilename(uri.lastPathSegment?.substringAfterLast('/') ?: "file", resolver.getType(uri))
-                        val mime = resolver.getType(uri)
-                        val bytes = withContext(Dispatchers.IO) {
-                            resolver.openInputStream(uri)?.use { it.readBytes() }
-                        } ?: return@launch
+                fun pickAttachment() = composerOwner.launchFilePicker { uri ->
+                    if (uri != null) composerOwner.scope.launch {
                         val uploaded = try {
+                            val mime = resolver.getType(uri)
+                            val name = slotFilename(uri.lastPathSegment?.substringAfterLast('/') ?: "file", mime)
+                            val bytes = withContext(Dispatchers.IO) {
+                                resolver.openInputStream(uri)?.use { it.readBytes() }
+                            } ?: return@launch
+                            if (!isActive) return@launch
                             onUploadFile(name, mime, bytes)
                         } catch (cancelled: CancellationException) {
                             throw cancelled
                         } catch (_: Exception) {
                             null
-                        }
-                        if (uploaded != null) {
-                            val current = composerStates[conversationKey] ?: composer
-                            setComposer(
-                                current.copy(
-                                    body = if (current.body.isBlank()) uploaded.url else current.body,
-                                    attachmentUrl = uploaded.url,
-                                    attachmentName = uploaded.name,
-                                    attachmentMime = uploaded.mime,
-                                    attachmentSize = uploaded.size,
-                                    revision = current.revision + 1,
-                                    ordinaryRevision = current.ordinaryRevision + if (current.correction == null) 1 else 0,
+                        } ?: return@launch
+                        if (!isActive) return@launch
+                        val current = composerOwner.composerStates.value[conversationKey] ?: return@launch
+                        val next = if (current.correction == null) {
+                            current.copy(
+                                attachmentUrl = uploaded.url, attachmentName = uploaded.name,
+                                attachmentMime = uploaded.mime, attachmentSize = uploaded.size,
+                                revision = current.revision + 1,
+                                ordinaryRevision = current.ordinaryRevision + 1,
+                            )
+                        } else {
+                            current.copy(
+                                correctionBackup = requireNotNull(current.correctionBackup).copy(
+                                    attachmentUrl = uploaded.url, attachmentName = uploaded.name,
+                                    attachmentMime = uploaded.mime, attachmentSize = uploaded.size,
                                 ),
+                                ordinaryRevision = current.ordinaryRevision + 1,
                             )
                         }
+                        if (next.revision != current.revision) {
+                            failedSendIdentities = failedSendIdentities.filterNot { it.key == conversationKey }.toSet()
+                        }
+                        composerOwner.saveOrdinary(next, venue, onDraftChange)
                     }
                 }
                 var focusComposerWhenReady by remember { mutableStateOf(false) }
@@ -737,7 +745,7 @@ fun ConversationContent(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         IconButton(
-                            onClick = { filePicker.launch("*/*") },
+                            onClick = { pickAttachment() },
                             enabled = composer.correction == null,
                             modifier = Modifier.semantics { contentDescription = "Attach file" },
                         ) {
@@ -1485,6 +1493,7 @@ private const val NEAR_LATEST_ITEM_THRESHOLD = 1
 
 /** Account-owned provisional input; this owner must outlive primary destinations. */
 class ComposerOwner internal constructor(internal val scope: kotlinx.coroutines.CoroutineScope) {
+    internal lateinit var launchFilePicker: ((Uri?) -> Unit) -> Unit
     internal val composerStates = mutableStateOf(emptyMap<DirectConversationKey, ComposerState>())
     internal val pendingSendIdentities = mutableStateOf(emptySet<PendingSendIdentity>())
     internal val completedSendSnapshots = mutableStateOf(emptyMap<PendingSendIdentity, DraftSnapshot>())
@@ -1531,7 +1540,7 @@ class ComposerOwner internal constructor(internal val scope: kotlinx.coroutines.
 @Composable
 fun rememberComposerOwner(accountId: String): ComposerOwner = key(accountId) {
     val scope = rememberCoroutineScope()
-    rememberSaveable(accountId, saver = Saver<ComposerOwner, Any>(
+    val owner = rememberSaveable(accountId, saver = Saver<ComposerOwner, Any>(
         save = { owner ->
             owner.composerStates.value.values.map { composer ->
                 with(composerStateSaver(composer.key)) { save(mutableStateOf(composer)) }
@@ -1547,6 +1556,26 @@ fun rememberComposerOwner(accountId: String): ComposerOwner = key(accountId) {
             }
         },
     )) { ComposerOwner(scope) }
+    // A recreated owner gets a new registration: old results cannot target a new request.
+    key(owner) {
+        var pending by remember { mutableStateOf<((Uri?) -> Unit)?>(null) }
+        val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+            val complete = pending
+            pending = null
+            if (scope.coroutineContext.isActive) complete?.invoke(uri)
+        }
+        owner.launchFilePicker = { complete ->
+            if (scope.coroutineContext.isActive && pending == null) {
+                pending = complete
+                try {
+                    picker.launch("*/*")
+                } catch (_: Exception) {
+                    pending = null
+                }
+            }
+        }
+    }
+    owner
 }
 
 private const val COMPOSER_STATE_VERSION = 5
