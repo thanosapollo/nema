@@ -2256,6 +2256,7 @@ class MessageStore private constructor(
         val result = ingestInTransaction(
             incoming.withoutArchivePosition(),
             preserveStoredThreadLineage = true,
+            allowSentCarbonRead = incoming.sentTimeSource == MessageTimeSource.CARBON,
             allowLiveReconciliation = position == null,
         )
         if (position != null) attachArchivePosition(result.messageId, incoming.accountId, position)
@@ -2423,7 +2424,7 @@ class MessageStore private constructor(
         received: IncomingMessage,
         preserveStoredThreadLineage: Boolean = false,
         allowDirectSessionTransition: Boolean = true,
-        advanceOutboundLastRead: Boolean = true,
+        allowSentCarbonRead: Boolean = false,
         allowLiveReconciliation: Boolean = true,
     ): IngestionResult {
         val dao = database.messageDao()
@@ -2543,9 +2544,10 @@ class MessageStore private constructor(
             winner = winner.copy(directSessionTransitionApplied = true)
             dao.updateMessage(winner)
         }
-        if (advanceOutboundLastRead &&
-            winner.direction == MessageDirection.OUTBOUND &&
-            winner.messageKind == MessageKind.CHAT
+        if (allowSentCarbonRead &&
+            incoming.direction == MessageDirection.OUTBOUND &&
+            incoming.messageKind == MessageKind.CHAT &&
+            incoming.senderJid == dao.accountBareJid(incoming.accountId)
         ) {
             dao.markMessagesReadThrough(winner.accountId, winner.peerJid, winner.localSequence)
         }
@@ -3147,7 +3149,7 @@ class MessageStore private constructor(
                 ),
                 preserveStoredThreadLineage = true,
                 allowDirectSessionTransition = false,
-                advanceOutboundLastRead = page.direction != ArchiveDirection.BEFORE,
+                allowSentCarbonRead = false,
                 allowLiveReconciliation = false,
             )
             attachArchivePosition(

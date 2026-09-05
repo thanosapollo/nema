@@ -236,129 +236,116 @@ class MessageStoreTest {
     }
 
     @Test
-    fun ownDisplayedMarkerAdvancesLastReadThroughExactInboundOnly() = runBlocking {
-        val store = MessageStore(database)
-        val firstAlias = TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "first-wire")
-        val laterAlias = TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "later-wire")
-        store.ingest(incoming(localId = "first", aliases = listOf(firstAlias)))
-        store.ingest(incoming(localId = "later", aliases = listOf(laterAlias)))
-        val first = requireNotNull(database.messageDao().message(ACCOUNT, "first"))
-        val later = requireNotNull(database.messageDao().message(ACCOUNT, "later"))
+    fun ownDisplayedMarkerReadsOnlyExactScopedPrefix() = runBlocking {
+        var store = MessageStore(database)
+        addAccount(OTHER_ACCOUNT)
+        val target = TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "target-wire")
+        store.ingest(incoming(localId = "before"))
+        val origin = target.copy(kind = IdentityAliasKind.ORIGIN_ID, value = "target-origin")
+        store.ingest(incoming(localId = "target", aliases = listOf(target, origin)))
+        store.ingest(incoming(localId = "later"))
+        store.ingest(incoming(localId = "other-peer", peerJid = "other@example.org"))
+        store.ingest(incoming(accountId = OTHER_ACCOUNT, localId = "target", aliases = listOf(target)))
         val outbound = store.compose(outbound("own-displayed"))
-
-        assertEquals(0L, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
-        assertNull(
-            store.recordReceiptSignal(
-                ACCOUNT,
-                PEER,
-                SELF,
-                firstAlias.value,
-                MessageReceiptStage.RECEIVED,
-            ),
-        )
-        assertEquals(0L, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
-        assertNull(
-            store.recordReceiptSignal(
-                ACCOUNT,
-                PEER,
-                SELF,
-                firstAlias.value,
-                MessageReceiptStage.DISPLAYED,
-            ),
-        )
-        assertTrue(requireNotNull(database.messageDao().message(ACCOUNT, first.localMessageId)).locallyRead)
-        assertNull(
-            store.recordReceiptSignal(
-                ACCOUNT,
-                PEER,
-                SELF,
-                "missing-wire",
-                MessageReceiptStage.DISPLAYED,
-            ),
-        )
-        assertNull(
-            store.recordReceiptSignal(
-                ACCOUNT,
-                PEER,
-                SELF,
-                outbound.originId,
-                MessageReceiptStage.DISPLAYED,
-            ),
-        )
-        assertTrue(requireNotNull(database.messageDao().message(ACCOUNT, first.localMessageId)).locallyRead)
-        assertNull(
-            store.recordReceiptSignal(
-                ACCOUNT,
-                PEER,
-                SELF,
-                laterAlias.value,
-                MessageReceiptStage.DISPLAYED,
-            ),
-        )
-        assertTrue(requireNotNull(database.messageDao().message(ACCOUNT, later.localMessageId)).locallyRead)
+        val ambiguous = "ambiguous"
+        store.ingest(incoming(localId = "ambiguous-1", aliases = listOf(target.copy(value = ambiguous))))
+        store.ingest(incoming(localId = "ambiguous-2", aliases = listOf(target.copy(kind = IdentityAliasKind.ORIGIN_ID, value = ambiguous))))
+        val unread = setOf("before", "target", "later", "ambiguous-1", "ambiguous-2")
+        assertUnreadIds(store, unread)
+        for (signal in listOf(
+            ArchivedReceiptSignal(PEER, SELF, target.value, MessageReceiptStage.RECEIVED),
+            ArchivedReceiptSignal(PEER, SELF, target.value, MessageReceiptStage.ACKNOWLEDGED),
+            ArchivedReceiptSignal(PEER, "stranger@example.org", target.value, MessageReceiptStage.DISPLAYED),
+            ArchivedReceiptSignal(PEER, PEER, target.value, MessageReceiptStage.DISPLAYED),
+            ArchivedReceiptSignal("other@example.org", SELF, target.value, MessageReceiptStage.DISPLAYED),
+            ArchivedReceiptSignal(PEER, SELF, "missing", MessageReceiptStage.DISPLAYED),
+            ArchivedReceiptSignal(PEER, SELF, outbound.originId, MessageReceiptStage.DISPLAYED),
+            ArchivedReceiptSignal(PEER, SELF, ambiguous, MessageReceiptStage.DISPLAYED),
+        )) {
+            store.recordReceiptSignal(ACCOUNT, signal.peerJid, signal.senderJid, signal.targetId, signal.stage)
+            assertUnreadIds(store, unread)
+            assertTrue(store.messages(ACCOUNT).none { it.locallyRead })
+        }
+        store.recordReceiptSignal(OTHER_ACCOUNT, PEER, SELF, target.value, MessageReceiptStage.DISPLAYED)
+        assertTrue(store.messages(OTHER_ACCOUNT).none { it.locallyRead })
+        for (id in listOf(target.value, origin.value, target.value)) {
+            store.recordReceiptSignal(ACCOUNT, PEER, SELF, id, MessageReceiptStage.DISPLAYED)
+            assertUnreadIds(store, unread - setOf("before", "target"))
+            assertEquals(setOf("before", "target"), store.messages(ACCOUNT).filter { it.locallyRead }.map { it.localMessageId }.toSet())
+            assertTrue(store.messages(OTHER_ACCOUNT).none { it.locallyRead })
+        }
+        store = reopenStore()
+        assertUnreadIds(store, unread - setOf("before", "target"))
         assertNull(store.outbox(ACCOUNT, outbound.operationId)?.receiptStage)
     }
 
     @Test
-    fun archivedOwnDisplayedAdvancesLastReadWithoutTouchingOutbox() = runBlocking {
+    fun archivedOwnDisplayedReadsOnlyExistingPrefixWithoutTouchingOutbox() = runBlocking {
         val store = MessageStore(database)
-        val inboundAlias = TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "archived-inbound")
-        store.ingest(incoming(localId = "archived-in", aliases = listOf(inboundAlias)))
-        val inbound = requireNotNull(database.messageDao().message(ACCOUNT, "archived-in"))
+        val target = TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "archived-inbound")
+        store.ingest(incoming(localId = "before"))
+        store.ingest(incoming(localId = "target", aliases = listOf(target)))
+        store.ingest(incoming(localId = "later"))
         val intent = outbound("archived-own-displayed")
         store.compose(intent)
-
-        val result = store.applyArchivePage(
-            archivePage(
-                key = archiveKey(ACCOUNT),
-                direction = ArchiveDirection.BOOTSTRAP,
-                complete = true,
-                hasEarlier = false,
-                messages = listOf(
-                    ArchivedIncomingMessage(
-                        resultId = "own-displayed-result",
-                        message = null,
-                        signal = ArchivedReceiptSignal(
-                            peerJid = PEER,
-                            senderJid = SELF,
-                            targetId = inboundAlias.value,
-                            stage = MessageReceiptStage.DISPLAYED,
-                        ),
-                    ),
-                ),
-            ),
+        val page = archivePage(
+            key = archiveKey(ACCOUNT), direction = ArchiveDirection.BOOTSTRAP,
+            complete = true, hasEarlier = false,
+            messages = listOf(ArchivedIncomingMessage(
+                resultId = "own-displayed-result", message = null,
+                signal = ArchivedReceiptSignal(PEER, SELF, target.value, MessageReceiptStage.DISPLAYED),
+            )),
         )
-
-        assertEquals(ArchivePageStatus.APPLIED, result.status)
-        assertTrue(requireNotNull(database.messageDao().message(ACCOUNT, inbound.localMessageId)).locallyRead)
-        assertEquals(null, store.outbox(ACCOUNT, intent.operationId)?.receiptStage)
+        assertEquals(ArchivePageStatus.APPLIED, store.applyArchivePage(page).status)
+        assertUnreadIds(store, setOf("later"))
+        assertEquals(setOf("before", "target"), store.messages(ACCOUNT).filter { it.locallyRead }.map { it.localMessageId }.toSet())
+        assertNull(store.outbox(ACCOUNT, intent.operationId)?.receiptStage)
     }
 
     @Test
-    fun ownOutboundCarbonAdvancesLastReadThroughPriorInbound() = runBlocking {
+    fun ownOutboundCarbonReadsPriorInboundButReplayLeavesLaterUnread() = runBlocking {
         val store = MessageStore(database)
-        store.ingest(incoming(localId = "seen-on-other-client"))
-        val inbound = requireNotNull(database.messageDao().message(ACCOUNT, "seen-on-other-client"))
-        assertEquals(0L, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
-
-        store.ingest(
-            incoming(
-                localId = "emacs-reply",
-                sender = SELF,
-                direction = MessageDirection.OUTBOUND,
-                aliases = listOf(
-                    TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, MessageStore.OUTBOUND_ORIGIN_AUTHORITY, "emacs-msg-1"),
-                ),
-            ),
+        addAccount(OTHER_ACCOUNT)
+        store.ingest(incoming(localId = "before"))
+        store.ingest(incoming(localId = "other-peer", peerJid = "other@example.org"))
+        store.ingest(incoming(accountId = OTHER_ACCOUNT, localId = "before"))
+        val carbon = incoming(
+            localId = "sent-carbon", sender = SELF, direction = MessageDirection.OUTBOUND,
+            sentAtEpochMs = 100, sentTimeSource = MessageTimeSource.CARBON,
         )
-        val outbound = requireNotNull(database.messageDao().message(ACCOUNT, "emacs-reply"))
-        assertTrue(requireNotNull(database.messageDao().message(ACCOUNT, outbound.localMessageId)).locallyRead)
-        assertTrue(outbound.localSequence > inbound.localSequence)
+        store.ingest(carbon)
+        assertUnreadIds(store, emptySet())
+        assertEquals(setOf("before", "sent-carbon"), store.messages(ACCOUNT).filter { it.locallyRead }.map { it.localMessageId }.toSet())
+        store.ingest(incoming(localId = "later"))
+        store.ingest(carbon)
+        assertUnreadIds(store, setOf("later"))
+        assertEquals(setOf("before", "sent-carbon"), store.messages(ACCOUNT).filter { it.locallyRead }.map { it.localMessageId }.toSet())
+        assertTrue(store.messages(OTHER_ACCOUNT).none { it.locallyRead })
+    }
 
-        store.ingest(incoming(localId = "after-reply"))
-        val later = requireNotNull(database.messageDao().message(ACCOUNT, "after-reply"))
-        assertTrue(requireNotNull(database.messageDao().message(ACCOUNT, outbound.localMessageId)).locallyRead)
-        assertTrue(later.localSequence > outbound.localSequence)
+    @Test
+    fun nonOwnCarbonAndOrdinaryOutboundHaveNoReadAuthority() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(incoming(localId = "before"))
+        store.compose(outbound("queued"))
+        val carbon = incoming(localId = "received", sentAtEpochMs = 100, sentTimeSource = MessageTimeSource.CARBON)
+        for (message in listOf(
+            carbon,
+            carbon.copy(localMessageId = "wrong-sender", direction = MessageDirection.OUTBOUND),
+            carbon.copy(localMessageId = "room", senderJid = SELF, direction = MessageDirection.OUTBOUND, messageKind = MessageKind.GROUPCHAT),
+            carbon.copy(localMessageId = "ordinary", senderJid = SELF, direction = MessageDirection.OUTBOUND, sentTimeSource = MessageTimeSource.LOCAL),
+            carbon.copy(localMessageId = "mam", senderJid = SELF, direction = MessageDirection.OUTBOUND, sentTimeSource = MessageTimeSource.MAM),
+        )) {
+            store.ingest(message)
+            assertTrue(store.messages(ACCOUNT).none { it.locallyRead })
+        }
+        assertUnreadIds(store, setOf("before", "received"))
+    }
+
+    private suspend fun assertUnreadIds(store: MessageStore, expected: Set<String>) {
+        assertEquals(expected, store.messages(ACCOUNT).filter {
+            it.peerJid == PEER && it.direction == MessageDirection.INBOUND && it.unreadEligible && !it.locallyRead
+        }.map { it.localMessageId }.toSet())
     }
 
     @Test
@@ -393,56 +380,37 @@ class MessageStoreTest {
     }
 
     @Test
-    fun historicalBeforeOutboundDoesNotAdvanceLastReadPastLaterInbound() = runBlocking {
+    fun mamBootstrapOutboundDoesNotReadPriorInbound() = verifyMamOutboundNoRead(ArchiveDirection.BOOTSTRAP)
+
+    @Test
+    fun mamBeforeOutboundDoesNotReadPriorInbound() = verifyMamOutboundNoRead(ArchiveDirection.BEFORE)
+
+    @Test
+    fun mamAfterOutboundDoesNotReadPriorInbound() = verifyMamOutboundNoRead(ArchiveDirection.AFTER)
+
+    private fun verifyMamOutboundNoRead(direction: ArchiveDirection) = runBlocking {
         val store = MessageStore(database)
-        store.ingest(incoming(localId = "recent-in"))
-        val inbound = requireNotNull(database.messageDao().message(ACCOUNT, "recent-in"))
-        assertEquals(0L, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
-
+        store.ingest(incoming(localId = "prior-1"))
+        store.ingest(incoming(localId = "prior-2"))
         val key = archiveKey(ACCOUNT)
-        val bootstrap = store.applyArchivePage(
-            archivePage(
-                key = key,
-                direction = ArchiveDirection.BOOTSTRAP,
-                complete = true,
-                hasEarlier = true,
-                messages = listOf(
-                    archived("recent-result", "recent-in", "body", stanzaAlias("recent-in")),
-                ),
-            ),
-        )
-        assertEquals(ArchivePageStatus.APPLIED, bootstrap.status)
-        assertEquals(0L, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
-
-        val older = store.applyArchivePage(
-            archivePage(
-                key = key,
-                direction = ArchiveDirection.BEFORE,
-                boundaryId = "recent-result",
-                complete = true,
-                hasEarlier = false,
-                messages = listOf(
-                    archived(
-                        resultId = "old-out-result",
-                        localId = "old-emacs-send",
-                        body = "old send",
-                        alias = TrustedIdentityAlias(
-                            IdentityAliasKind.ORIGIN_ID,
-                            MessageStore.OUTBOUND_ORIGIN_AUTHORITY,
-                            "emacs-old",
-                        ),
-                        direction = MessageDirection.OUTBOUND,
-                        sender = SELF,
-                    ),
-                ),
-            ),
-        )
-        assertEquals(ArchivePageStatus.APPLIED, older.status)
-        val historical = requireNotNull(database.messageDao().message(ACCOUNT, "old-emacs-send"))
-        assertTrue(historical.localSequence > inbound.localSequence)
-        assertEquals(0L, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+        if (direction != ArchiveDirection.BOOTSTRAP) {
+            assertEquals(ArchivePageStatus.APPLIED, store.applyArchivePage(archivePage(
+                key = key, direction = ArchiveDirection.BOOTSTRAP, complete = true, hasEarlier = true,
+                messages = listOf(ArchivedIncomingMessage(resultId = "anchor", message = null)),
+            )).status)
+        }
+        val archivedOutbound = archived(
+            resultId = "mam-out", localId = "mam-out", body = "archived send",
+            direction = MessageDirection.OUTBOUND, sender = SELF,
+        ).let { it.copy(message = requireNotNull(it.message).copy(sentAtEpochMs = 100, sentTimeSource = MessageTimeSource.MAM)) }
+        assertEquals(ArchivePageStatus.APPLIED, store.applyArchivePage(archivePage(
+            key = key, direction = direction,
+            boundaryId = if (direction == ArchiveDirection.BOOTSTRAP) null else "anchor",
+            complete = true, hasEarlier = false, messages = listOf(archivedOutbound),
+        )).status)
+        assertUnreadIds(store, setOf("prior-1", "prior-2"))
+        assertTrue(store.messages(ACCOUNT).none { it.locallyRead })
     }
-
     @Test
     fun onlyLiveAndForwardCatchUpInboundMessagesCountAsUnread() = runBlocking {
         val store = MessageStore(database)
