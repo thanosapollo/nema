@@ -24,7 +24,12 @@ class MucCorrectionMigrationTest {
     private val key = ArchiveCursorKey("a", room, room)
 
     @Test
-    fun schema25RowsAndDependentsSurviveDormantMigrationAndActualPageReplay() = runBlocking {
+    fun schema25RowsAndDependentsSurviveDormantMigrationAndActualPageReplay() = replay(false)
+
+    @Test
+    fun schema25RowsSafelyEnrichThroughActualPageReplay() = replay(true)
+
+    private fun replay(enrich: Boolean) = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Application>()
         val name = "muc-migration-${UUID.randomUUID()}.db"
         try {
@@ -66,20 +71,60 @@ class MucCorrectionMigrationTest {
                         ArchivedIncomingMessage("$id-uid", IncomingMessage("a", "replay-$id", room,
                             "$room/nick", MessageDirection.INBOUND, MessageKind.GROUPCHAT, null, null,
                             "$id body", null, listOf(TrustedIdentityAlias(IdentityAliasKind.STANZA_ID, room, "$id-uid")),
-                            sentAtEpochMs = 1234, sentTimeSource = org.thanosapollo.nema.xmpp.transport.MessageTimeSource.MAM))
+                            sentAtEpochMs = 1234, sentTimeSource = org.thanosapollo.nema.xmpp.transport.MessageTimeSource.MAM,
+                            mucFacts = if (enrich) MucEventFacts("wire-$id", if (id == "edit") "wire-root" else null,
+                                if (id == "edit") MucClaimState.VALID else MucClaimState.NONE, "opaque",
+                                MucOccupantEvidence.ROOM_MAM, MucPayloadState.PLAIN) else null))
                     } + ArchivedIncomingMessage("next-uid", null))
+                if (enrich) {
+                    sql.execSQL("CREATE TRIGGER reject_cursor BEFORE INSERT ON archive_cursors BEGIN SELECT RAISE(ABORT, 'fault'); END")
+                    assertTrue(runCatching { store.applyArchivePage(page) }.isFailure)
+                    assertEquals(before, snapshot(sql))
+                    assertUnknown(sql)
+                    sql.execSQL("DROP TRIGGER reject_cursor")
+                    db.close()
+                    db = NemaDatabase.create(context, name)
+                    store = MessageStore(db)
+                }
                 assertEquals(ArchivePageStatus.APPLIED, store.applyArchivePage(page).status)
                 repeat(2) {
-                    assertEquals(rows, store.messages("a"))
+                    if (!enrich) assertEquals(rows, store.messages("a"))
+                    else store.messages("a").forEach { row ->
+                        assertEquals("wire-${row.localMessageId}", row.mucMessageId)
+                        assertEquals("opaque", row.mucOccupantId)
+                        assertEquals(MucPayloadState.PLAIN, row.mucPayloadState)
+                        assertNull(row.mucLiveOrderEpoch)
+                        assertNull(row.replaceId)
+                    }
                     assertEquals(aliases, store.aliases("a").toSet())
                     assertEquals(positions, db.messageDao().archivePositions("a").toSet())
                     assertEquals("next-uid", store.archiveCursor(key)?.newestId)
                     val after = snapshot(db.openHelper.writableDatabase)
                     assertEquals(before - "archive_cursors", after - "archive_cursors")
-                    assertUnknown(db.openHelper.writableDatabase)
+                    if (!enrich) assertUnknown(db.openHelper.writableDatabase)
                     db.close()
                     db = NemaDatabase.create(context, name)
                     store = MessageStore(db)
+                }
+                if (enrich) {
+                    val retainedRows = store.messages("a")
+                    val omitted = page.copy(boundaryId = "next-uid", lastId = "final-uid",
+                        messages = page.messages.take(2).map { archived -> archived.copy(
+                            message = archived.message!!.copy(mucFacts = MucEventFacts(claim = MucClaimState.NONE)))
+                        } + ArchivedIncomingMessage("final-uid", null))
+                    assertEquals(ArchivePageStatus.APPLIED, store.applyArchivePage(omitted).status)
+                    assertEquals(retainedRows, store.messages("a"))
+                    assertEquals(before - "archive_cursors", snapshot(db.openHelper.writableDatabase) - "archive_cursors")
+                    val changed = page.messages[1].message!!.copy(localMessageId = "actor-conflict",
+                        mucFacts = page.messages[1].message!!.mucFacts!!.copy(occupantId = "different"))
+                    store.ingest(changed)
+                    val edit = store.messages("a").single { it.localMessageId == "edit" }
+                    assertEquals(MucOccupantEvidence.CONFLICT, edit.mucOccupantEvidence)
+                    assertEquals("opaque", edit.mucOccupantId)
+                    assertEquals(2, store.messages("a").size)
+                    db.close()
+                    db = NemaDatabase.create(context, name)
+                    assertEquals(edit, MessageStore(db).messages("a").single { it.localMessageId == "edit" })
                 }
                 // Storage-only round trip: typed retained facts survive partial metadata writes and reopen.
                 val retained = rows.first().copy(mucMessageId = "wire", mucReplaceId = "claim",
@@ -112,7 +157,7 @@ class MucCorrectionMigrationTest {
     private fun snapshot(sql: SupportSQLiteDatabase): Map<String, List<List<String?>>> {
         val result = mutableMapOf<String, List<List<String?>>>()
         for (table in listOf("accounts", "peers", "messages", "archive_message_positions", "trusted_identity_aliases",
-            "message_outbox", "message_reactions", "message_drafts", "account_message_sequences", "archive_cursors")) {
+            "message_outbox", "message_reactions", "message_drafts", "message_threads", "account_message_sequences", "archive_cursors")) {
             sql.query("SELECT * FROM $table ORDER BY rowid").use { c ->
                 val columns = c.columnNames.indices.filterNot { c.columnNames[it].startsWith("muc") }
                 result[table] = buildList { while (c.moveToNext()) add(columns.map { if (c.isNull(it)) null else c.getString(it) }) }

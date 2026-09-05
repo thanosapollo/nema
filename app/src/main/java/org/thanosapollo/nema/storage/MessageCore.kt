@@ -1844,8 +1844,11 @@ data class IncomingMessage(
     val markerTargetId: String? = null,
     val replaceId: String? = null,
     val unreadEligible: Boolean = true,
+    // Dormant input contract: authenticated transport acquisition is a later slice.
+    val mucFacts: MucEventFacts? = null,
 ) {
     init {
+        require(mucFacts == null || messageKind == MessageKind.GROUPCHAT) { "MUC facts require a room event" }
         require(accountId.isNotEmpty()) { "Account ID must not be empty" }
         require(localMessageId.isNotEmpty()) { "Local message ID must not be empty" }
         require(peerJid.isNotEmpty()) { "Peer JID must not be empty" }
@@ -2441,14 +2444,15 @@ class MessageStore private constructor(
                 threadId = timed.threadId,
                 parentThreadId = timed.parentThreadId ?: inheritedParent,
                 preserveStoredThreadLineage = preserveStoredThreadLineage,
+                write = false,
             ),
         )
         val existingLocal = dao.message(incoming.accountId, incoming.localMessageId)
-        require(existingLocal == null || existingLocal.isCompatibleWith(incoming)) {
+        require(existingLocal == null || existingLocal.isCompatibleWith(incoming, checkMucFacts = false)) {
             "Local message ID identifies incompatible content"
         }
 
-        val mappedMessages = incoming.aliases.mapNotNull { alias ->
+        val mappedMessages = incoming.eventAliases().mapNotNull { alias ->
             dao.trustedAlias(incoming.accountId, alias.kind, alias.authority, alias.value)
                 ?.let {
                     requireNotNull(
@@ -2457,14 +2461,43 @@ class MessageStore private constructor(
                 }
         }.distinctBy(MessageEntity::localMessageId)
 
-        val matched = existingLocal ?: mappedMessages
+        // Pin legacy enrichment before ordinary compatibility. Disagreeing trusted identities
+        // cannot authorize a guessed merge; rollback rather than manufacture another event.
+        val roomEvent = incoming.messageKind == MessageKind.GROUPCHAT &&
+            (incoming.mucFacts != null || mappedMessages.any { it.mucFacts() != MucEventFacts() })
+        val pinnedIds = if (roomEvent) incoming.enrichmentAliases().mapNotNull { alias ->
+            dao.trustedAlias(incoming.accountId, alias.kind, alias.authority, alias.value)?.messageId
+        }.distinct() else emptyList()
+        require(!roomEvent || mappedMessages.size <= 1) { "Conflicting room event identities" }
+        val pinned = pinnedIds.singleOrNull()?.let { dao.message(incoming.accountId, it) }
+        if (pinned != null && (pinned.senderJid != incoming.senderJid || !pinned.isCompatibleWith(incoming, checkMucFacts = false))) {
+            return IngestionResult(pinned.localMessageId, 0, identityConflict = true, inserted = false)
+        }
+        require(pinned == null || existingLocal == null || pinned.localMessageId == existingLocal.localMessageId) {
+            "Local and trusted room identities disagree"
+        }
+        val quarantinedEvidence = roomEvent && incoming.enrichmentAliases().any { alias ->
+            dao.identityAlias(incoming.accountId, alias.kind, alias.authority, alias.value)
+                ?.status == IdentityAliasStatus.QUARANTINED
+        }
+        if (pinned != null && quarantinedEvidence) {
+            return IngestionResult(pinned.localMessageId, 0, identityConflict = true, inserted = false)
+        }
+        require(pinned != null || existingLocal == null || existingLocal.isCompatibleWith(incoming)) {
+            "Unpinned local message has conflicting MUC facts"
+        }
+        ensureScope(incoming.accountId, incoming.peerJid, incoming.messageKind,
+            incoming.threadId, incoming.parentThreadId, preserveStoredThreadLineage)
+        val enriched = pinned?.enrichMuc(incoming.mucFacts)
+        if (enriched != null && enriched != pinned) dao.updateMessage(enriched)
+        val matched = enriched ?: existingLocal ?: mappedMessages
             .filter { it.isCompatibleWith(incoming) }
             .minWithOrNull(compareBy(MessageEntity::localSequence, MessageEntity::localMessageId))
         val inserted = matched == null
         var winner: MessageEntity
         if (matched == null) {
             val observation = liveReconciliationObservation(incoming, allowLiveReconciliation)
-            val created = incoming.toEntity(allocateSequence(incoming.accountId), observation)
+            val created = incoming.toEntity(allocateSequence(incoming.accountId), observation).enrichMuc(incoming.mucFacts)
             dao.insertMessage(created)
             if (observation != null) {
                 check(
@@ -2495,7 +2528,7 @@ class MessageStore private constructor(
                     val other = requireNotNull(
                         dao.message(incoming.accountId, requireNotNull(mapped.messageId)),
                     )
-                    if (canMerge(winner, other, incoming)) {
+                    if (alias in incoming.eventAliases() && canMerge(winner, other, incoming)) {
                         winner = mergePair(winner, other)
                         mergedRows += 1
                     } else {
@@ -2894,7 +2927,7 @@ class MessageStore private constructor(
                 authority = aliasAuthority,
                 value = archived.resultId,
             )
-            val aliases = (message.aliases + archiveAlias).distinct()
+            val aliases = message.copy(aliases = (message.aliases + archiveAlias).distinct()).eventAliases()
             val normalizedMessage = preserveStoredThreadLineage(message)
             val keys = mutableSetOf(
                 PageIdentityKey(null, "", message.localMessageId),
@@ -2917,6 +2950,9 @@ class MessageStore private constructor(
                 stored?.takeIf { it.status == IdentityAliasStatus.TRUSTED }
                     ?.messageId
                     ?.let(seededMessageIds::add)
+            }
+            if (message.messageKind == MessageKind.GROUPCHAT && message.mucFacts != null && seededMessageIds.size > 1) {
+                return@withTransaction retryable("Conflicting room event identities")
             }
             candidates += PageIdentityCandidate(index, keys, seededMessageIds)
         }
@@ -3573,6 +3609,7 @@ class MessageStore private constructor(
         incoming: IncomingMessage,
     ): Boolean {
         if (!first.isCompatibleWith(incoming) || !second.isCompatibleWith(incoming)) return false
+        if (!first.mucFactsCompatible(second)) return false
         if (first.attachmentUrl != second.attachmentUrl ||
             !optionalMetadataMatches(first.attachmentName, second.attachmentName) ||
             !optionalMetadataMatches(first.attachmentMime, second.attachmentMime) ||
@@ -3617,7 +3654,10 @@ class MessageStore private constructor(
         } else {
             withArchive
         }
-        val reconciled = withTransition.copy(locallyRead = winner.locallyRead || loser.locallyRead)
+        val reconciled = withTransition.enrichMuc(loser.mucFacts()).copy(
+            locallyRead = winner.locallyRead || loser.locallyRead,
+            mucLiveOrderEpoch = null,
+        )
             .withLiveDeliveryObserved(loser.liveDeliveryObserved)
             .withUnreadEligible(loser.unreadEligible)
             .withPreferredTime(loser.sentAtEpochMs, loser.sentTimeSource)
@@ -3836,17 +3876,18 @@ class MessageStore private constructor(
         threadId: String?,
         parentThreadId: String?,
         preserveStoredThreadLineage: Boolean,
+        write: Boolean = true,
     ): String? {
         val dao = database.messageDao()
         require(dao.accountExists(accountId)) { "Unknown message account" }
-        if (messageKind == MessageKind.GROUPCHAT) {
-            dao.savePeerRoom(accountId, peerJid, true)
-        } else {
-            dao.insertPeer(PeerEntity(accountId, peerJid))
+        if (write) {
+            if (messageKind == MessageKind.GROUPCHAT) dao.savePeerRoom(accountId, peerJid, true)
+            else dao.insertPeer(PeerEntity(accountId, peerJid))
         }
         if (threadId == null) return null
         val existing = dao.thread(accountId, peerJid, messageKind, threadId)
         if (existing == null) {
+            if (!write) return parentThreadId
             insertParentPlaceholder(dao, accountId, peerJid, messageKind, parentThreadId)
             dao.insertThread(
                 MessageThreadEntity(accountId, peerJid, messageKind, threadId, parentThreadId),
@@ -3867,6 +3908,7 @@ class MessageStore private constructor(
             ) {
                 return null
             }
+            if (!write) return parentThreadId
             insertParentPlaceholder(dao, accountId, peerJid, messageKind, parentThreadId)
             val resolved = dao.resolveThreadParent(accountId, peerJid, messageKind, threadId, parentThreadId) == 1
             if (resolved) return parentThreadId
@@ -3963,7 +4005,7 @@ private fun MessageEntity.matches(intent: OutboundIntent): Boolean =
 private fun <T> optionalMetadataMatches(first: T?, second: T?): Boolean =
     first == null || second == null || first == second
 
-private fun MessageEntity.isCompatibleWith(incoming: IncomingMessage): Boolean =
+private fun MessageEntity.isCompatibleWith(incoming: IncomingMessage, checkMucFacts: Boolean = true): Boolean =
     accountId == incoming.accountId &&
         peerJid == incoming.peerJid &&
         (senderJid == incoming.senderJid ||
@@ -3981,7 +4023,10 @@ private fun MessageEntity.isCompatibleWith(incoming: IncomingMessage): Boolean =
         optionalMetadataMatches(attachmentSize, incoming.attachmentSize) &&
         replyToId == incoming.replyToId &&
         replyToJid == incoming.replyToJid &&
-        replaceId == incoming.replaceId
+        (messageKind == MessageKind.GROUPCHAT || replaceId == incoming.replaceId) &&
+        (messageKind != MessageKind.GROUPCHAT || replyFallbackBody == incoming.replyFallbackBody) &&
+        (!checkMucFacts || incoming.mucFacts == null ||
+            mucFactsCompatible(incoming.toEntity(0, null).enrichMuc(incoming.mucFacts)))
 
 private fun MessageEntity.canCorrect(target: MessageEntity): Boolean =
     replaceId != null &&

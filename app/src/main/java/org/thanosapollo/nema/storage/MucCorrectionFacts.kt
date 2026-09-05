@@ -6,6 +6,15 @@ enum class MucClaimState { UNKNOWN, NONE, VALID, INVALID, CONFLICT }
 enum class MucOccupantEvidence { UNKNOWN, LIVE_ROOM, ROOM_MAM, BOTH, CONFLICT }
 enum class MucPayloadState { UNKNOWN, PLAIN, UNSUPPORTED }
 
+data class MucEventFacts(
+    val messageId: String? = null,
+    val replaceId: String? = null,
+    val claim: MucClaimState = MucClaimState.UNKNOWN,
+    val occupantId: String? = null,
+    val evidence: MucOccupantEvidence = MucOccupantEvidence.UNKNOWN,
+    val payload: MucPayloadState = MucPayloadState.UNKNOWN,
+)
+
 // Pure, dormant decision contract. These helpers neither acquire facts nor mutate accepted links.
 internal fun MessageEntity.isSupportedMucPlaintext(): Boolean =
     messageKind == MessageKind.GROUPCHAT && body.isNotBlank() && mucPayloadState == MucPayloadState.PLAIN &&
