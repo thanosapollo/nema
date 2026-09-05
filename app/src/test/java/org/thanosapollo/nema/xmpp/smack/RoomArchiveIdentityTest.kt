@@ -35,8 +35,8 @@ class RoomArchiveIdentityTest {
     private fun inner(nick: String, sid: String = "") =
         "<message xmlns='jabber:client' from='$room/$nick' type='groupchat'><body>synthetic</body>$sid</message>"
 
-    private fun carrier(nick: String, sid: String = "") = parse(
-        "<message xmlns='jabber:client' from='$room'><result xmlns='urn:xmpp:mam:2' queryid='query' id='archive-1'>" +
+    private fun carrier(nick: String, sid: String = "", resultId: String = "archive-1") = parse(
+        "<message xmlns='jabber:client' from='$room'><result xmlns='urn:xmpp:mam:2' queryid='query' id='$resultId'>" +
             "<forwarded xmlns='urn:xmpp:forward:0'><delay xmlns='urn:xmpp:delay' stamp='2026-01-01T00:00:00Z'/>" +
             inner(nick, sid) + "</forwarded></result></message>",
     )
@@ -219,6 +219,34 @@ class RoomArchiveIdentityTest {
                     store = MessageStore(db)
                     archive()
                 }
+                val retained = store.messages("account").single()
+                val retainedAliases = db.messageDao().trustedAliasesForMessage("account", retained.localMessageId).toSet()
+                val retainedPositions = store.archivePositions("account", retained.localMessageId)
+                val cursor = requireNotNull(store.archiveCursor(key))
+                val carriers = listOf(carrier(nick), carrier(nick, resultId = "archive-2"))
+                val entries = normalizeMamResults(carriers, carriers.map(MamResultExtension::from), attempt, room, true,
+                    mappingBareJid = self, ownRoomNick = "self", receivedAtEpochMs = 1_767_225_600_000,
+                    archiveRoom = facts())
+                val replay = store.applyArchivePage(ArchivePage(key, ArchiveDirection.AFTER, cursor.newestId,
+                    true, false, true, "archive-1", "archive-2",
+                    entries.map { ArchivedIncomingMessage(it.resultId, it.message?.toIncomingMessage("replay-${it.resultId}")) }))
+                assertEquals(ArchivePageStatus.APPLIED, replay.status)
+                val rows = store.messages("account")
+                assertEquals(2, rows.size)
+                assertEquals(retained, rows.single { it.localMessageId == retained.localMessageId })
+                assertTrue(rows.single { it.localMessageId == retained.localMessageId }.liveDeliveryObserved)
+                assertEquals(retainedAliases,
+                    db.messageDao().trustedAliasesForMessage("account", retained.localMessageId).toSet())
+                assertEquals(retainedPositions, store.archivePositions("account", retained.localMessageId))
+                val added = rows.single { it.localMessageId != retained.localMessageId }
+                assertFalse(added.liveDeliveryObserved)
+                val addedAliases = db.messageDao().trustedAliasesForMessage("account", added.localMessageId)
+                assertEquals(setOf(IdentityAliasKind.STANZA_ID, IdentityAliasKind.MAM_RESULT), addedAliases.map { it.kind }.toSet())
+                assertTrue(addedAliases.all { it.value == "archive-2" })
+                assertEquals(1, store.archivePositions("account", added.localMessageId).size)
+                assertEquals("archive-1", replay.cursor.oldestId)
+                assertEquals("archive-2", replay.cursor.newestId)
+                assertEquals(replay.cursor, store.archiveCursor(key))
             } finally {
                 db.close()
                 context.deleteDatabase(name)
