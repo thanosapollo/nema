@@ -482,6 +482,11 @@ internal class SmackSessionConnection(
                 )?.lease
             }
             val fin = queryPage.mamFinIq
+            val archiveRoom = if (request.scope == ACCOUNT_ARCHIVE_SCOPE) null else {
+                requireCurrentArchiveRoom(roomFacts, copyRoomConsumerFacts(
+                    entryGate, roomStableIdAuthorities, attempt, archiveJid,
+                ), attempt, request.scope)
+            }
             val rsm = requireNotNull(fin.rsmSet) { "MAM response omitted RSM boundaries" }
             val carriers = queryPage.mamResultCarrierMessages
             val results = queryPage.mamResultExtensions
@@ -493,8 +498,16 @@ internal class SmackSessionConnection(
                 mappingBareJid = expectedBareJid,
                 trustStableIds = trustStableIds,
                 ownRoomNick = roomFacts?.ownNick,
+                archiveRoom = archiveRoom,
             )
             requireMamPageBoundaries(rsm.first, rsm.last, messages)
+            synchronized(entryGate) {
+                requireExactAttemptLocked(request.accountId, request.generation)
+                require(connectionListener.currentAttempt() == attempt)
+                if (request.scope != ACCOUNT_ARCHIVE_SCOPE) requireCurrentArchiveRoom(
+                    roomFacts, copyRoomConsumerFacts(entryGate, roomStableIdAuthorities, attempt, archiveJid), attempt, request.scope,
+                )
+            }
             ArchivePageEnvelope(
                 request = request,
                 stable = fin.isStable,
@@ -848,6 +861,7 @@ internal class SmackSessionConnection(
         deliver = event,
         stableIds = features.stableIds,
         occupantIds = features.occupantIds,
+        mamV2 = features.mamV2,
         ownNick = ownNick,
     )
 
@@ -1099,6 +1113,7 @@ internal class SmackSessionConnection(
 internal data class RoomConsumerFacts(
     val lease: RoomStableIdLease, val stableIdAuthority: String?,
     val occupantIds: Boolean, val ownNick: String?,
+    val mamV2: Boolean = false,
 )
 
 internal fun copyRoomConsumerFacts(
@@ -1106,7 +1121,18 @@ internal fun copyRoomConsumerFacts(
     attempt: SessionAttemptIdentity, authority: String?,
 ): RoomConsumerFacts? = synchronized(entryGate) {
     val snapshot = authority?.let { registry.snapshot(attempt, it) } ?: return@synchronized null
-    RoomConsumerFacts(snapshot.lease, snapshot.lease.authority.takeIf { snapshot.stableIds }, snapshot.occupantIds, snapshot.ownNick)
+    RoomConsumerFacts(snapshot.lease, snapshot.lease.authority.takeIf { snapshot.stableIds }, snapshot.occupantIds, snapshot.ownNick, snapshot.mamV2)
+}
+
+internal fun requireCurrentArchiveRoom(
+    captured: RoomConsumerFacts?, current: RoomConsumerFacts?,
+    attempt: SessionAttemptIdentity, scope: String,
+): RoomConsumerFacts? {
+    require(captured?.lease == current?.lease) { "Room archive lease changed" }
+    require(captured == null || captured.lease.attempt == attempt && captured.lease.authority == scope) {
+        "Room archive ownership changed"
+    }
+    return current?.takeIf { it.mamV2 }
 }
 
 private class RoomViewStatusListener(
@@ -1132,6 +1158,7 @@ private class RoomViewStatusListener(
 internal fun roomFeatureSupport(info: DiscoverInfo) = RoomFeatureSupport(
     stableIds = info.containsFeature(StableUniqueStanzaIdManager.NAMESPACE),
     occupantIds = info.containsFeature(OCCUPANT_ID_NAMESPACE),
+    mamV2 = info.containsFeature("urn:xmpp:mam:2"),
 )
 
 private enum class BlockingCommandResult { CONFIRMED, REJECTED, NOT_ATTEMPTED, UNCERTAIN }
@@ -1551,7 +1578,13 @@ private fun Message.structurallyValidOriginId(): String? {
 
 private fun Message.trustedStanzaIds(authority: String?): List<StanzaIdEnvelope> {
     if (authority == null) return emptyList()
-    val candidates = extensions.filter {
+    val candidate = stanzaIdClaims(authority).singleOrNull() as? StanzaIdElement ?: return emptyList()
+    if (candidate is NemaStanzaIdElement && !candidate.structurallyValid) return emptyList()
+    if (candidate.id.isEmpty()) return emptyList()
+    return listOf(StanzaIdEnvelope(candidate.id, candidate.by))
+}
+
+private fun Message.stanzaIdClaims(authority: String) = extensions.filter {
         it.elementName == StanzaIdElement.ELEMENT &&
             it.namespace == StableUniqueStanzaIdManager.NAMESPACE &&
             when (it) {
@@ -1560,11 +1593,7 @@ private fun Message.trustedStanzaIds(authority: String?): List<StanzaIdEnvelope>
                 else -> false
             }
     }
-    val candidate = candidates.singleOrNull() as? StanzaIdElement ?: return emptyList()
-    if (candidate is NemaStanzaIdElement && !candidate.structurallyValid) return emptyList()
-    if (candidate.id.isEmpty()) return emptyList()
-    return listOf(StanzaIdEnvelope(candidate.id, candidate.by))
-}
+
 
 internal data class OutgoingFailureMapping(
     val consumed: Boolean,
@@ -1746,10 +1775,20 @@ internal fun normalizeMamResults(
     mappingBareJid: String = expectedArchiveAuthority,
     ownRoomNick: String? = null,
     receivedAtEpochMs: Long = System.currentTimeMillis(),
+    archiveRoom: RoomConsumerFacts? = null,
 ): List<ArchiveMessageEnvelope> {
     require(carriers.size == results.size) { "MAM result metadata does not match carriers" }
     require(carriers.haveArchiveAuthority(expectedArchiveAuthority)) {
         "MAM result source does not match archive authority"
+    }
+    if (archiveRoom != null) {
+        require(archiveRoom.mamV2 && archiveRoom.lease.attempt == attempt &&
+            archiveRoom.lease.authority == expectedArchiveAuthority && expectedArchiveAuthority != mappingBareJid)
+        require(carriers.all { it.from?.toString() == expectedArchiveAuthority }) { "Room archive source is not bare" }
+        // MamManager collected this page with its fresh MamResultFilter and authenticated final IQ.
+        require(results.isEmpty() || results.first().queryId?.isNotEmpty() == true)
+        require(results.map { it.queryId }.distinct().size <= 1)
+        require(carriers.zip(results).all { (carrier, result) -> MamResultExtension.from(carrier) === result })
     }
     return results.map { result ->
         val owned = result as? NemaMamResultExtension
@@ -1757,7 +1796,7 @@ internal fun normalizeMamResults(
         val signal = owned.actualMessage
             ?.takeIf { expectedArchiveAuthority == mappingBareJid }
             ?.toIncomingSignal(attempt, mappingBareJid)
-        val mappedMessage = if (signal == null) {
+        var mappedMessage = if (signal == null) {
             owned.actualMessage?.toIncomingEnvelope(
                 attempt,
                 mappingBareJid,
@@ -1769,6 +1808,18 @@ internal fun normalizeMamResults(
             )
         } else {
             null
+        }
+        if (archiveRoom != null && owned.actualMessage != null) {
+            require(owned.id.isNotEmpty())
+            val inner = requireNotNull(owned.actualMessage)
+            require(inner.type == Message.Type.groupchat && inner.from?.asBareJid()?.toString() == expectedArchiveAuthority)
+            require(mappedMessage == null || mappedMessage.kind == MessageKind.GROUPCHAT && mappedMessage.peer == expectedArchiveAuthority)
+            val claims = inner.stanzaIdClaims(expectedArchiveAuthority)
+            val identity = StanzaIdEnvelope(owned.id, expectedArchiveAuthority)
+            require(claims.isEmpty() || claims.size == 1 && inner.trustedStanzaIds(expectedArchiveAuthority) == listOf(identity)) {
+                "Room archive UID contradicts inner stanza identity"
+            }
+            mappedMessage = mappedMessage?.copy(stanzaIds = listOf(identity))
         }
         ArchiveMessageEnvelope(
             resultId = owned.id,

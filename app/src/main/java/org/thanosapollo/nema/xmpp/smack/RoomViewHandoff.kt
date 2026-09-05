@@ -19,6 +19,7 @@ internal class RoomViewHandoff<S, P, U, V>(
         private val stableIds: Boolean,
         private val occupantIds: Boolean,
         private val ownNick: String?,
+        private val mamV2: Boolean,
     ) {
         private val roomOrder = synchronized(ordering) {
             ordering.getOrPut(lease.authority) { Any() }
@@ -39,7 +40,7 @@ internal class RoomViewHandoff<S, P, U, V>(
             } ?: return@locked revokePending()
             val previous = try {
                 synchronized(entryGate) {
-                    if (!joined() || !registry.publish(lease, stableIds, occupantIds, ownNick)) null
+                    if (!joined() || !registry.publish(lease, stableIds, occupantIds, ownNick, mamV2)) null
                     else active.put(lease.authority, Active(lease, triple))
                 }
             } catch (failure: Throwable) {
@@ -113,7 +114,8 @@ internal class RoomViewHandoff<S, P, U, V>(
         stableIds: Boolean,
         occupantIds: Boolean,
         ownNick: String?,
-    ) = Candidate(lease, mucMonitor, joined, listeners, buildView, deliver, stableIds, occupantIds, ownNick)
+        mamV2: Boolean = false,
+    ) = Candidate(lease, mucMonitor, joined, listeners, buildView, deliver, stableIds, occupantIds, ownNick, mamV2)
 
     fun beginAttempt(attempt: org.thanosapollo.nema.session.SessionAttemptIdentity) =
         beginAttemptIf(attempt) { true }

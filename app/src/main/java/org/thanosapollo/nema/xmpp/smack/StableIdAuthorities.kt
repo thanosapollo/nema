@@ -17,6 +17,7 @@ internal data class RoomStableIdLease(
 internal data class RoomFeatureSupport(
     val stableIds: Boolean,
     val occupantIds: Boolean,
+    val mamV2: Boolean = false,
 )
 
 internal data class RoomMembershipSnapshot(
@@ -24,6 +25,7 @@ internal data class RoomMembershipSnapshot(
     val stableIds: Boolean,
     val occupantIds: Boolean,
     val ownNick: String?,
+    val mamV2: Boolean = false,
 )
 
 internal class RoomStableIdAuthorityRegistry {
@@ -53,10 +55,11 @@ internal class RoomStableIdAuthorityRegistry {
         stableIds: Boolean,
         occupantIds: Boolean,
         ownNick: String? = null,
+        mamV2: Boolean = false,
     ): Boolean {
         if (attempt != lease.attempt || pending[lease.authority] != lease) return false
         pending.remove(lease.authority)
-        snapshots[lease.authority] = RoomMembershipSnapshot(lease, stableIds, occupantIds, ownNick)
+        snapshots[lease.authority] = RoomMembershipSnapshot(lease, stableIds, occupantIds, ownNick, mamV2)
         return true
     }
 
