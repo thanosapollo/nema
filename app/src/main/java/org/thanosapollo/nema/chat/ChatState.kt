@@ -907,14 +907,17 @@ class DirectChatPresenter(
         return result
     }
 
+    private fun DraftSnapshot.outboundBody(): String =
+        if (body.isBlank()) attachmentUrl?.takeIf { it.isNotBlank() } ?: body else body
+
     fun sendDraft(snapshot: DraftSnapshot): Deferred<Boolean> {
         val identity = PendingSendIdentity(snapshot.key, snapshot.composerRevision)
         if (!claimSend(identity)) return CompletableDeferred(false)
         return submitAction {
             val sent = owns(snapshot.key) &&
                 snapshot.outboundThread == null &&
-                snapshot.body.isNotBlank() &&
-                enqueue(account, snapshot)
+                snapshot.outboundBody().isNotBlank() &&
+                enqueue(account, snapshot.copy(body = snapshot.outboundBody()))
             settleSend(identity, snapshot, sent)
             sent
         }.also { job ->
@@ -932,7 +935,7 @@ class DirectChatPresenter(
             if (!owns(snapshot.key) ||
                 snapshot.key.thread != null ||
                 snapshot.outboundThread != null ||
-                snapshot.body.isBlank()
+                snapshot.outboundBody().isBlank()
             ) {
                 settleSend(identity, snapshot, false)
                 return@submitAction false
@@ -949,7 +952,7 @@ class DirectChatPresenter(
                 )
             }
             val thread = newTopic(currentSession)
-            val sent = enqueue(account, snapshot.copy(outboundThread = thread))
+            val sent = enqueue(account, snapshot.copy(body = snapshot.outboundBody(), outboundThread = thread))
             if (sent && origin != null && origin.route == ChatRoute(snapshot.key.canonicalBarePeer)) {
                 selectRouteIfCurrent(origin, origin.route.copy(thread = thread))
             }

@@ -2928,6 +2928,94 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
+    fun attachmentOutboundPreservesLiteralDraftAcrossRejectionRetryAndCompletion() = runBlocking {
+        for (newThread in listOf(false, true)) {
+            for ((index, body) in listOf("", " \t\n", " literal caption ").withIndex()) {
+                val peer = "attachment-$newThread-$index@example.org"
+                val repository = ChatRepository(database)
+                val store = MessageStore(database)
+                val captured = snapshot(ACCOUNT, peer, body, revision = 7).copy(
+                    attachmentUrl = "https://example.org/file.png",
+                    attachmentName = "file.png", attachmentMime = "image/png", attachmentSize = 42L,
+                    reply = DraftReply("reply-id", peer, "quoted body", "Sender"),
+                )
+                val literal = StoredDraft(body, captured.reply, captured.attachmentUrl,
+                    captured.attachmentName, captured.attachmentMime, captured.attachmentSize)
+                var attempts = 0
+                val presenter = DirectChatPresenter(accountConfiguration(ACCOUNT, SELF), repository, scope,
+                    enqueue = { account, outbound ->
+                        attempts += 1
+                        if (attempts == 1) false else store.composeDirectDraft(
+                            accountId = account.id.value, operationId = peer, localMessageId = peer,
+                            originId = peer, peerJid = outbound.key.canonicalBarePeer,
+                            senderJid = account.bareJid.value, body = outbound.body,
+                            thread = outbound.outboundThread ?: outbound.key.thread,
+                            draftThread = outbound.key.thread,
+                            attachmentUrl = outbound.attachmentUrl, attachmentName = outbound.attachmentName,
+                            attachmentMime = outbound.attachmentMime, attachmentSize = outbound.attachmentSize,
+                            replyToId = outbound.reply?.id, replyToJid = outbound.reply?.to,
+                            replyFallbackBody = outbound.reply?.body, replyFallbackSender = outbound.reply?.senderLabel,
+                        ) != null
+                    })
+                try {
+                    val identity = PendingSendIdentity(captured.key, captured.composerRevision)
+                    suspend fun send() = if (newThread) presenter.sendDraftAsNewThread(captured).await()
+                        else presenter.sendDraft(captured).await()
+                    assertTrue(presenter.updateDraft(captured).await())
+                    assertEquals(literal, repository.observeStoredDraft(captured.key).first())
+                    assertTrue(!send())
+                    assertEquals(1, attempts)
+                    assertTrue(!presenter.isSending(identity))
+                    assertEquals(literal, repository.observeStoredDraft(captured.key).first())
+                    assertTrue(store.outbox(ACCOUNT, peer) == null)
+                    assertTrue(send())
+                    assertEquals(2, attempts)
+                    val completed = withTimeout(5_000) {
+                        presenter.state.first { identity in it.completedSendSnapshots }
+                    }
+                    assertEquals(captured, completed.completedSendSnapshots[identity])
+                    assertTrue(!send())
+                    assertEquals(2, attempts)
+                    val outbox = requireNotNull(store.outbox(ACCOUNT, peer))
+                    assertEquals(OutboxStatus.PENDING, outbox.status)
+                    val message = store.messages(ACCOUNT).single { it.localMessageId == outbox.messageId }
+                    assertEquals(if (body.isBlank()) captured.attachmentUrl else body, message.body)
+                    assertEquals(captured.attachmentUrl, message.attachmentUrl)
+                    assertEquals(captured.attachmentName, message.attachmentName)
+                    assertEquals(captured.attachmentMime, message.attachmentMime)
+                    assertEquals(captured.attachmentSize, message.attachmentSize)
+                    assertEquals(captured.reply?.id, message.replyToId)
+                    assertEquals(captured.reply?.to, message.replyToJid)
+                    assertEquals(captured.reply?.body, message.replyFallbackBody)
+                    if (newThread) assertTrue(message.parentThreadId != null)
+                    assertEquals(StoredDraft(), repository.observeStoredDraft(captured.key).first())
+                } finally {
+                    presenter.close()
+                }
+            }
+        }
+    }
+
+    @Test
+    fun blankDraftWithoutUsableAttachmentStillRejectsBothSendPaths() = runBlocking {
+        val presenter = DirectChatPresenter(accountConfiguration(ACCOUNT, SELF), ChatRepository(database), scope,
+            enqueue = { _, _ -> error("Blank draft must not reach enqueue") })
+        try {
+            for (body in listOf("", " \t\n")) for (url in listOf(null, "", " \t")) {
+                val captured = snapshot(ACCOUNT, PEER, body).copy(attachmentUrl = url)
+                assertTrue(!presenter.sendDraft(captured).await())
+                assertTrue(!presenter.sendDraftAsNewThread(captured).await())
+            }
+            val correction = snapshot(ACCOUNT, PEER, " ").copy(
+                correction = DraftCorrection("local", "wire", "original"))
+            assertTrue(!presenter.sendDraft(correction).await())
+            assertTrue(!presenter.sendDraftAsNewThread(correction).await())
+        } finally {
+            presenter.close()
+        }
+    }
+
+    @Test
     fun sendDraftRecordsRevisionOnceUntilSettled() = runBlocking {
         val gate = CompletableDeferred<Boolean>()
         var enqueues = 0
