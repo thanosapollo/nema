@@ -864,6 +864,42 @@ fun ConversationContent(
                                         }
                                     }
                                 }
+                                if (composer.attachmentUrl != null) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth()
+                                            .testTag("composer-attachment-preview")
+                                            .padding(start = 16.dp, end = 4.dp, top = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Column(Modifier.weight(1f).semantics(mergeDescendants = true) {}) {
+                                            Text(
+                                                composer.attachmentName?.takeIf(String::isNotBlank) ?: "Attached file",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                            Text(
+                                                composer.attachmentMime?.takeIf(String::isNotBlank) ?: "File",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
+                                        TextButton(
+                                            modifier = Modifier.heightIn(min = 48.dp)
+                                                .semantics { contentDescription = "Remove attachment" },
+                                            onClick = {
+                                                updateComposer(composer.copy(
+                                                    attachmentUrl = null,
+                                                    attachmentName = null,
+                                                    attachmentMime = null,
+                                                    attachmentSize = null,
+                                                    revision = composer.revision + 1,
+                                                ))
+                                            },
+                                        ) { Text("Remove") }
+                                    }
+                                }
                                 BasicTextField(
                                     value = composer.body,
                                     onValueChange = {
