@@ -1949,7 +1949,11 @@ internal fun MessageTimeline(
     var newIncoming by remember { mutableIntStateOf(0) }
     var followLatest by remember { mutableStateOf(true) }
     var viewportRestored by remember { mutableStateOf(initialViewport == null) }
-    var visibleMessageIds by remember(accountId, routeOccurrence) { mutableStateOf(emptySet<String>()) }
+    var readObservation by remember(accountId, routeOccurrence) {
+        mutableStateOf(emptySet<String>() to emptyList<String>())
+    }
+    val visibleMessageIds = readObservation.first
+    val observedTimelineIds = readObservation.second
     var reportedMarkerTargets by remember { mutableStateOf(emptySet<String>()) }
     val currentMessages = remember {
         mutableStateOf(messages, referentialEqualityPolicy())
@@ -1993,17 +1997,20 @@ internal fun MessageTimeline(
         withFrameNanos { }
         snapshotFlow {
             val layout = listState.layoutInfo
-            val rendered = currentMessages.value.mapTo(hashSetOf()) { it.id }
-            layout.visibleItemsInfo.asSequence()
+            val observedTimelineIds = currentMessages.value.map { it.id }
+            val rendered = observedTimelineIds.toHashSet()
+            val visible = layout.visibleItemsInfo.asSequence()
                 .filter { it.offset + it.size > layout.viewportStartOffset && it.offset < layout.viewportEndOffset }
                 .mapNotNull { it.key as? String }
                 .filter { it in rendered }
                 .toSet()
-        }.distinctUntilChanged().collect { visibleMessageIds = it }
+            visible to observedTimelineIds
+        }.distinctUntilChanged().collect { readObservation = it }
     }
+    // History-only insertions do not admit another read until visibility or lifecycle changes.
     LaunchedEffect(accountId, routeOccurrence, visibleMessageIds, viewportRestored, activityResumed) {
         if (viewportRestored && activityResumed && visibleMessageIds.isNotEmpty()) {
-            onMarkVisibleRead(VisibleReadRequest(accountId, routeOccurrence, visibleMessageIds))
+            onMarkVisibleRead(VisibleReadRequest(accountId, routeOccurrence, visibleMessageIds, observedTimelineIds))
         }
     }
     LaunchedEffect(
