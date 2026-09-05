@@ -660,6 +660,11 @@ internal class SmackSessionConnection(
         )
     }
 
+    override fun roomRepairAuthorization(room: String): org.thanosapollo.nema.session.RoomRepairAuthorization? =
+        captureRoomRepairAuthorization(entryGate, roomStableIdAuthorities, room) {
+            connectionListener.currentAttempt().takeIf { !revoked.get() && isUsable }
+        }
+
     override suspend fun joinMuc(
         accountId: AccountId,
         generation: ConnectionGeneration,
@@ -1122,6 +1127,21 @@ internal fun copyRoomConsumerFacts(
 ): RoomConsumerFacts? = synchronized(entryGate) {
     val snapshot = authority?.let { registry.snapshot(attempt, it) } ?: return@synchronized null
     RoomConsumerFacts(snapshot.lease, snapshot.lease.authority.takeIf { snapshot.stableIds }, snapshot.occupantIds, snapshot.ownNick, snapshot.mamV2)
+}
+
+internal fun captureRoomRepairAuthorization(
+    entryGate: Any, registry: RoomStableIdAuthorityRegistry, room: String,
+    currentAttempt: () -> SessionAttemptIdentity?,
+): org.thanosapollo.nema.session.RoomRepairAuthorization? = synchronized(entryGate) {
+    val attempt = currentAttempt() ?: return@synchronized null
+    val captured = registry.snapshot(attempt, room)?.takeIf { it.mamV2 } ?: return@synchronized null
+    org.thanosapollo.nema.session.RoomRepairAuthorization(attempt, captured.lease.authority) {
+        synchronized(entryGate) {
+            currentAttempt() == attempt && registry.snapshot(attempt, room)?.let {
+                it.lease == captured.lease && it.mamV2
+            } == true
+        }
+    }
 }
 
 internal fun requireCurrentArchiveRoom(

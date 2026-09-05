@@ -136,6 +136,12 @@ sealed interface SessionEvent {
     }
 }
 
+class RoomRepairAuthorization internal constructor(
+    val attempt: SessionAttemptIdentity,
+    val room: String,
+    val admit: () -> Boolean,
+)
+
 interface SessionConnection {
     val isUsable: Boolean
     fun revoke()
@@ -188,6 +194,7 @@ interface SessionConnection {
         nick: String? = null,
         password: String? = null,
     ): Boolean = false
+    fun roomRepairAuthorization(room: String): RoomRepairAuthorization? = null
     suspend fun bookmarkedRooms(
         accountId: AccountId,
         generation: ConnectionGeneration,
@@ -524,6 +531,15 @@ internal class ActiveSessionController(
     ): Boolean {
         val target = exactConnection(accountId, generation)
         return target.publishRoomBookmark(accountId, generation, bookmark)
+    }
+
+    internal suspend fun roomRepairAuthorization(lease: DispatchLease, room: String): RoomRepairAuthorization? {
+        val target = exactConnection(lease.identity.accountId, lease.identity.generation)
+        if (mutableLifecycle.value.dispatchLease() != lease) return null
+        return target.roomRepairAuthorization(room)?.takeIf {
+            it.attempt.accountId == lease.identity.accountId && it.attempt.generation == lease.identity.generation &&
+                it.attempt.epoch == lease.epoch && mutableLifecycle.value.dispatchLease() == lease
+        }
     }
 
     internal suspend fun <T> commitIfConnected(

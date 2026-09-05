@@ -2,6 +2,7 @@ package org.thanosapollo.nema.service
 
 import android.app.Application
 import android.content.Context
+import androidx.room.withTransaction
 import androidx.test.core.app.ApplicationProvider
 import java.util.UUID
 import kotlinx.coroutines.CompletableDeferred
@@ -48,6 +49,8 @@ import org.thanosapollo.nema.session.SessionConnection
 import org.thanosapollo.nema.session.SessionConnectionFactory
 import org.thanosapollo.nema.session.SessionEvent
 import org.thanosapollo.nema.session.SessionFailureReason
+import org.thanosapollo.nema.storage.aliasAuthority
+import org.thanosapollo.nema.storage.IdentityAliasStatus
 import org.thanosapollo.nema.storage.AccountRepository
 import org.thanosapollo.nema.storage.ArchiveCursorKey
 import org.thanosapollo.nema.storage.ArchiveDirection
@@ -91,6 +94,7 @@ class SessionRuntimeTest {
     private lateinit var context: Context
     private lateinit var databaseName: String
     private lateinit var database: NemaDatabase
+    private var repairObserver: ((MessageWriteBoundary) -> Unit)? = null
 
     @Before
     fun setUp() {
@@ -698,6 +702,143 @@ class SessionRuntimeTest {
         )
         assertFalse(fixture.connection.isUsable)
         assertEquals(1, fixture.connection.disconnectCalls)
+    }
+
+    private suspend fun seedRepairPair(account: String, room: String) {
+        val dao = database.messageDao()
+        dao.insertPeer(org.thanosapollo.nema.storage.PeerEntity(account, room))
+        val base = dao.messages(account).maxOfOrNull { it.localSequence } ?: 0L
+        val live = org.thanosapollo.nema.storage.MessageEntity(account, "$room-live", room, "$room/nick",
+            MessageDirection.INBOUND, MessageKind.GROUPCHAT, null, null, "historical", base + 1, null,
+            sentAtEpochMs = 1000, sentTimeSource = MessageTimeSource.LOCAL, liveDeliveryObserved = true)
+        dao.insertMessage(live)
+        dao.insertMessage(live.copy(localMessageId = "$room-mam", localSequence = base + 2,
+            archiveOrdinal = 0, sentTimeSource = MessageTimeSource.MAM, liveDeliveryObserved = false))
+        dao.insertTrustedAlias(org.thanosapollo.nema.storage.TrustedIdentityAliasEntity(account,
+            IdentityAliasKind.STANZA_ID, room, "uid", live.localMessageId, IdentityAliasStatus.TRUSTED))
+        dao.insertTrustedAlias(org.thanosapollo.nema.storage.TrustedIdentityAliasEntity(account,
+            IdentityAliasKind.MAM_RESULT, ArchiveCursorKey(account, room, room).aliasAuthority(), "uid", "$room-mam", IdentityAliasStatus.TRUSTED))
+        dao.insertArchivePosition(org.thanosapollo.nema.storage.ArchiveMessagePositionEntity(account, room, room, 0, "$room-mam"))
+    }
+
+    @Test fun `successful room join repairs only authorized room and repeats after reopen`() = runTest {
+        var fixture = connectedRuntime(backgroundScope, "repair")
+        runCurrent()
+        val a = "a@conference.example.org"
+        val b = "b@conference.example.org"
+        val id = fixture.account.id.value
+        seedRepairPair(id, a); seedRepairPair(id, b)
+        fixture.connection.archiveSupported = true
+        fixture.connection.repairRooms += a
+        assertTrue(fixture.runtime.joinMuc(a))
+        assertEquals(a, fixture.connection.repairArchive.receive())
+        val receipt = database.accountDao().reconciliationState(id, "room-archive-uid-v1:${a.length}:$a")
+        assertEquals(ReconciliationRepairStatus.COMPLETE, receipt?.status)
+        assertEquals(3, database.messageDao().messages(id).size)
+        assertNull(database.accountDao().reconciliationState(id, "room-archive-uid-v1:${b.length}:$b"))
+        assertTrue(fixture.runtime.joinMuc(b)); assertEquals(b, fixture.connection.repairArchive.receive())
+        assertEquals(3, database.messageDao().messages(id).size)
+        assertNull(database.accountDao().reconciliationState(id, "room-archive-uid-v1:${b.length}:$b"))
+        fixture.runtime.serviceDestroyed()
+        database.close(); database = NemaDatabase.create(context, databaseName)
+        fixture = connectedRuntime(backgroundScope, "repair")
+        runCurrent()
+        fixture.connection.archiveSupported = true
+        fixture.connection.repairRooms += a
+        assertTrue(fixture.runtime.joinMuc(a)); assertEquals(a, fixture.connection.repairArchive.receive())
+        assertEquals(receipt, database.accountDao().reconciliationState(id, "room-archive-uid-v1:${a.length}:$a"))
+        fixture.connection.repairRooms += b
+        assertTrue(fixture.runtime.joinMuc(b)); assertEquals(b, fixture.connection.repairArchive.receive())
+        assertEquals(2, database.messageDao().messages(id).size)
+    }
+
+    @Test fun `queued room repair rejects retired attempt membership rejoin and cancellation`() = runTest {
+        for (mode in listOf("retire", "attempt", "membership", "rejoin", "cancel")) {
+            val job = kotlinx.coroutines.SupervisorJob()
+            val scope = CoroutineScope(backgroundScope.coroutineContext + job)
+            val fixture = connectedRuntime(scope, "queued-$mode")
+            runCurrent()
+            val room = "$mode@conference.example.org"
+            val id = fixture.account.id.value
+            seedRepairPair(id, room)
+            val rows = database.messageDao().messages(id)
+            val aliases = database.messageDao().trustedAliases(id)
+            val positions = database.messageDao().archivePositions(id)
+            val c = fixture.connection
+            c.repairRooms += room
+            val entered = CompletableDeferred<Unit>(); val release = CompletableDeferred<Unit>()
+            val holder = async(Dispatchers.IO) { database.withTransaction { entered.complete(Unit); release.await() } }
+            entered.await()
+            try {
+                assertTrue(fixture.runtime.joinMuc(room)); runCurrent()
+                val executor = database.transactionExecutor
+                val field = executor.javaClass.declaredFields.single {
+                    java.util.Collection::class.java.isAssignableFrom(it.type)
+                }.apply { isAccessible = true }
+                assertTrue(synchronized(executor) { (field.get(executor) as Collection<*>).isNotEmpty() })
+                when (mode) {
+                    "retire" -> c.revoke()
+                    "attempt" -> c.updateAttempt(c.attemptIdentity.copy(attempt = ConnectionAttempt.require(99)))
+                    "membership" -> c.repairRegistry.retireAll()
+                    "rejoin" -> {
+                        val lease = requireNotNull(c.repairRegistry.beginJoin(c.attemptIdentity, room))
+                        c.repairRegistry.publish(lease, false, false, mamV2 = true)
+                    }
+                    "cancel" -> job.cancel()
+                }
+            } finally { release.complete(Unit); holder.await() }
+            // Drain the writer after the submitted repair, before negative assertions.
+            database.withTransaction { }
+            runCurrent()
+            assertEquals(mode, rows, database.messageDao().messages(id))
+            assertEquals(mode, aliases, database.messageDao().trustedAliases(id))
+            assertEquals(mode, positions, database.messageDao().archivePositions(id))
+            assertNull(database.accountDao().reconciliationState(id, "room-archive-uid-v1:${room.length}:$room"))
+            job.cancelAndJoin()
+        }
+    }
+
+    @Test fun `room repair failure keeps archive usable and later join retries`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "fault")
+        runCurrent()
+        val room = "fault@conference.example.org"
+        val id = fixture.account.id.value
+        seedRepairPair(id, room)
+        fixture.connection.archiveSupported = true
+        fixture.connection.repairRooms += room
+        database.openHelper.writableDatabase.execSQL(
+            "CREATE TRIGGER repair_fault BEFORE DELETE ON messages BEGIN SELECT RAISE(ABORT, 'synthetic'); END")
+        assertTrue(fixture.runtime.joinMuc(room)); assertEquals(room, fixture.connection.repairArchive.receive())
+        val pending = database.accountDao().reconciliationState(id, "room-archive-uid-v1:${room.length}:$room")
+        assertEquals(ReconciliationRepairStatus.PENDING, pending?.status)
+        assertEquals(2, database.messageDao().messages(id).size)
+        database.openHelper.writableDatabase.execSQL("DROP TRIGGER repair_fault")
+        assertTrue(fixture.runtime.joinMuc(room)); assertEquals(room, fixture.connection.repairArchive.receive())
+        assertEquals(1, database.messageDao().messages(id).size)
+    }
+
+    @Test fun `admitted room repair completes after retirement without holding entry monitor`() = runTest {
+        lateinit var connection: RecordingConnection
+        var reached = false
+        repairObserver = { boundary ->
+            if (boundary == MessageWriteBoundary.AFTER_DEPENDENT_REPARENT) {
+                assertFalse(Thread.holdsLock(connection.repairGate))
+                connection.revoke()
+                reached = true
+            }
+        }
+        val fixture = connectedRuntime(backgroundScope, "accepted")
+        connection = fixture.connection
+        runCurrent()
+        val room = "accepted@conference.example.org"
+        seedRepairPair(fixture.account.id.value, room)
+        connection.archiveSupported = true; connection.repairRooms += room
+        assertTrue(fixture.runtime.joinMuc(room))
+        assertEquals(room, connection.repairArchive.receive())
+        assertTrue(reached)
+        assertEquals(1, database.messageDao().messages(fixture.account.id.value).size)
+        assertEquals(ReconciliationRepairStatus.COMPLETE, database.accountDao().reconciliationState(
+            fixture.account.id.value, "room-archive-uid-v1:${room.length}:$room")?.status)
     }
 
     @Test
@@ -1682,7 +1823,8 @@ class SessionRuntimeTest {
     ): RuntimeFixture {
         val accounts = AccountRepository(database.accountDao())
         val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
-        val store = MessageStore(database) { REACTION_NOW }
+        val store = repairObserver?.let { MessageStore.observingWrites(database, observer = it) }
+            ?: MessageStore(database) { REACTION_NOW }
         val connections = RecordingConnectionFactory()
         val runtime = SessionRuntime(
             accounts, credentials, store, PeerIdentityStore(database.messageDao()), scope, connections, clock,
@@ -1983,6 +2125,14 @@ class SessionRuntimeTest {
         var nextJoinGate: CompletableDeferred<Unit>? = null
         val published = CompletableDeferred<Unit>()
         val roomArchiveRequested = CompletableDeferred<Unit>()
+        val repairRooms = mutableSetOf<String>()
+        val repairGate = Any()
+        val repairRegistry = org.thanosapollo.nema.xmpp.smack.RoomStableIdAuthorityRegistry()
+        val repairArchive = kotlinx.coroutines.channels.Channel<String>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        override fun roomRepairAuthorization(room: String) =
+            org.thanosapollo.nema.xmpp.smack.captureRoomRepairAuthorization(repairGate, repairRegistry, room) {
+                attemptIdentity.takeIf { isUsable }
+            }
         var archiveSupported = false
         val archiveRequests = mutableListOf<org.thanosapollo.nema.xmpp.transport.ArchivePageRequest>()
         val sentTyping = mutableListOf<org.thanosapollo.nema.xmpp.transport.OutgoingChatState>()
@@ -2000,6 +2150,7 @@ class SessionRuntimeTest {
 
         override suspend fun connect(credential: CharArray, attempt: SessionAttemptIdentity) {
             attemptIdentity = attempt
+            repairRegistry.begin(attempt)
             connectionStarted?.complete(Unit)
             releaseConnection?.await()
             isUsable = true
@@ -2007,11 +2158,13 @@ class SessionRuntimeTest {
 
         override suspend fun reconnect(attempt: SessionAttemptIdentity) {
             attemptIdentity = attempt
+            repairRegistry.begin(attempt)
             isUsable = true
         }
 
         override fun updateAttempt(attempt: SessionAttemptIdentity) {
             attemptIdentity = attempt
+            repairRegistry.begin(attempt)
         }
 
         override suspend fun send(message: OutgoingMessageEnvelope, entered: () -> Unit) = entered()
@@ -2050,6 +2203,10 @@ class SessionRuntimeTest {
             val gate = nextJoinGate
             nextJoinGate = null
             gate?.await()
+            synchronized(repairGate) {
+                val lease = requireNotNull(repairRegistry.beginJoin(attemptIdentity, roomJid))
+                repairRegistry.publish(lease, stableIds = false, occupantIds = false, mamV2 = roomJid in repairRooms)
+            }
             return true
         }
 
@@ -2079,7 +2236,10 @@ class SessionRuntimeTest {
         override suspend fun queryArchive(request: org.thanosapollo.nema.xmpp.transport.ArchivePageRequest):
             org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope {
             archiveRequests += request
-            if (request.scope != "ACCOUNT") roomArchiveRequested.complete(Unit)
+            if (request.scope != "ACCOUNT") {
+                roomArchiveRequested.complete(Unit)
+                repairArchive.send(request.scope)
+            }
             return org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope(
                 request, stable = true, complete = true, hasEarlier = false,
                 firstId = null, lastId = null, messages = emptyList(),

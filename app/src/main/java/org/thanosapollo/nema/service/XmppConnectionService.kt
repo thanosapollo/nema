@@ -452,7 +452,22 @@ class SessionRuntime(
             false
         }
         if (joined && controller.lifecycle.value.dispatchLease() == lease) {
+            val repair = try {
+                controller.roomRepairAuthorization(lease, roomJid)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) { null }
             scope.launch {
+                try {
+                    if (repair != null) controller.commitIfConnected(lease.identity,
+                        { controller.lifecycle.value.dispatchLease() == lease }) {
+                        messages.attemptRoomArchiveRepair(lease.identity.accountId.value, repair.room, repair.admit)
+                    }
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    // Repair (including its error receipt) must not suppress ordinary archive sync.
+                }
                 try {
                     roomArchive.synchronize(
                         identity = lease.identity,
