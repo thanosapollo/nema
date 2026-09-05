@@ -57,12 +57,14 @@ class FirstReadyViewportTest {
             ).also(fixture.presenters::add)
             val anchor = TimelineViewportAnchor("old-5", 17, 0)
             val writes = mutableListOf<TimelineViewportAnchor>()
+            val reads = mutableListOf<Set<String>>()
             compose.setContent {
                 val state by presenter.state.collectAsState()
                 MaterialTheme {
                     if (state.selectedPeer == fixture.peer && state.contentStatus == ChatContentStatus.Ready) {
                         MessageTimeline(state.messages, initialViewport = anchor, onViewportChanged = writes::add,
-                            modifier = Modifier.height(300.dp))
+                            accountId = state.accountId, routeOccurrence = state.routeOccurrence, activityResumed = true,
+                            onMarkVisibleRead = { reads.add(it.messageIds); true }, modifier = Modifier.height(300.dp))
                     }
                 }
             }
@@ -70,42 +72,57 @@ class FirstReadyViewportTest {
             compose.waitForIdle()
             assertEquals(ChatContentStatus.Loading, presenter.state.value.contentStatus)
             assertTrue(writes.isEmpty())
+            assertTrue(reads.isEmpty())
             release.complete(Unit)
             compose.waitUntil(5_000) { writes.isNotEmpty() }
             assertEquals(anchor.messageId, writes.first().messageId)
             assertEquals(anchor.offset, writes.first().offset)
+            compose.waitUntil(5_000) { reads.isNotEmpty() }
+            assertTrue(reads.first().contains("old-5"))
+            assertTrue(reads.none { "old-99" in it })
         }
     }
 
     @Test
     fun missingAnchorSettlesAtBoundedFallback() {
         val writes = mutableListOf<TimelineViewportAnchor>()
+        val reads = mutableListOf<Set<String>>()
         compose.setContent {
             MaterialTheme {
                 MessageTimeline(rows(100), initialViewport = TimelineViewportAnchor("deleted", 13, 40),
-                    onViewportChanged = writes::add, modifier = Modifier.height(300.dp))
+                    onViewportChanged = writes::add, activityResumed = true,
+                    onMarkVisibleRead = { reads.add(it.messageIds); true }, modifier = Modifier.height(300.dp))
             }
         }
         compose.waitUntil(5_000) { writes.isNotEmpty() }
         assertEquals(TimelineViewportAnchor("row-59", 13, 40), writes.first())
+        compose.waitUntil(5_000) { reads.isNotEmpty() }
+        assertTrue(reads.first().contains("row-59"))
+        assertTrue(reads.none { "row-99" in it || "deleted" in it })
     }
 
     @Test
     fun authoritativeEmptySettlesWithoutWritingOrRestoringStaleAnchorOnLaterRows() {
         val messages = mutableStateOf(emptyList<TimelineMessage>())
         val writes = mutableListOf<TimelineViewportAnchor>()
+        val reads = mutableListOf<Set<String>>()
         compose.setContent {
             MaterialTheme {
                 MessageTimeline(messages.value, initialViewport = TimelineViewportAnchor("row-5", 17, 50),
-                    onViewportChanged = writes::add, modifier = Modifier.height(300.dp))
+                    onViewportChanged = writes::add, activityResumed = true,
+                    onMarkVisibleRead = { reads.add(it.messageIds); true }, modifier = Modifier.height(300.dp))
             }
         }
         compose.waitForIdle()
         assertTrue(writes.isEmpty())
+        assertTrue(reads.isEmpty())
         compose.runOnIdle { messages.value = rows(100) }
         compose.waitForIdle()
         compose.waitUntil(5_000) { writes.isNotEmpty() }
         assertEquals(TimelineViewportAnchor("row-99", 0, 0), writes.first())
+        compose.waitUntil(5_000) { reads.isNotEmpty() }
+        assertTrue(reads.first().contains("row-99"))
+        assertTrue(reads.none { "row-5" in it })
     }
 
     private fun rows(count: Int) = (0 until count).map {

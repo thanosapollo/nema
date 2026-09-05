@@ -111,7 +111,7 @@ class ChatRepositoryPresenterTest {
         val repository = ChatRepository(database)
         assertEquals(1, repository.observeConversations(ACCOUNT).first().single().unreadCount)
 
-        assertTrue(repository.markConversationRead(ACCOUNT, PEER))
+        repository.markMessagesRead(ACCOUNT, PEER, listOf("first"))
         assertEquals(0, repository.observeConversations(ACCOUNT).first().single().unreadCount)
 
         store.ingest(incoming(ACCOUNT, "second", "second body"))
@@ -130,7 +130,7 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
-    fun openingChatClearsUnreadAndSelectedPeerDoesNotAutoReadLaterInbound() = runBlocking {
+    fun selectionLeavesUnreadAndVisibleLaterMessagePreservesEarlierHole() = runBlocking {
         val store = MessageStore(database)
         store.ingest(incoming(ACCOUNT, "first", "first body"))
         val repository = ChatRepository(database)
@@ -142,15 +142,15 @@ class ChatRepositoryPresenterTest {
         )
         presenter.state.first { it.conversations.singleOrNull()?.unreadCount == 1 }
         assertTrue(presenter.selectPeer(PEER))
-        presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == PEER && it.conversations.single().unreadCount == 0 }
-
-        store.ingest(incoming(ACCOUNT, "later", "later body"))
-        presenter.state.first { it.conversations.single().unreadCount == 1 }
-        yield()
+        presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == PEER }
         assertEquals(1, repository.observeConversations(ACCOUNT).first().single().unreadCount)
 
-        assertTrue(presenter.markVisibleConversationRead())
-        presenter.state.first { it.conversations.single().unreadCount == 0 }
+        store.ingest(incoming(ACCOUNT, "later", "later body"))
+        val ready = presenter.state.first { it.messages.size == 2 && it.conversations.single().unreadCount == 2 }
+        assertTrue(presenter.markVisibleConversationRead(VisibleReadRequest(ACCOUNT, ready.routeOccurrence, setOf("later"))))
+        presenter.state.first { it.conversations.single().unreadCount == 1 }
+        assertEquals(false, database.messageDao().message(ACCOUNT, "first")?.locallyRead)
+        assertEquals(true, database.messageDao().message(ACCOUNT, "later")?.locallyRead)
         presenter.close()
     }
 
@@ -582,7 +582,7 @@ class ChatRepositoryPresenterTest {
         repository.markRoom(ACCOUNT, PEER)
         PeerIdentityStore(database.messageDao()).saveLocalNickname(ACCOUNT, PEER, "Ada")
 
-        assertTrue(repository.markConversationRead(ACCOUNT, PEER))
+        repository.markMessagesRead(ACCOUNT, PEER, listOf("first"))
 
         val peer = database.messageDao().peer(ACCOUNT, PEER)
         assertEquals(true, peer?.room)
@@ -1814,6 +1814,7 @@ class ChatRepositoryPresenterTest {
         val selected = presenter.state.first {
             it.selectedPeerGroupChat && it.messages.singleOrNull()?.replyReferenceId != null
         }
+        withTimeout(5_000) { repository.observeRoute(ACCOUNT).first { it == source } }
         assertTrue(!presenter.startThreadFrom(selected.messages.single()))
         assertEquals(source, repository.observeRoute(ACCOUNT).first())
         assertEquals("source room draft", repository.observeDraft(ACCOUNT, room).first())
@@ -1967,6 +1968,7 @@ class ChatRepositoryPresenterTest {
         val state = cold.state.first { it.conversationsReady }
         assertEquals(null, state.selectedPeer)
         assertEquals(null, state.selectedThread)
+        withTimeout(5_000) { repository.observeRoute(ACCOUNT).first { it == null } }
         assertEquals(null, repository.observeRoute(ACCOUNT).first())
         cold.close()
     }

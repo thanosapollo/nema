@@ -197,6 +197,14 @@ enum class ChatContentStatus { Loading, Ready, Failed }
 
 data class ChatRouteOccurrence(val route: ChatRoute?, val generation: Int)
 
+class VisibleReadRequest(
+    val accountId: String,
+    val occurrence: ChatRouteOccurrence,
+    messageIds: Set<String>,
+) {
+    val messageIds: Set<String> = messageIds.toSet()
+}
+
 data class DirectChatState(
     val accountId: String,
     val conversations: List<ConversationSummary> = emptyList(),
@@ -363,8 +371,8 @@ class ChatRepository(database: NemaDatabase) {
             dao.rooms(accountId),
         )
 
-    suspend fun markConversationRead(accountId: String, peerJid: String): Boolean =
-        messages.markConversationRead(accountId, peerJid)
+    suspend fun markMessagesRead(accountId: String, peerJid: String, messageIds: List<String>) =
+        messages.markMessagesRead(accountId, peerJid, messageIds)
 
     private fun conversationSummaries(
         rows: List<ConversationListRow>,
@@ -785,19 +793,29 @@ class DirectChatPresenter(
     suspend fun selectPeer(value: String): Boolean {
         val canonical = canonicalDirectPeer(value) ?: return false
         selectRoute(ChatRoute(canonical))
-        repository.markConversationRead(account.id.value, canonical)
         return true
     }
 
-    suspend fun markVisibleConversationRead(): Boolean {
-        val peer = selectedRoute.value.route?.peerJid ?: return false
-        return repository.markConversationRead(account.id.value, peer)
+    suspend fun markVisibleConversationRead(request: VisibleReadRequest): Boolean {
+        val admitted = synchronized(selectedRoute) {
+            val snapshot = state.value
+            val peer = request.occurrence.route?.peerJid ?: return false
+            if (request.accountId != account.id.value || snapshot.accountId != request.accountId ||
+                selectedRoute.value != request.occurrence || snapshot.routeOccurrence != request.occurrence ||
+                snapshot.contentStatus != ChatContentStatus.Ready
+            ) return false
+            val rendered = snapshot.messages.mapTo(hashSetOf()) { it.id }
+            peer to request.messageIds.filter { it in rendered }
+        }
+        if (admitted.second.isEmpty()) return false
+        // Admission is synchronous; persistence keeps this owner even if navigation changes.
+        repository.markMessagesRead(request.accountId, admitted.first, admitted.second)
+        return true
     }
 
     suspend fun joinRoom(value: String): Boolean {
         val canonical = canonicalDirectPeer(value) ?: return false
         selectRoute(ChatRoute(canonical))
-        repository.markConversationRead(account.id.value, canonical)
         presenterScope.launch {
             repository.markRoom(account.id.value, canonical)
             joinSelectedRoom(canonical)

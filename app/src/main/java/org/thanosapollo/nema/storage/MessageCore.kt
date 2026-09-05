@@ -114,14 +114,6 @@ abstract class MessageDao {
     @Query(
         """
         UPDATE messages SET locallyRead = 1
-        WHERE accountId = :accountId AND peerJid = :peerJid
-        """,
-    )
-    abstract suspend fun markPeerMessagesRead(accountId: String, peerJid: String): Int
-
-    @Query(
-        """
-        UPDATE messages SET locallyRead = 1
         WHERE accountId = :accountId AND peerJid = :peerJid AND localSequence <= :localSequence
         """,
     )
@@ -1976,13 +1968,6 @@ class MessageStore private constructor(
                 database.messageDao().markMessageIdsRead(accountId, peerJid, ids)
             }
         }
-
-    suspend fun markConversationRead(accountId: String, peerJid: String): Boolean = database.withTransaction {
-        val dao = database.messageDao()
-        dao.insertPeer(PeerEntity(accountId, peerJid))
-        dao.markPeerMessagesRead(accountId, peerJid)
-        true
-    }
 
     suspend fun compose(intent: OutboundIntent): OutboxEntity = database.withTransaction {
         composeInTransaction(intent)

@@ -137,6 +137,8 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 import org.thanosapollo.nema.chat.DeliveryPresentation
+import org.thanosapollo.nema.chat.ChatRouteOccurrence
+import org.thanosapollo.nema.chat.VisibleReadRequest
 import org.thanosapollo.nema.chat.ChatContentStatus
 import org.thanosapollo.nema.chat.DirectChatState
 import org.thanosapollo.nema.chat.DirectConversationKey
@@ -232,7 +234,7 @@ fun ConversationContent(
     onSelectPeer: suspend (String) -> Boolean,
     onJoinRoom: suspend (String) -> Boolean = onSelectPeer,
     onCloseConversation: () -> Unit,
-    onMarkVisibleRead: suspend () -> Boolean = { true },
+    onMarkVisibleRead: suspend (VisibleReadRequest) -> Boolean = { true },
     onDraftChange: (DraftSnapshot) -> Deferred<Boolean>,
     onSend: (DraftSnapshot) -> Deferred<Boolean>,
     onSendAsNewThread: (DraftSnapshot) -> Deferred<Boolean> = { CompletableDeferred(false) },
@@ -290,12 +292,6 @@ fun ConversationContent(
         val currentBlockingSession by rememberUpdatedState(blockingSession)
         val backgroundUri = LocalChatBackgroundUri.current
         val selectedPeer = state.selectedPeer
-        LaunchedEffect(selectedPeer, state.conversations) {
-            val peer = selectedPeer ?: return@LaunchedEffect
-            if (state.conversations.any { it.peerJid == peer && it.unreadCount > 0 }) {
-                onMarkVisibleRead()
-            }
-        }
         Box(modifier.fillMaxSize()) {
             ChatBackground(backgroundUri)
             HomeContent(
@@ -663,11 +659,14 @@ fun ConversationContent(
                         ),
                         windowInsets = WindowInsets(0, 0, 0, 0),
                     )
-                    key(conversationKey) {
+                    key(conversationKey, state.routeOccurrence) {
                         val editActionsEnabled = !composer.ordinarySaveUnconfirmed &&
                             pendingSendIdentities.none { it.key == conversationKey }
                         MessageTimeline(
                             messages = state.messages,
+                            accountId = state.accountId,
+                            routeOccurrence = state.routeOccurrence,
+                            onMarkVisibleRead = onMarkVisibleRead,
                             venue = venue,
                             editActionsEnabled = editActionsEnabled,
                             readReceiptsEnabled = readReceiptsEnabled,
@@ -1911,6 +1910,9 @@ internal fun canReact(conversationIsGroupChat: Boolean, message: TimelineMessage
 @Composable
 internal fun MessageTimeline(
     messages: List<TimelineMessage>,
+    accountId: String = "",
+    routeOccurrence: ChatRouteOccurrence = ChatRouteOccurrence(null, 0),
+    onMarkVisibleRead: suspend (VisibleReadRequest) -> Boolean = { true },
     venue: ConversationVenue = ConversationVenue.Direct,
     editActionsEnabled: Boolean = true,
     readReceiptsEnabled: Boolean = false,
@@ -1947,7 +1949,7 @@ internal fun MessageTimeline(
     var newIncoming by remember { mutableIntStateOf(0) }
     var followLatest by remember { mutableStateOf(true) }
     var viewportRestored by remember { mutableStateOf(initialViewport == null) }
-    var visibleMessageIds by remember { mutableStateOf(emptySet<String>()) }
+    var visibleMessageIds by remember(accountId, routeOccurrence) { mutableStateOf(emptySet<String>()) }
     var reportedMarkerTargets by remember { mutableStateOf(emptySet<String>()) }
     val currentMessages = remember {
         mutableStateOf(messages, referentialEqualityPolicy())
@@ -1986,15 +1988,23 @@ internal fun MessageTimeline(
                 currentOnViewportChanged(TimelineViewportAnchor(reversed[messageIndex].id, offset, messageIndex))
             }
     }
-    LaunchedEffect(listState, viewportRestored) {
+    LaunchedEffect(listState, viewportRestored, accountId, routeOccurrence) {
         if (!viewportRestored) return@LaunchedEffect
         withFrameNanos { }
-        visibleMessageIds = listState.layoutInfo.visibleItemsInfo
-            .mapNotNull { it.key as? String }
-            .toSet()
         snapshotFlow {
-            listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }.toSet()
+            val layout = listState.layoutInfo
+            val rendered = currentMessages.value.mapTo(hashSetOf()) { it.id }
+            layout.visibleItemsInfo.asSequence()
+                .filter { it.offset + it.size > layout.viewportStartOffset && it.offset < layout.viewportEndOffset }
+                .mapNotNull { it.key as? String }
+                .filter { it in rendered }
+                .toSet()
         }.distinctUntilChanged().collect { visibleMessageIds = it }
+    }
+    LaunchedEffect(accountId, routeOccurrence, visibleMessageIds, viewportRestored, activityResumed) {
+        if (viewportRestored && activityResumed && visibleMessageIds.isNotEmpty()) {
+            onMarkVisibleRead(VisibleReadRequest(accountId, routeOccurrence, visibleMessageIds))
+        }
     }
     LaunchedEffect(
         visibleMessageIds,
@@ -2014,8 +2024,15 @@ internal fun MessageTimeline(
             venue = venue,
         ).forEach { message ->
             val target = requireNotNull(message.markerTargetId)
-            if (target !in reportedMarkerTargets && currentOnMessageDisplayed(message)) {
-                reportedMarkerTargets += target
+            if (target !in reportedMarkerTargets) {
+                val sent = try {
+                    currentOnMessageDisplayed(message)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    false
+                }
+                if (sent) reportedMarkerTargets += target
             }
         }
     }
