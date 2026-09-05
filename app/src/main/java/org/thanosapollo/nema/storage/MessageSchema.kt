@@ -5,6 +5,15 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 internal object MessageSchema {
+    val MIGRATION_23_24: Migration = object : Migration(23, 24) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE message_drafts ADD COLUMN attachmentUrl TEXT")
+            db.execSQL("ALTER TABLE message_drafts ADD COLUMN attachmentName TEXT")
+            db.execSQL("ALTER TABLE message_drafts ADD COLUMN attachmentMime TEXT")
+            db.execSQL("ALTER TABLE message_drafts ADD COLUMN attachmentSize INTEGER")
+        }
+    }
+
     val MIGRATION_22_23: Migration = object : Migration(22, 23) {
         override fun migrate(db: SupportSQLiteDatabase) {
             db.execSQL("ALTER TABLE peers ADD COLUMN rosterName TEXT")

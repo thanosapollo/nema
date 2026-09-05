@@ -1760,6 +1760,93 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
+    fun completeAttachmentDraftReopensAndEveryFieldIsObservable() = runBlocking {
+        val thread = ThreadRef(ThreadId.require("child"), ThreadId.require("parent"))
+        val key = DirectConversationKey(ACCOUNT, PEER, thread)
+        val reply = DraftReply("reply", PEER, "quoted", "Peer")
+        val original = DraftSnapshot(key, "caption", 1, reply = reply,
+            attachmentUrl = "https://example.org/a", attachmentName = "a.png",
+            attachmentMime = "image/png", attachmentSize = 42L)
+        val repository = ChatRepository(database)
+        val writer = DirectChatPresenter(accountConfiguration(ACCOUNT, SELF), repository, scope,
+            enqueue = { _, _ -> true })
+        assertTrue(writer.updateDraft(original).await())
+        repository.saveRoute(ACCOUNT, ChatRoute(PEER, thread))
+        writer.close()
+        database.close()
+        database = NemaDatabase.create(context, databaseName)
+        val restored = DirectChatPresenter(accountConfiguration(ACCOUNT, SELF), ChatRepository(database), scope,
+            enqueue = { _, _ -> true }, restoreRouteOnStart = true)
+        fun attachments(state: DirectChatState) = listOf(
+            state.draftAttachmentUrl, state.draftAttachmentName, state.draftAttachmentMime, state.draftAttachmentSize)
+        fun attachments(draft: DraftSnapshot) = listOf(
+            draft.attachmentUrl, draft.attachmentName, draft.attachmentMime, draft.attachmentSize)
+        try {
+            val loaded = withTimeout(5_000) { restored.state.first { it.draft == "caption" } }
+            assertEquals(key, DirectConversationKey(loaded.accountId, requireNotNull(loaded.selectedPeer), loaded.selectedThread))
+            assertEquals(reply, loaded.draftReply)
+            assertEquals(attachments(original), attachments(loaded))
+            assertEquals(loaded, loaded.copy())
+            assertEquals(loaded.hashCode(), loaded.copy().hashCode())
+            val variants = listOf(
+                original.copy(attachmentUrl = "https://example.org/b"),
+                original.copy(attachmentName = "b.png"),
+                original.copy(attachmentMime = "application/octet-stream"),
+                original.copy(attachmentSize = 0L),
+                original.copy(attachmentUrl = null),
+                original.copy(attachmentName = null),
+                original.copy(attachmentMime = null),
+                original.copy(attachmentSize = null),
+            )
+            for ((index, variant) in variants.withIndex()) {
+                // Copy shares all other state (including the identity-compared timeline).
+                val copied = loaded.copy(draftAttachmentUrl = variant.attachmentUrl,
+                    draftAttachmentName = variant.attachmentName, draftAttachmentMime = variant.attachmentMime,
+                    draftAttachmentSize = variant.attachmentSize)
+                assertTrue(copied != loaded)
+                assertTrue(copied.hashCode() != loaded.hashCode())
+                assertEquals(attachments(variant), attachments(copied.copy()))
+                assertTrue(restored.updateDraft(variant.copy(composerRevision = index + 2L)).await())
+                val observed = withTimeout(5_000) { restored.state.first { attachments(it) == attachments(variant) } }
+                assertEquals("caption", observed.draft)
+                assertEquals(reply, observed.draftReply)
+            }
+            val attachmentOnly = original.copy(body = "", reply = null, composerRevision = 20)
+            assertTrue(restored.updateDraft(attachmentOnly).await())
+            assertEquals(attachments(original), attachments(withTimeout(5_000) {
+                restored.state.first { it.draft.isEmpty() && it.draftReply == null && it.draftAttachmentSize == 42L }
+            }))
+            assertTrue(restored.updateDraft(DraftSnapshot(key, "", 21)).await())
+            withTimeout(5_000) { restored.state.first { it.draftAttachmentUrl == null && it.draftAttachmentName == null &&
+                it.draftAttachmentMime == null && it.draftAttachmentSize == null } }
+            assertEquals(null, database.messageDao().draft(ACCOUNT, PEER, "6:parentchild"))
+            assertEquals(StoredDraft(), ChatRepository(database).observeStoredDraft(key.copy(accountId = OTHER_ACCOUNT)).first())
+            assertEquals(StoredDraft(), ChatRepository(database).observeStoredDraft(key.copy(thread = thread.copy(parentId = ThreadId.require("other")))).first())
+        } finally {
+            restored.close()
+        }
+    }
+
+    @Test
+    fun attachmentOnlyDraftSurvivesPresenterSave() = runBlocking {
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = ChatRepository(database), scope = scope, enqueue = { _, _ -> true },
+        )
+        val draft = DraftSnapshot(
+            DirectConversationKey(ACCOUNT, PEER), "", 1,
+            attachmentUrl = "https://example.org/file", attachmentName = "file.png",
+            attachmentMime = "image/png", attachmentSize = 42L,
+        )
+        try {
+            assertTrue(presenter.updateDraft(draft).await())
+            assertTrue("Attachment-only accepted draft must remain durable", database.messageDao().directDraft(ACCOUNT, PEER) != null)
+        } finally {
+            presenter.close()
+        }
+    }
+
+    @Test
     fun semanticReplyDraftSurvivesPresenterRecreationAndSend() = runBlocking {
         val repository = ChatRepository(database)
         val reply = DraftReply("target-id", "$PEER/device", "target body", "Peer")
@@ -1888,7 +1975,10 @@ class ChatRepositoryPresenterTest {
         presenter.updateDraft(snapshot(ACCOUNT, PEER, "first")).await()
         val send = presenter.sendDraft(snapshot(ACCOUNT, PEER, "first"))
         sendEntered.await()
-        val newer = presenter.updateDraft(snapshot(ACCOUNT, PEER, "newer"))
+        val superseded = presenter.updateDraft(snapshot(ACCOUNT, PEER, "newer", revision = 2).copy(attachmentUrl = "old"))
+        val latest = snapshot(ACCOUNT, PEER, "newer", revision = 3).copy(
+            attachmentUrl = "https://example.org/latest", attachmentName = "latest.png", attachmentMime = "image/png", attachmentSize = 3L)
+        val newer = presenter.updateDraft(latest)
         val other = presenter.updateDraft(snapshot(ACCOUNT, OTHER_PEER, "other"))
         assertTrue(!newer.isCompleted)
         assertTrue(!other.isCompleted)
@@ -1897,6 +1987,10 @@ class ChatRepositoryPresenterTest {
         assertTrue(send.await())
         assertTrue(newer.await())
         assertTrue(other.await())
+        assertTrue(superseded.await())
+        assertEquals(StoredDraft("newer", attachmentUrl = latest.attachmentUrl, attachmentName = latest.attachmentName,
+            attachmentMime = latest.attachmentMime, attachmentSize = latest.attachmentSize),
+            repository.observeStoredDraft(latest.key).first())
         assertEquals("first", store.messages(ACCOUNT).single().body)
         assertEquals("newer", repository.observeDraft(ACCOUNT, PEER).first())
         assertEquals("other", repository.observeDraft(ACCOUNT, OTHER_PEER).first())
@@ -2402,8 +2496,10 @@ class ChatRepositoryPresenterTest {
                 ) != null
             },
         )
-        val first = snapshot(ACCOUNT, PEER, "first", revision = 1)
-        val newer = snapshot(ACCOUNT, PEER, "newer", revision = 2)
+        val first = snapshot(ACCOUNT, PEER, "first", revision = 1).copy(
+            attachmentUrl = "https://example.org/old", attachmentName = "old.png", attachmentMime = "image/png", attachmentSize = 1L)
+        val newer = snapshot(ACCOUNT, PEER, "newer", revision = 2).copy(
+            attachmentUrl = "https://example.org/new", attachmentName = "new.pdf", attachmentMime = "application/pdf", attachmentSize = 2L)
         presenter.updateDraft(first).await()
 
         val send = presenter.sendDraft(first)
@@ -2416,6 +2512,10 @@ class ChatRepositoryPresenterTest {
         assertTrue(update.await())
         assertEquals("first", store.messages(ACCOUNT).single().body)
         assertEquals("newer", repository.observeDraft(ACCOUNT, PEER).first())
+        assertEquals(StoredDraft("newer", attachmentUrl = newer.attachmentUrl, attachmentName = newer.attachmentName,
+            attachmentMime = newer.attachmentMime, attachmentSize = newer.attachmentSize),
+            repository.observeStoredDraft(newer.key).first())
+        presenter.close()
     }
 
     @Test

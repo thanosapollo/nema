@@ -1250,12 +1250,18 @@ abstract class MessageDao {
         replyToJid: String? = null,
         replyFallbackBody: String? = null,
         replyFallbackSender: String? = null,
+        attachmentUrl: String? = null,
+        attachmentName: String? = null,
+        attachmentMime: String? = null,
+        attachmentSize: Long? = null,
     ) {
         require(accountExists(accountId)) { "Unknown draft account" }
         if (peer(accountId, peerJid) == null) {
             insertPeer(PeerEntity(accountId, peerJid))
         }
-        if (body.isEmpty() && replyToId == null) {
+        if (body.isEmpty() && replyToId == null &&
+            attachmentUrl == null && attachmentName == null && attachmentMime == null && attachmentSize == null
+        ) {
             deleteDraft(accountId, peerJid, threadKey)
         } else {
             upsertDraft(
@@ -1269,6 +1275,10 @@ abstract class MessageDao {
                     replyToJid = replyToJid,
                     replyFallbackBody = replyFallbackBody,
                     replyFallbackSender = replyFallbackSender,
+                    attachmentUrl = attachmentUrl,
+                    attachmentName = attachmentName,
+                    attachmentMime = attachmentMime,
+                    attachmentSize = attachmentSize,
                 ),
             )
         }
@@ -2088,6 +2098,10 @@ class MessageStore private constructor(
                 replyToJid,
                 durableReplyBody,
                 durableReplySender,
+                attachmentUrl,
+                attachmentName,
+                attachmentMime,
+                attachmentSize,
             )
         }
         val outbox = composeInTransaction(intent)

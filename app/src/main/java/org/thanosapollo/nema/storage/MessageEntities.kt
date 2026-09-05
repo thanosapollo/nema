@@ -423,6 +423,10 @@ data class MessageDraftEntity(
     val replyToJid: String? = null,
     val replyFallbackBody: String? = null,
     val replyFallbackSender: String? = null,
+    val attachmentUrl: String? = null,
+    val attachmentName: String? = null,
+    val attachmentMime: String? = null,
+    val attachmentSize: Long? = null,
 ) {
     init {
         require(replyToId == null || replyToId.isNotEmpty()) { "Draft reply ID must not be empty" }

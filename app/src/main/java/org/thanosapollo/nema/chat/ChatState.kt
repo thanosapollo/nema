@@ -158,6 +158,10 @@ data class DraftReply(
 data class StoredDraft(
     val body: String = "",
     val reply: DraftReply? = null,
+    val attachmentUrl: String? = null,
+    val attachmentName: String? = null,
+    val attachmentMime: String? = null,
+    val attachmentSize: Long? = null,
 )
 
 data class TimelineMessage(
@@ -206,6 +210,10 @@ data class DirectChatState(
     val messages: List<TimelineMessage> = emptyList(),
     val draft: String = "",
     val draftReply: DraftReply? = null,
+    val draftAttachmentUrl: String? = null,
+    val draftAttachmentName: String? = null,
+    val draftAttachmentMime: String? = null,
+    val draftAttachmentSize: Long? = null,
     val typingLabel: String? = null,
     val pendingSendIdentities: Set<PendingSendIdentity> = emptySet(),
     val completedSendSnapshots: Map<PendingSendIdentity, DraftSnapshot> = emptyMap(),
@@ -232,6 +240,10 @@ data class DirectChatState(
             messages === other.messages &&
             draft == other.draft &&
             draftReply == other.draftReply &&
+            draftAttachmentUrl == other.draftAttachmentUrl &&
+            draftAttachmentName == other.draftAttachmentName &&
+            draftAttachmentMime == other.draftAttachmentMime &&
+            draftAttachmentSize == other.draftAttachmentSize &&
             typingLabel == other.typingLabel &&
             pendingSendIdentities == other.pendingSendIdentities &&
             completedSendSnapshots == other.completedSendSnapshots &&
@@ -256,6 +268,10 @@ data class DirectChatState(
         result = 31 * result + System.identityHashCode(messages)
         result = 31 * result + draft.hashCode()
         result = 31 * result + (draftReply?.hashCode() ?: 0)
+        result = 31 * result + (draftAttachmentUrl?.hashCode() ?: 0)
+        result = 31 * result + (draftAttachmentName?.hashCode() ?: 0)
+        result = 31 * result + (draftAttachmentMime?.hashCode() ?: 0)
+        result = 31 * result + (draftAttachmentSize?.hashCode() ?: 0)
         result = 31 * result + (typingLabel?.hashCode() ?: 0)
         result = 31 * result + pendingSendIdentities.hashCode()
         result = 31 * result + completedSendSnapshots.hashCode()
@@ -502,7 +518,15 @@ class ChatRepository(database: NemaDatabase) {
         saveDraft(DirectConversationKey(accountId, peerJid), body)
     }
 
-    suspend fun saveDraft(key: DirectConversationKey, body: String, reply: DraftReply? = null) {
+    suspend fun saveDraft(
+        key: DirectConversationKey,
+        body: String,
+        reply: DraftReply? = null,
+        attachmentUrl: String? = null,
+        attachmentName: String? = null,
+        attachmentMime: String? = null,
+        attachmentSize: Long? = null,
+    ) {
         dao.saveDraft(
             key.accountId,
             key.canonicalBarePeer,
@@ -512,6 +536,10 @@ class ChatRepository(database: NemaDatabase) {
             reply?.to,
             reply?.body,
             reply?.senderLabel,
+            attachmentUrl,
+            attachmentName,
+            attachmentMime,
+            attachmentSize,
         )
     }
 
@@ -687,6 +715,10 @@ class DirectChatPresenter(
             messages = selected.messages,
             draft = selected.draft.body,
             draftReply = selected.draft.reply,
+            draftAttachmentUrl = selected.draft.attachmentUrl,
+            draftAttachmentName = selected.draft.attachmentName,
+            draftAttachmentMime = selected.draft.attachmentMime,
+            draftAttachmentSize = selected.draft.attachmentSize,
             typingLabel = liveTypingLabel(
                 composers = selected.composers,
                 directName = selected.peerLabelForTyping(groupChat),
@@ -981,6 +1013,10 @@ class DirectChatPresenter(
                             pending.snapshot.key,
                             pending.snapshot.body,
                             pending.snapshot.reply,
+                            pending.snapshot.attachmentUrl,
+                            pending.snapshot.attachmentName,
+                            pending.snapshot.attachmentMime,
+                            pending.snapshot.attachmentSize,
                         )
                         if (!pending.snapshot.groupChat) {
                             notifyComposer(
@@ -1067,6 +1103,10 @@ internal fun canonicalDirectPeer(value: String): String? = runCatching {
 
 private fun MessageDraftEntity.toStoredDraft() = StoredDraft(
     body = body,
+    attachmentUrl = attachmentUrl,
+    attachmentName = attachmentName,
+    attachmentMime = attachmentMime,
+    attachmentSize = attachmentSize,
     reply = replyToId?.let {
         DraftReply(
             id = it,
