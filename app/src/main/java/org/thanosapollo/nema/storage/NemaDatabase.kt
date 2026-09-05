@@ -96,7 +96,7 @@ abstract class AccountDao {
     abstract suspend fun upsert(account: AccountEntity)
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
-    protected abstract suspend fun insertReconciliationState(state: AccountReconciliationStateEntity): Long
+    abstract suspend fun insertReconciliationState(state: AccountReconciliationStateEntity): Long
 
     @Query(
         """

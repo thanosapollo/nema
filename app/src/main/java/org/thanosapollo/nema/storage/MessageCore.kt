@@ -3298,6 +3298,67 @@ class MessageStore private constructor(
         mergePair(live, mam)
     }
 
+    suspend fun repairRoomArchiveDuplicates(
+        accountId: String,
+        room: String,
+        admit: () -> Boolean,
+    ): AccountReconciliationStateEntity? = database.withTransaction {
+        require(room.isNotEmpty() && '/' !in room)
+        if (!admit()) return@withTransaction null
+        val accounts = database.accountDao()
+        val repairKey = roomArchiveRepairKey(room)
+        accounts.insertReconciliationState(AccountReconciliationStateEntity(accountId, repairKey))
+        val state = requireNotNull(accounts.reconciliationState(accountId, repairKey))
+        if (state.status == ReconciliationRepairStatus.COMPLETE) return@withTransaction state
+        val dao = database.messageDao()
+        val messages = dao.messages(accountId)
+        val positions = dao.archivePositions(accountId).groupBy(ArchiveMessagePositionEntity::messageId)
+        val components = roomRepairComponents(messages, dao.trustedAliases(accountId), dao.conflicts(accountId),
+            dao.outboxes(accountId).mapTo(mutableSetOf(), OutboxEntity::messageId))
+        val pairs = mutableListOf<Pair<MessageEntity, MessageEntity>>()
+        var skipped = 0L
+        components.filter { it.messages.size > 1 && it.messages.any { row -> row.peerJid == room } }.forEach { component ->
+            val pair = component.pair(room, positions)
+            if (pair == null) {
+                skipped++
+            } else {
+                val (live, mam) = pair
+                val incoming = IncomingMessage(live.accountId, live.localMessageId, live.peerJid, live.senderJid,
+                    live.direction, live.messageKind, live.threadId, live.parentThreadId, live.body, null, emptyList(),
+                    attachmentUrl = live.attachmentUrl, attachmentName = live.attachmentName,
+                    attachmentMime = live.attachmentMime, attachmentSize = live.attachmentSize,
+                    replyToId = live.replyToId, replyToJid = live.replyToJid, replaceId = live.replaceId)
+                if (canMerge(live, mam, incoming)) pairs.add(pair) else skipped++
+            }
+        }
+        // Classification and compatibility of the entire frozen universe precede the first merge.
+        pairs.forEach { (live, mam) -> mergePair(live, mam) }
+        val after = dao.messages(accountId).size.toLong()
+        check(messages.size.toLong() - after == pairs.size.toLong())
+        check(accounts.completeReconciliationState(accountId, messages.size.toLong(), after,
+            pairs.size.toLong(), skipped, repairKey) == 1) { "Room repair completion changed" }
+        requireNotNull(accounts.reconciliationState(accountId, repairKey))
+    }
+
+    suspend fun attemptRoomArchiveRepair(accountId: String, room: String, admit: () -> Boolean): Boolean {
+        var admitted = false
+        return try {
+            repairRoomArchiveDuplicates(accountId, room) { admit().also { admitted = it } } != null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            if (admitted) database.withTransaction {
+                if (admit()) {
+                    val accounts = database.accountDao()
+                    val key = roomArchiveRepairKey(room)
+                    accounts.insertReconciliationState(AccountReconciliationStateEntity(accountId, key))
+                    accounts.recordCaughtReconciliationError(accountId, key)
+                }
+            }
+            false
+        }
+    }
+
     suspend fun repairIdentitylessDuplicates(accountId: String): AccountReconciliationStateEntity? =
         database.withTransaction {
             val accountDao = database.accountDao()
