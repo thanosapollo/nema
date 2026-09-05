@@ -1148,6 +1148,10 @@ class SessionRuntimeTest {
         withTimeout(5_000) { oldConnection.gatedBookmarkReadEntered.await() }
         assertEquals(ConnectionCommandOutcome.RUNNING, runtime.activate(second.id))
         val newConnection = connections.created.last()
+        // Keep startup restoration from reading the bookmark published by the explicit join.
+        withContext(Dispatchers.Default) {
+            withTimeout(5_000) { newConnection.initialBookmarkReadCompleted.await() }
+        }
         assertTrue(runtime.joinMuc("new@conference.example.org", nick = "New"))
         runCurrent()
         assertTrue(oldConnection.publishedBookmarks.isEmpty())
