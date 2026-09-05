@@ -18,6 +18,11 @@ import androidx.core.app.ActivityOptionsCompat
 import androidx.navigationevent.compose.LocalNavigationEventDispatcherOwner
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.collectAsState
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeout
+import org.thanosapollo.nema.chat.RoutePresentationFixture
+import org.thanosapollo.nema.chat.ChatContentStatus
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,6 +60,8 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.test.swipe
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performSemanticsAction
@@ -122,6 +129,143 @@ private val hasNoRole = SemanticsMatcher.keyNotDefined(SemanticsProperties.Role)
 class ConversationContentTest {
     @get:Rule
     val composeRule = createComposeRule()
+
+    @Test
+    fun presenterLoadingAndFailureHideOldActionsAndPreserveHomeAndDrafts() {
+        RoutePresentationFixture().use { fixture ->
+            val presenter = fixture.presenter()
+            var profileOpens = 0
+            runBlocking { withTimeout(5_000) { presenter.state.first { it.conversations.size == 31 } } }
+            composeRule.setContent {
+                MaterialTheme {
+                    val current by presenter.state.collectAsState()
+                    ConversationContent(
+                        state = current, connectionStatus = "Connected",
+                        onSelectPeer = { peer -> fixture.scope.launch { presenter.selectPeer(peer) }; true },
+                        onCloseConversation = presenter::closeConversation,
+                        onDraftChange = presenter::updateDraft, onSend = presenter::sendDraft,
+                        onOpenOwnProfile = { profileOpens++ },
+                    )
+                }
+            }
+            composeRule.onNodeWithTag("home-conversations").performScrollToIndex(15)
+            val anchor = composeRule.onNodeWithTag("home-conversations").fetchSemanticsNode()
+                .config[SemanticsProperties.VerticalScrollAxisRange].value()
+            assertTrue(anchor > 0f)
+            val listBounds = composeRule.onNodeWithTag("home-conversations").fetchSemanticsNode().boundsInRoot
+            val rowPoint = listBounds.center
+            val fabPoint = composeRule.onNodeWithContentDescription("New chat").fetchSemanticsNode().boundsInRoot.center
+            val searchPoint = composeRule.onNodeWithContentDescription("Search").fetchSemanticsNode().boundsInRoot.center
+            val profileBounds = composeRule.onNodeWithContentDescription("Own profile").fetchSemanticsNode().boundsInRoot
+            // Shell Back covers Own profile; its real touch below must close only the route.
+            fun touchCoveredHome() {
+                val occurrence = presenter.state.value.routeOccurrence
+                composeRule.onRoot().performTouchInput {
+                    click(rowPoint)
+                    click(fabPoint)
+                    click(searchPoint)
+                    swipe(rowPoint, rowPoint + androidx.compose.ui.geometry.Offset(0f, -100f))
+                }
+                composeRule.waitForIdle()
+                if (occurrence != presenter.state.value.routeOccurrence) {
+                    fixture.gate.release()
+                    composeRule.waitUntil { presenter.state.value.contentStatus == ChatContentStatus.Ready }
+                }
+                assertEquals(occurrence, presenter.state.value.routeOccurrence)
+                assertEquals(0, profileOpens)
+                composeRule.onNodeWithText("Cancel").assertDoesNotExist()
+            }
+            runBlocking { presenter.selectPeer(fixture.peer) }
+            composeRule.waitUntil { presenter.state.value.contentStatus == ChatContentStatus.Ready && presenter.state.value.selectedPeer == fixture.peer }
+            composeRule.onNodeWithTag("message-composer").assertTextEquals("stored A")
+            composeRule.onNodeWithTag("composer-reply-preview").assertIsDisplayed()
+            composeRule.onNodeWithTag("message-composer").performTextReplacement("retained edit")
+            val entered = fixture.gate.hold()
+            fixture.scope.launch { presenter.selectPeer(fixture.other) }
+            runBlocking { withTimeout(5_000) { entered.await() } }
+            composeRule.waitUntil { presenter.state.value.selectedPeer == fixture.other }
+            composeRule.onNodeWithText("Loading conversation").assertIsDisplayed()
+            composeRule.onNodeWithTag("message-composer").assertDoesNotExist()
+            composeRule.onNodeWithTag("message-bubble-message-0").assertDoesNotExist()
+            composeRule.onNodeWithContentDescription("Open contact info").assertDoesNotExist()
+            touchCoveredHome()
+            assertTrue(composeRule.onNodeWithText("Back").fetchSemanticsNode().boundsInRoot.contains(profileBounds.center))
+            composeRule.onRoot().performTouchInput { click(profileBounds.center) }
+            assertEquals(0, profileOpens)
+            composeRule.waitUntil { presenter.state.value.selectedPeer == null }
+            val restoredAnchor = composeRule.onNodeWithTag("home-conversations").fetchSemanticsNode()
+                .config[SemanticsProperties.VerticalScrollAxisRange].value()
+            assertEquals(anchor, restoredAnchor)
+            composeRule.onNodeWithText("Search conversations").assertDoesNotExist()
+            fixture.scope.launch { presenter.selectPeer(fixture.other) }
+            composeRule.waitUntil { presenter.state.value.selectedPeer == fixture.other }
+            fixture.gate.release()
+            composeRule.waitUntil { presenter.state.value.contentStatus == ChatContentStatus.Ready }
+            composeRule.onNodeWithTag("message-composer").assertTextEquals("stored B")
+            fixture.failLive.complete(Unit)
+            composeRule.waitUntil { presenter.state.value.contentStatus == ChatContentStatus.Failed }
+            composeRule.onNodeWithText("Unable to load conversation").assertIsDisplayed()
+            touchCoveredHome()
+            composeRule.onNodeWithTag("message-composer").assertDoesNotExist()
+            assertTrue(composeRule.onNodeWithText("Back").fetchSemanticsNode().boundsInRoot.contains(profileBounds.center))
+            composeRule.onRoot().performTouchInput { click(profileBounds.center) }
+            assertEquals(0, profileOpens)
+            composeRule.waitUntil { presenter.state.value.selectedPeer == null }
+            assertEquals(anchor, composeRule.onNodeWithTag("home-conversations").fetchSemanticsNode()
+                .config[SemanticsProperties.VerticalScrollAxisRange].value())
+            composeRule.onNodeWithText("Search conversations").assertDoesNotExist()
+            runBlocking { presenter.selectPeer(fixture.peer) }
+            composeRule.waitUntil { presenter.state.value.contentStatus == ChatContentStatus.Ready }
+            composeRule.onNodeWithTag("message-composer").assertTextEquals("retained edit")
+        }
+    }
+
+    @Test
+    fun presenterSendCompletionAndAccountReplacementSurviveLoading() {
+        RoutePresentationFixture().use { fixture ->
+            val presenter = fixture.presenter()
+            val replacement = fixture.presenter("replacement")
+            lateinit var replace: () -> Unit
+            composeRule.setContent {
+                var owner by remember { mutableStateOf(presenter) }
+                replace = { owner = replacement }
+                MaterialTheme {
+                    val current by owner.state.collectAsState()
+                    ConversationContent(
+                        state = current, connectionStatus = "Connected",
+                        onSelectPeer = owner::selectPeer, onCloseConversation = owner::closeConversation,
+                        onDraftChange = owner::updateDraft, onSend = owner::sendDraft,
+                        onAcknowledgeCompletedSends = owner::acknowledgeCompletedSends,
+                    )
+                }
+            }
+            runBlocking { presenter.selectPeer(fixture.peer) }
+            composeRule.waitUntil { presenter.state.value.selectedPeer == fixture.peer && presenter.state.value.contentStatus == ChatContentStatus.Ready }
+            composeRule.onNodeWithTag("message-composer").assertTextEquals("stored A")
+            composeRule.onNodeWithContentDescription("Send").performClick()
+            runBlocking { withTimeout(5_000) { fixture.sendEntered.await() } }
+            assertTrue(presenter.state.value.pendingSendIdentities.isNotEmpty())
+            val entered = fixture.gate.hold()
+            fixture.scope.launch { presenter.selectPeer(fixture.other) }
+            runBlocking { withTimeout(5_000) { entered.await() } }
+            composeRule.waitUntil { presenter.state.value.selectedPeer == fixture.other }
+            assertTrue(presenter.state.value.pendingSendIdentities.isNotEmpty())
+            fixture.sendRelease.complete(Unit)
+            composeRule.waitUntil { presenter.state.value.completedSendSnapshots.isNotEmpty() }
+            fixture.scope.launch { presenter.selectPeer(fixture.peer) }
+            composeRule.waitUntil { presenter.state.value.selectedPeer == fixture.peer }
+            composeRule.onNodeWithTag("message-composer").assertDoesNotExist()
+            fixture.gate.release()
+            composeRule.waitUntil { presenter.state.value.contentStatus == ChatContentStatus.Ready }
+            composeRule.onNodeWithTag("message-composer").assert(
+                SemanticsMatcher.expectValue(SemanticsProperties.EditableText, androidx.compose.ui.text.AnnotatedString("")),
+            )
+            runBlocking { replacement.selectPeer(fixture.peer) }
+            composeRule.runOnIdle { replace() }
+            composeRule.waitUntil { replacement.state.value.contentStatus == ChatContentStatus.Ready && replacement.state.value.selectedPeer == fixture.peer }
+            composeRule.onNodeWithTag("message-composer").assertTextEquals("other account draft")
+        }
+    }
 
     @Test
     fun sentTimeFormatsAtPresentationTimezone() {
@@ -1068,45 +1212,39 @@ class ConversationContentTest {
 
     @Test
     fun roomJoinIdentityIgnoresSubjectAndOccupantUpdates() {
-        val room = state(ACCOUNT_A, "room@conference.example.org").copy(
-            selectedPeerGroupChat = true,
-            selectedRoomSubject = "First subject",
-            selectedRoomOccupantCount = 2,
-        )
-        lateinit var show: (DirectChatState) -> Unit
-        var joins = 0
-        composeRule.setContent {
-            MaterialTheme {
-                var current by remember { mutableStateOf(room) }
-                show = { current = it }
-                ConversationContent(
-                    state = current,
-                    connectionStatus = "Connected",
-                    onSelectPeer = { true },
-                    onJoinRoom = {
-                        joins++
-                        true
-                    },
-                    onCloseConversation = {},
-                    onDraftChange = { CompletableDeferred(true) },
-                    onSend = { CompletableDeferred(true) },
-                )
+        RoutePresentationFixture().use { fixture ->
+            runBlocking { fixture.repository.markRoom(fixture.account, fixture.peer) }
+            fixture.room.value = org.thanosapollo.nema.xmpp.muc.RoomView(fixture.peer, "First subject")
+            val presenter = fixture.presenter()
+            var navigationJoins = 0
+            composeRule.setContent {
+                MaterialTheme {
+                    val current by presenter.state.collectAsState()
+                    ConversationContent(
+                        state = current, connectionStatus = "Connected",
+                        onSelectPeer = presenter::selectPeer, onCloseConversation = presenter::closeConversation,
+                        onJoinRoom = { navigationJoins++; presenter.joinRoom(it) },
+                        onDraftChange = presenter::updateDraft, onSend = presenter::sendDraft,
+                    )
+                }
             }
-        }
-        composeRule.waitUntil { joins == 1 }
-
-        composeRule.runOnIdle {
-            show(
-                room.copy(
-                    selectedRoomSubject = "Updated subject",
-                    selectedRoomOccupantCount = 7,
-                ),
+            runBlocking { presenter.selectPeer(fixture.peer) }
+            composeRule.waitUntil { fixture.joins.get() == 1 && presenter.state.value.selectedRoomSubject == "First subject" }
+            val occurrence = presenter.state.value.routeOccurrence
+            fixture.room.value = org.thanosapollo.nema.xmpp.muc.RoomView(
+                fixture.peer, "Updated subject", occupants = List(7) { org.thanosapollo.nema.xmpp.muc.RoomOccupant("nick-$it") },
             )
+            composeRule.waitUntil { presenter.state.value.selectedRoomOccupantCount == 7 }
+            composeRule.onNodeWithText("Updated subject").assertIsDisplayed()
+            assertEquals(occurrence, presenter.state.value.routeOccurrence)
+            val thread = ThreadRef(ThreadId.require("room-topic"), ThreadId.require("parent"))
+            runBlocking { presenter.continueThread(thread) }
+            composeRule.waitUntil { presenter.state.value.contentStatus == ChatContentStatus.Ready && presenter.state.value.selectedThread == thread }
+            composeRule.waitForIdle()
+            assertEquals(thread, presenter.state.value.selectedThread)
+            assertEquals(1, fixture.joins.get())
+            assertEquals(0, navigationJoins)
         }
-        composeRule.waitForIdle()
-
-        assertEquals(1, joins)
-        composeRule.onNodeWithText("Updated subject").assertIsDisplayed()
     }
 
     @Test

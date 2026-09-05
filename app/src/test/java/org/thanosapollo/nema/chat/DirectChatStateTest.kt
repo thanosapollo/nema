@@ -6,6 +6,20 @@ import org.junit.Test
 
 class DirectChatStateTest {
     @Test
+    fun routeOccurrencesAndContentStatusAreObservable() {
+        val state = DirectChatState("account", routeOccurrence = ChatRouteOccurrence(ChatRoute("a@example.org"), 1))
+        assertEquals(state, state.copy())
+        assertEquals(state.hashCode(), state.copy().hashCode())
+        assertNotEquals(state, state.copy(routeOccurrence = state.routeOccurrence.copy(generation = 2)))
+        assertNotEquals(state.hashCode(), state.copy(routeOccurrence = state.routeOccurrence.copy(generation = 2)).hashCode())
+        for (status in listOf(ChatContentStatus.Loading, ChatContentStatus.Failed)) {
+            val changed = state.copy(contentStatus = status)
+            assertNotEquals(state, changed)
+            assertEquals(changed.hashCode(), changed.copy().hashCode())
+        }
+    }
+
+    @Test
     fun timelineEmissionsAreComparedAsSnapshots() {
         val messages = timelineSnapshot()
         val state = DirectChatState(accountId = "account", messages = messages)

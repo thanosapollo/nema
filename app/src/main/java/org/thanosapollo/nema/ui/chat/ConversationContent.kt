@@ -99,6 +99,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLayoutDirection
@@ -135,6 +136,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.resume
 import org.thanosapollo.nema.chat.DeliveryPresentation
+import org.thanosapollo.nema.chat.ChatContentStatus
 import org.thanosapollo.nema.chat.DirectChatState
 import org.thanosapollo.nema.chat.DirectConversationKey
 import org.thanosapollo.nema.chat.DraftCorrection
@@ -324,7 +326,27 @@ fun ConversationContent(
                     )
                     .then(if (selectedPeer != null) Modifier.clearAndSetSemantics { } else Modifier),
             )
-            if (selectedPeer != null) {
+            if (selectedPeer != null && state.contentStatus != ChatContentStatus.Ready) {
+                val close = { if (state.selectedThread != null) onCloseThread() else onCloseConversation() }
+                BackHandler { close() }
+                Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
+                    .pointerInput(Unit) {
+                        awaitPointerEventScope {
+                            while (true) {
+                                // Main pass reaches children first, preserving the Back button.
+                                awaitPointerEvent().changes.forEach { it.consume() }
+                            }
+                        }
+                    }) {
+                    TextButton(onClick = { close() }) { Text("Back") }
+                    Text(selectedPeer)
+                    state.selectedThread?.let { Text("Thread ${it.id.value}") }
+                    Text(if (state.contentStatus == ChatContentStatus.Failed) {
+                        "Unable to load conversation"
+                    } else "Loading conversation")
+                }
+            }
+            if (selectedPeer != null && state.contentStatus == ChatContentStatus.Ready) {
                 val conversationKey = DirectConversationKey(
                     state.accountId,
                     selectedPeer,
@@ -494,11 +516,6 @@ fun ConversationContent(
                                 ),
                             )
                         }
-                    }
-                }
-                LaunchedEffect(selectedPeer, venue.messageKind) {
-                    if (venue is ConversationVenue.Room) {
-                        onJoinRoom(selectedPeer)
                     }
                 }
                 var focusComposerWhenReady by remember { mutableStateOf(false) }

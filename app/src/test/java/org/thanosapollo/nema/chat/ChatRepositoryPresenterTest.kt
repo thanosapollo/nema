@@ -142,7 +142,7 @@ class ChatRepositoryPresenterTest {
         )
         presenter.state.first { it.conversations.singleOrNull()?.unreadCount == 1 }
         assertTrue(presenter.selectPeer(PEER))
-        presenter.state.first { it.selectedPeer == PEER && it.conversations.single().unreadCount == 0 }
+        presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == PEER && it.conversations.single().unreadCount == 0 }
 
         store.ingest(incoming(ACCOUNT, "later", "later body"))
         presenter.state.first { it.conversations.single().unreadCount == 1 }
@@ -544,7 +544,7 @@ class ChatRepositoryPresenterTest {
             enqueue = { _, _ -> true },
         )
         assertTrue(presenter.selectPeer(room))
-        presenter.state.first { it.selectedPeer == room && it.messages.isNotEmpty() }
+        presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == room && it.messages.isNotEmpty() }
         assertEquals(false, repository.observeConversations(ACCOUNT).first().single().groupChat)
         assertEquals(false, presenter.state.value.selectedPeerGroupChat)
         presenter.close()
@@ -678,10 +678,10 @@ class ChatRepositoryPresenterTest {
         presenter.state.first { it.currentSession?.id?.value == "session" }
 
         assertTrue(presenter.startNewThread())
-        val opened = presenter.state.first { it.selectedThread?.id?.value == "opened-child" }
+        val opened = presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedThread?.id?.value == "opened-child" }
         assertEquals("session", opened.selectedThread?.parentId?.value)
         presenter.closeThread()
-        presenter.state.first { it.selectedThread == null }
+        presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedThread == null }
         assertTrue(presenter.sendDraftAsNewThread(snapshot(ACCOUNT, PEER, "quick topic")).await())
         assertEquals("session", sent.single().outboundThread?.parentId?.value)
         presenter.close()
@@ -702,7 +702,7 @@ class ChatRepositoryPresenterTest {
 
         assertTrue(presenter.startNewThread())
 
-        val opened = presenter.state.first { it.selectedThread?.id?.value == "first-child" }
+        val opened = presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedThread?.id?.value == "first-child" }
         val session = requireNotNull(opened.currentSession)
         assertEquals(session.id, opened.selectedThread?.parentId)
         val outbox = store.composeDirectDraft(
@@ -748,15 +748,15 @@ class ChatRepositoryPresenterTest {
         )
 
         assertTrue(presenter.selectPeer(PEER))
-        val room = presenter.state.first { it.selectedPeerGroupChat && it.recentThreads.isNotEmpty() }
+        val room = presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeerGroupChat && it.recentThreads.isNotEmpty() }
         assertEquals(null, room.currentSession)
         assertEquals(listOf(MessageKind.GROUPCHAT), room.recentThreads.map(RecentThread::messageKind))
 
         assertTrue(presenter.startNewThread())
-        val opened = presenter.state.first { it.selectedThread?.id?.value == "opened-room-topic" }
+        val opened = presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedThread?.id?.value == "opened-room-topic" }
         assertEquals(null, opened.selectedThread?.parentId)
         presenter.closeThread()
-        presenter.state.first { it.selectedThread == null }
+        presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedThread == null }
         assertTrue(
             presenter.sendDraftAsNewThread(
                 snapshot(ACCOUNT, PEER, "quick room topic").copy(groupChat = true),
@@ -1448,12 +1448,12 @@ class ChatRepositoryPresenterTest {
         val first = presenter(ACCOUNT, SELF)
         assertTrue(first.selectPeer(PEER))
         assertTrue(first.startNewThread())
-        val root = first.state.first { it.selectedThread?.id?.value == "thread-a" }.selectedThread!!
+        val root = first.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedThread?.id?.value == "thread-a" }.selectedThread!!
         first.updateDraft(
             DraftSnapshot(DirectConversationKey(ACCOUNT, PEER, root), "root draft", 1),
         ).await()
         assertTrue(first.startChildThread())
-        val child = first.state.first { it.selectedThread?.id?.value == "thread-b" }.selectedThread!!
+        val child = first.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedThread?.id?.value == "thread-b" }.selectedThread!!
         first.updateDraft(
             DraftSnapshot(DirectConversationKey(ACCOUNT, PEER, child), "child draft", 1),
         ).await()
@@ -1467,7 +1467,7 @@ class ChatRepositoryPresenterTest {
             threadingPolicy = ThreadingPolicy { ThreadId.require(threadIds.removeFirst()) },
             restoreRouteOnStart = true,
         )
-        val restoredState = restored.state.first { it.selectedThread?.id?.value == "thread-b" }
+        val restoredState = restored.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedThread?.id?.value == "thread-b" }
         assertEquals("thread-a", restoredState.selectedThread?.parentId?.value)
         assertEquals("child draft", restoredState.draft)
         assertEquals("root draft", repository.observeDraft(DirectConversationKey(ACCOUNT, PEER, root)).first())
@@ -1504,7 +1504,7 @@ class ChatRepositoryPresenterTest {
 
         assertTrue(first.startThreadFrom(target))
 
-        val opened = first.state.first { it.selectedThread?.id?.value == "thread-reply" }
+        val opened = first.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedThread?.id?.value == "thread-reply" }
         val expectedReply = DraftReply("target-wire-id", "$PEER/device", "target body", "device")
         assertEquals(expectedReply, opened.draftReply)
         assertEquals("", opened.draft)
@@ -1519,7 +1519,7 @@ class ChatRepositoryPresenterTest {
             enqueue = { _, snapshot -> sent = snapshot; true },
             restoreRouteOnStart = true,
         )
-        val restoredState = restored.state.first { it.selectedThread?.id?.value == "thread-reply" }
+        val restoredState = restored.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedThread?.id?.value == "thread-reply" }
         assertEquals(expectedReply, restoredState.draftReply)
         assertEquals("", restoredState.draft)
         val replyKey = DirectConversationKey(ACCOUNT, PEER, requireNotNull(restoredState.selectedThread))
@@ -1573,7 +1573,7 @@ class ChatRepositoryPresenterTest {
         assertTrue(!presenter.startThreadFrom(untrusted))
         assertEquals(null, presenter.state.value.selectedThread)
         assertTrue(presenter.selectPeer(OTHER_PEER))
-        presenter.state.first { it.selectedPeer == OTHER_PEER }
+        presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == OTHER_PEER }
         assertTrue(!presenter.startThreadFrom(threaded))
         assertEquals(OTHER_PEER, presenter.state.value.selectedPeer)
         assertTrue(presenter.selectPeer(PEER))
@@ -1588,7 +1588,7 @@ class ChatRepositoryPresenterTest {
             ThreadId.require("parent-thread"),
             ThreadId.require("root-thread"),
         )
-        val opened = presenter.state.first { it.selectedThread == expectedThread }
+        val opened = presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedThread == expectedThread }
         assertEquals(expectedThread, opened.selectedThread)
         assertEquals(ChatRoute(PEER, expectedThread), repository.observeRoute(ACCOUNT).first())
         val draftKey = DirectConversationKey(ACCOUNT, PEER, expectedThread)
@@ -1872,7 +1872,7 @@ class ChatRepositoryPresenterTest {
             restoreRouteOnStart = true,
         )
 
-        val state = restored.state.first { it.selectedPeer == PEER && it.draft == "answer" }
+        val state = restored.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == PEER && it.draft == "answer" }
         assertEquals(reply, state.draftReply)
         assertTrue(
             restored.sendDraft(
@@ -2027,7 +2027,7 @@ class ChatRepositoryPresenterTest {
         presenter.state.first { it.conversationsReady && it.conversations.isNotEmpty() }
         assertEquals(0, identityCalls)
         assertTrue(presenter.selectPeer(PEER))
-        presenter.state.first { it.selectedPeer == PEER }
+        presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == PEER }
         while (identityCalls == 0) {
             yield()
         }
@@ -2056,7 +2056,7 @@ class ChatRepositoryPresenterTest {
             ensurePeerIdentities = { _, _ -> releaseIdentities.await() },
         )
         assertTrue(presenter.selectPeer(PEER))
-        assertEquals(PEER, presenter.state.first { it.selectedPeer == PEER }.selectedPeer)
+        assertEquals(PEER, presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == PEER }.selectedPeer)
         assertTrue(!releaseIdentities.isCompleted)
         releaseIdentities.complete(Unit)
         presenter.close()
@@ -2078,7 +2078,7 @@ class ChatRepositoryPresenterTest {
         assertTrue(presenter.joinRoom("room@conference.example.org"))
         assertEquals(
             "room@conference.example.org",
-            presenter.state.first { it.selectedPeer == "room@conference.example.org" }.selectedPeer,
+            presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == "room@conference.example.org" }.selectedPeer,
         )
         assertTrue(!joined.isCompleted)
         joined.complete(Unit)
@@ -2119,9 +2119,9 @@ class ChatRepositoryPresenterTest {
             enqueue = { _, _ -> true },
         )
         assertTrue(presenter.selectPeer(PEER))
-        presenter.state.first { it.selectedPeer == PEER }
+        presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == PEER }
         presenter.closeConversation()
-        assertEquals(null, presenter.state.first { it.selectedPeer == null }.selectedPeer)
+        assertEquals(null, presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == null }.selectedPeer)
         presenter.close()
     }
 
@@ -2135,10 +2135,10 @@ class ChatRepositoryPresenterTest {
             enqueue = { _, _ -> true },
         )
         assertTrue(presenter.selectPeer(PEER))
-        presenter.state.first { it.selectedPeer == PEER }
+        presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == PEER }
         presenter.closeConversation()
         assertTrue(presenter.selectPeer(OTHER_PEER))
-        assertEquals(OTHER_PEER, presenter.state.first { it.selectedPeer == OTHER_PEER }.selectedPeer)
+        assertEquals(OTHER_PEER, presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == OTHER_PEER }.selectedPeer)
         assertEquals(
             OTHER_PEER,
             repository.observeRoute(ACCOUNT).first { it?.peerJid == OTHER_PEER }?.peerJid,
@@ -2160,7 +2160,7 @@ class ChatRepositoryPresenterTest {
             restoreRouteOnStart = true,
         )
         assertTrue(presenter.selectPeer(OTHER_PEER))
-        assertEquals(OTHER_PEER, presenter.state.first { it.selectedPeer == OTHER_PEER }.selectedPeer)
+        assertEquals(OTHER_PEER, presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == OTHER_PEER }.selectedPeer)
         assertEquals(
             OTHER_PEER,
             repository.observeRoute(ACCOUNT).first { it?.peerJid == OTHER_PEER }?.peerJid,
@@ -2183,7 +2183,7 @@ class ChatRepositoryPresenterTest {
 
         assertTrue(presenter.startChildThreadOf(parent))
 
-        val selected = presenter.state.first { it.selectedThread?.id?.value == "reply-thread" }.selectedThread
+        val selected = presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedThread?.id?.value == "reply-thread" }.selectedThread
         assertEquals(parent.id, selected?.parentId)
         presenter.close()
     }
@@ -2317,7 +2317,7 @@ class ChatRepositoryPresenterTest {
             )
             try {
                 assertTrue(presenter.selectPeer(PEER))
-                presenter.state.first { it.selectedPeer == PEER }
+                presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == PEER }
                 val captured = snapshot(ACCOUNT, PEER, "accepted topic")
                 val send = presenter.sendDraftAsNewThread(captured)
                 entered.await()
@@ -2345,7 +2345,7 @@ class ChatRepositoryPresenterTest {
                     // A stale topic in A->B->A is observable via child creation.
                     assertTrue(!presenter.startChildThread())
                     assertTrue(presenter.continueThread(marker))
-                    val observed = presenter.state.first { it.selectedThread == marker }
+                    val observed = presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedThread == marker }
                     assertEquals(if (destination == "return") PEER else OTHER_PEER, observed.selectedPeer)
                 }
             } finally {
@@ -2396,6 +2396,199 @@ class ChatRepositoryPresenterTest {
         }
     }
 
+    @Test
+    fun restoredRoomThreadJoinsWithoutResettingRoute() = runBlocking {
+        val repository = ChatRepository(database)
+        val thread = ThreadRef(ThreadId.require("child"), ThreadId.require("parent"))
+        repository.markRoom(ACCOUNT, PEER)
+        repository.saveRoute(ACCOUNT, ChatRoute(PEER, thread))
+        val joined = CompletableDeferred<Unit>()
+        var joins = 0
+        val presenter = DirectChatPresenter(
+            accountConfiguration(ACCOUNT, SELF), repository, scope, { _, _ -> true },
+            joinMuc = { joins++; joined.complete(Unit); true }, restoreRouteOnStart = true,
+        )
+        try {
+            val ready = withTimeout(5_000) { presenter.state.first { it.selectedPeerGroupChat && it.contentStatus == ChatContentStatus.Ready } }
+            withTimeout(5_000) { joined.await() }
+            assertEquals(thread, ready.selectedThread)
+            assertEquals(ChatRoute(PEER, thread), ready.routeOccurrence.route)
+            assertEquals(ready.routeOccurrence, presenter.state.value.routeOccurrence)
+            presenter.continueThread(thread)
+            val reselected = withTimeout(5_000) { presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.routeOccurrence != ready.routeOccurrence } }
+            assertEquals(thread, reselected.selectedThread)
+            assertEquals(1, joins)
+        } finally {
+            presenter.close()
+        }
+    }
+
+    @Test
+    fun heldRoomQueriesExposeEveryOccurrenceAndDiscardOldContent() = runBlocking {
+        MessageStore(database).ingest(incoming(ACCOUNT, "old-action", "old actionable body"))
+        val gate = RouteQueryGate()
+        database.close()
+        database = Room.databaseBuilder(context, NemaDatabase::class.java, databaseName)
+            .setQueryCoroutineContext(gate).allowMainThreadQueries().build()
+        val presenter = DirectChatPresenter(accountConfiguration(ACCOUNT, SELF), ChatRepository(database), scope, { _, _ -> true })
+        try {
+            presenter.selectPeer(PEER)
+            val ready = withTimeout(5_000) { presenter.state.first { it.messages.isNotEmpty() } }
+            var generation = ready.routeOccurrence.generation
+            val entered = gate.hold()
+            val selections = mutableListOf<kotlinx.coroutines.Deferred<Boolean>>()
+            suspend fun loading(peer: String, thread: ThreadRef? = null) {
+                val loading = withTimeout(5_000) {
+                    presenter.state.first { it.routeOccurrence.generation > generation }
+                }
+                generation = loading.routeOccurrence.generation
+                assertEquals(ACCOUNT, loading.accountId)
+                assertEquals(peer, loading.selectedPeer)
+                assertEquals(thread, loading.selectedThread)
+                assertEquals(ChatContentStatus.Loading, loading.contentStatus)
+                assertTrue(loading.messages.isEmpty())
+                assertEquals("", loading.draft)
+                assertEquals(null, loading.draftReply)
+                assertEquals(null, loading.selectedPeerDisplayName)
+            }
+            selections += async(start = CoroutineStart.UNDISPATCHED) { presenter.selectPeer(OTHER_PEER) }
+            withTimeout(5_000) { entered.await() }
+            loading(OTHER_PEER)
+            for (peer in listOf(PEER, PEER)) {
+                selections += async(start = CoroutineStart.UNDISPATCHED) { presenter.selectPeer(peer) }
+                loading(peer)
+            }
+            val child = ThreadId.require("same-child")
+            for (parent in listOf("first-parent", "second-parent")) {
+                val thread = ThreadRef(child, ThreadId.require(parent))
+                assertTrue(presenter.continueThread(thread))
+                loading(PEER, thread)
+            }
+            presenter.closeConversation()
+            val home = withTimeout(5_000) { presenter.state.first { it.selectedPeer == null } }
+            assertTrue(home.routeOccurrence.generation > generation)
+            generation = home.routeOccurrence.generation
+            selections += async(start = CoroutineStart.UNDISPATCHED) { presenter.selectPeer(PEER) }
+            loading(PEER)
+            val finalOccurrence = presenter.state.value.routeOccurrence
+            gate.release()
+            selections.forEach { assertTrue(it.await()) }
+            val reopened = withTimeout(5_000) { presenter.state.first { it.contentStatus == ChatContentStatus.Ready } }
+            assertEquals(finalOccurrence, reopened.routeOccurrence)
+            assertEquals("old-action", reopened.messages.single().id)
+        } finally {
+            gate.release()
+            presenter.close()
+        }
+    }
+
+    @Test
+    fun cachedDraftReadyThenLiveFailureCanRetrySameOccurrenceRoute() = runBlocking {
+        val repository = ChatRepository(database)
+        val draft = snapshot(ACCOUNT, PEER, "stored before opening")
+        repository.saveDraft(draft.key, draft.body)
+        val entered = CompletableDeferred<Unit>()
+        val fail = CompletableDeferred<Unit>()
+        var shouldFail = true
+        val presenter = DirectChatPresenter(
+            accountConfiguration(ACCOUNT, SELF), repository, scope, { _, _ -> true },
+            observeRtt = {
+                kotlinx.coroutines.flow.flow {
+                    if (shouldFail) {
+                        entered.complete(Unit)
+                        fail.await()
+                        throw IllegalStateException("controlled live failure")
+                    }
+                    emit(null)
+                }
+            },
+        )
+        try {
+            presenter.selectPeer(PEER)
+            val ready = withTimeout(5_000) { presenter.state.first { it.selectedPeer == PEER && it.contentStatus == ChatContentStatus.Ready } }
+            assertEquals("stored before opening", ready.draft)
+            entered.await()
+            fail.complete(Unit)
+            val failed = withTimeout(5_000) { presenter.state.first { it.contentStatus == ChatContentStatus.Failed } }
+            assertEquals(ready.routeOccurrence, failed.routeOccurrence)
+            assertEquals("", failed.draft)
+            assertTrue(failed.messages.isEmpty())
+            shouldFail = false
+            presenter.selectPeer(PEER)
+            val recovered = withTimeout(5_000) { presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.routeOccurrence != ready.routeOccurrence } }
+            assertEquals("stored before opening", recovered.draft)
+            assertEquals(PEER, recovered.selectedPeer)
+        } finally {
+            fail.complete(Unit)
+            presenter.close()
+        }
+    }
+
+    @Test
+    fun failedRoomReadAndListCannotKillNavigationProjection() = runBlocking {
+        val sqlite = database.openHelper.writableDatabase
+        val definitions = listOf("messages", "message_drafts").associateWith { table ->
+            sqlite.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='$table'").use {
+                check(it.moveToFirst())
+                it.getString(0)
+            }
+        }
+        // Real SQLite read faults; no repository substitute or production seam.
+        sqlite.execSQL("DROP TABLE messages")
+        sqlite.execSQL("DROP TABLE message_drafts")
+        val presenter = DirectChatPresenter(accountConfiguration(ACCOUNT, SELF), ChatRepository(database), scope, { _, _ -> true })
+        try {
+            runCatching { presenter.selectPeer(PEER) }
+            val failed = withTimeout(5_000) { presenter.state.first { it.contentStatus == ChatContentStatus.Failed } }
+            assertEquals(PEER, failed.selectedPeer)
+            assertTrue(!failed.conversationsReady)
+            assertTrue(failed.messages.isEmpty())
+            presenter.closeConversation()
+            withTimeout(5_000) { presenter.state.first { it.selectedPeer == null } }
+            definitions.values.forEach(sqlite::execSQL)
+            presenter.selectPeer(OTHER_PEER)
+            val recovered = withTimeout(5_000) { presenter.state.first { it.selectedPeer == OTHER_PEER && it.contentStatus == ChatContentStatus.Ready } }
+            assertTrue(!recovered.conversationsReady)
+            presenter.selectPeer(PEER)
+            val retried = withTimeout(5_000) { presenter.state.first { it.selectedPeer == PEER && it.contentStatus == ChatContentStatus.Ready } }
+            assertTrue(retried.routeOccurrence.generation > failed.routeOccurrence.generation)
+        } finally {
+            presenter.close()
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun navigationPublishesBeforeInitialRoomQueriesComplete() = runTest {
+        database.close()
+        val queries = kotlinx.coroutines.test.TestCoroutineScheduler()
+        database = Room.databaseBuilder(context, NemaDatabase::class.java, databaseName)
+            .setQueryCoroutineContext(StandardTestDispatcher(queries))
+            .allowMainThreadQueries()
+            .build()
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = ChatRepository(database),
+            scope = backgroundScope,
+            enqueue = { _, _ -> error("send not expected") },
+        )
+        try {
+            val selection = async(start = CoroutineStart.UNDISPATCHED) { presenter.selectPeer(PEER) }
+            runCurrent()
+            assertEquals(PEER, presenter.state.value.selectedPeer)
+            assertTrue(presenter.state.value.messages.isEmpty())
+            assertEquals("", presenter.state.value.draft)
+            assertTrue(!presenter.state.value.conversationsReady)
+            presenter.closeConversation()
+            runCurrent()
+            assertEquals(null, presenter.state.value.selectedPeer)
+            selection.cancel()
+        } finally {
+            presenter.close()
+            queries.runCurrent()
+        }
+    }
+
     @OptIn(ExperimentalCoroutinesApi::class)
     @Test
     fun delayedNewThreadReadPreservesNavigationOccurrence() = runTest {
@@ -2412,7 +2605,7 @@ class ChatRepositoryPresenterTest {
         )
         try {
             assertTrue(presenter.selectPeer(PEER))
-            presenter.state.first { it.selectedPeer == PEER }
+            presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == PEER }
             for (destination in listOf("peer", "close", "return", "current")) {
                 assertTrue(presenter.selectPeer(PEER))
                 runCurrent()
@@ -2436,7 +2629,7 @@ class ChatRepositoryPresenterTest {
                 } else {
                     assertEquals(destination == "current", presenter.startChildThread())
                     assertTrue(presenter.continueThread(marker))
-                    val observed = presenter.state.first { it.selectedThread == marker }
+                    val observed = presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedThread == marker }
                     assertEquals(if (destination == "peer") OTHER_PEER else PEER, observed.selectedPeer)
                 }
             }
@@ -2467,7 +2660,7 @@ class ChatRepositoryPresenterTest {
         assertEquals(session.id, sent.single().outboundThread?.parentId)
         assertEquals(
             "new-thread",
-            presenter.state.first { it.selectedThread?.id?.value == "new-thread" }.selectedThread?.id?.value,
+            presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedThread?.id?.value == "new-thread" }.selectedThread?.id?.value,
         )
         presenter.close()
     }
@@ -2535,7 +2728,7 @@ class ChatRepositoryPresenterTest {
         assertEquals("draft A", repository.observeDraft(ACCOUNT, PEER).first())
         assertEquals("", repository.observeDraft(ACCOUNT, OTHER_PEER).first())
         assertEquals("", repository.observeDraft(OTHER_ACCOUNT, PEER).first())
-        assertEquals(OTHER_PEER, presenter.state.first { it.selectedPeer == OTHER_PEER }.selectedPeer)
+        assertEquals(OTHER_PEER, presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == OTHER_PEER }.selectedPeer)
     }
 
     @Test
