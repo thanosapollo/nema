@@ -2681,35 +2681,73 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
-    fun failedRoomReadAndListCannotKillNavigationProjection() = runBlocking {
-        val sqlite = database.openHelper.writableDatabase
-        val definitions = listOf("messages", "message_drafts").associateWith { table ->
-            sqlite.query("SELECT sql FROM sqlite_master WHERE type='table' AND name='$table'").use {
-                check(it.moveToFirst())
-                it.getString(0)
+    fun failedRoomReadAndListCannotKillNavigationProjection() = runTest {
+        // Room uses real executors; keep timeout clocks real while runTest owns failures.
+        kotlinx.coroutines.withContext(Dispatchers.Default) {
+            database.close()
+            val failReads = java.util.concurrent.atomic.AtomicBoolean(true)
+            val listReadFailed = CompletableDeferred<Unit>()
+            val draftReadFailed = CompletableDeferred<Unit>()
+            val listSql = org.thanosapollo.nema.storage.CHEAP_CONVERSATION_SUMMARIES.replace(":accountId", "?").trim()
+            // Fail SELECT execution only: dropping tables also breaks Room's invalidation
+            // triggers in unrelated route-write transactions, leaking launch failures.
+            database = Room.databaseBuilder(context, NemaDatabase::class.java, databaseName)
+                .openHelperFactory { configuration ->
+                    val helper = androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory().create(configuration)
+                    fun wrap(db: androidx.sqlite.db.SupportSQLiteDatabase) =
+                        object : androidx.sqlite.db.SupportSQLiteDatabase by db {
+                            override fun query(query: androidx.sqlite.db.SupportSQLiteQuery): android.database.Cursor =
+                                query(query, null)
+
+                            override fun query(
+                                query: androidx.sqlite.db.SupportSQLiteQuery,
+                                cancellationSignal: android.os.CancellationSignal?,
+                            ): android.database.Cursor {
+                                val sql = query.sql
+                                if (failReads.get() && (sql.trim() == listSql ||
+                                        sql.contains("FROM message_drafts"))) {
+                                    if (sql.contains("FROM message_drafts")) draftReadFailed.complete(Unit)
+                                    else listReadFailed.complete(Unit)
+                                    // Let SQLite produce the exception inside the real Room observer.
+                                    return db.query("SELECT * FROM deliberately_missing_read_source")
+                                }
+                                return if (cancellationSignal == null) db.query(query) else db.query(query, cancellationSignal)
+                            }
+                        }
+                    object : androidx.sqlite.db.SupportSQLiteOpenHelper by helper {
+                        override val writableDatabase get() = wrap(helper.writableDatabase)
+                        override val readableDatabase get() = wrap(helper.readableDatabase)
+                    }
+                }
+                .build()
+            val owner = SupervisorJob(backgroundScope.coroutineContext[Job])
+            val repository = ChatRepository(database)
+            val presenter = DirectChatPresenter(accountConfiguration(ACCOUNT, SELF), repository,
+                CoroutineScope(backgroundScope.coroutineContext + owner + Dispatchers.Default), { _, _ -> true })
+            try {
+                assertTrue(presenter.selectPeer(PEER))
+                val failed = withTimeout(5_000) { presenter.state.first { it.contentStatus == ChatContentStatus.Failed } }
+                assertEquals(PEER, failed.selectedPeer)
+                assertTrue(!failed.conversationsReady)
+                assertTrue(failed.messages.isEmpty())
+                withTimeout(5_000) { repository.observeRoute(ACCOUNT).first { it == ChatRoute(PEER) } }
+                withTimeout(5_000) { draftReadFailed.await(); listReadFailed.await() }
+                presenter.closeConversation()
+                withTimeout(5_000) { presenter.state.first { it.selectedPeer == null } }
+                withTimeout(5_000) { repository.observeRoute(ACCOUNT).first { it == null } }
+                failReads.set(false)
+                assertTrue(presenter.selectPeer(OTHER_PEER))
+                val recovered = withTimeout(5_000) { presenter.state.first { it.selectedPeer == OTHER_PEER && it.contentStatus == ChatContentStatus.Ready } }
+                assertTrue(!recovered.conversationsReady)
+                assertTrue(presenter.selectPeer(PEER))
+                val retried = withTimeout(5_000) { presenter.state.first { it.selectedPeer == PEER && it.contentStatus == ChatContentStatus.Ready } }
+                assertTrue(retried.routeOccurrence.generation > failed.routeOccurrence.generation)
+                withTimeout(5_000) { repository.observeRoute(ACCOUNT).first { it == ChatRoute(PEER) } }
+            } finally {
+                presenter.close()
+                owner.cancel()
+                owner.join()
             }
-        }
-        // Real SQLite read faults; no repository substitute or production seam.
-        sqlite.execSQL("DROP TABLE messages")
-        sqlite.execSQL("DROP TABLE message_drafts")
-        val presenter = DirectChatPresenter(accountConfiguration(ACCOUNT, SELF), ChatRepository(database), scope, { _, _ -> true })
-        try {
-            runCatching { presenter.selectPeer(PEER) }
-            val failed = withTimeout(5_000) { presenter.state.first { it.contentStatus == ChatContentStatus.Failed } }
-            assertEquals(PEER, failed.selectedPeer)
-            assertTrue(!failed.conversationsReady)
-            assertTrue(failed.messages.isEmpty())
-            presenter.closeConversation()
-            withTimeout(5_000) { presenter.state.first { it.selectedPeer == null } }
-            definitions.values.forEach(sqlite::execSQL)
-            presenter.selectPeer(OTHER_PEER)
-            val recovered = withTimeout(5_000) { presenter.state.first { it.selectedPeer == OTHER_PEER && it.contentStatus == ChatContentStatus.Ready } }
-            assertTrue(!recovered.conversationsReady)
-            presenter.selectPeer(PEER)
-            val retried = withTimeout(5_000) { presenter.state.first { it.selectedPeer == PEER && it.contentStatus == ChatContentStatus.Ready } }
-            assertTrue(retried.routeOccurrence.generation > failed.routeOccurrence.generation)
-        } finally {
-            presenter.close()
         }
     }
 
