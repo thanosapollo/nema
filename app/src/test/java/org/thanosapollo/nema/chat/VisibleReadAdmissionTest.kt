@@ -108,6 +108,46 @@ class VisibleReadAdmissionTest {
     }
 
     @Test
+    fun failedWriteReturnsFalseAndRemainsRetryable() = runBlocking {
+        RoutePresentationFixture().use { f ->
+            val p = f.presenter()
+            p.selectPeer(f.peer)
+            val ready = withTimeout(5_000) { p.state.first { it.messages.isNotEmpty() } }
+            val request = VisibleReadRequest(f.account, ready.routeOccurrence, setOf("message-0"))
+            f.database.openHelper.writableDatabase.execSQL(
+                "CREATE TRIGGER reject_read BEFORE UPDATE OF locallyRead ON messages " +
+                    "BEGIN SELECT RAISE(ABORT, 'controlled read failure'); END")
+            assertFalse(p.markVisibleConversationRead(request))
+            assertEquals(false, f.database.messageDao().message(f.account, "message-0")?.locallyRead)
+            f.database.openHelper.writableDatabase.execSQL("DROP TRIGGER reject_read")
+            assertTrue(p.markVisibleConversationRead(request))
+            assertEquals(true, f.database.messageDao().message(f.account, "message-0")?.locallyRead)
+        }
+    }
+
+    @Test
+    fun retiringPresenterCancelsHeldWriteWithoutTouchingReplacementAccount() = runBlocking {
+        RoutePresentationFixture().use { f ->
+            val p = f.presenter()
+            p.selectPeer(f.peer)
+            val ready = withTimeout(5_000) { p.state.first { it.messages.isNotEmpty() } }
+            val entered = f.gate.hold()
+            val write = async(start = CoroutineStart.UNDISPATCHED) {
+                p.markVisibleConversationRead(VisibleReadRequest(f.account, ready.routeOccurrence, setOf("message-0")))
+            }
+            withTimeout(5_000) { entered.await() }
+            p.close()
+            val replacement = f.presenter("replacement")
+            f.gate.release()
+            withTimeout(5_000) { write.join() }
+            assertTrue(write.isCancelled)
+            assertEquals(false, f.database.messageDao().message(f.account, "message-0")?.locallyRead)
+            assertNull(f.database.messageDao().message("replacement", "message-0"))
+            assertEquals("replacement", replacement.state.value.accountId)
+        }
+    }
+
+    @Test
     fun joiningWithoutLayoutDoesNotRead() = runBlocking {
         RoutePresentationFixture().use { f ->
             val p = f.presenter()

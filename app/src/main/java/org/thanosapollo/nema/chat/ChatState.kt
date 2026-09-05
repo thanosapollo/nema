@@ -808,9 +808,19 @@ class DirectChatPresenter(
             peer to request.messageIds.filter { it in rendered }
         }
         if (admitted.second.isEmpty()) return false
-        // Admission is synchronous; persistence keeps this owner even if navigation changes.
-        repository.markMessagesRead(request.accountId, admitted.first, admitted.second)
-        return true
+        // The effect may disappear after admission; only presenter retirement cancels this write.
+        // Keep the exact admitted account, peer and IDs, never a later route projection.
+        return presenterScope.async {
+            try {
+                repository.markMessagesRead(request.accountId, admitted.first, admitted.second)
+                true
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Leave failed rows unread and report failure to any remaining caller.
+                false
+            }
+        }.await()
     }
 
     suspend fun joinRoom(value: String): Boolean {
