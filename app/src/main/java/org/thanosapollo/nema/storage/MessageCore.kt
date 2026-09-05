@@ -1844,8 +1844,8 @@ data class IncomingMessage(
     val markerTargetId: String? = null,
     val replaceId: String? = null,
     val unreadEligible: Boolean = true,
-    // Dormant input contract: authenticated transport acquisition is a later slice.
     val mucFacts: MucEventFacts? = null,
+    val mucLiveOrderEpoch: String? = null,
 ) {
     init {
         require(mucFacts == null || messageKind == MessageKind.GROUPCHAT) { "MUC facts require a room event" }
@@ -2498,7 +2498,11 @@ class MessageStore private constructor(
         if (matched == null) {
             val observation = liveReconciliationObservation(incoming, allowLiveReconciliation)
             val created = incoming.toEntity(allocateSequence(incoming.accountId), observation).enrichMuc(incoming.mucFacts)
-            dao.insertMessage(created)
+            val admitted = created.copy(mucLiveOrderEpoch = incoming.mucLiveOrderEpoch.takeIf {
+                allowLiveReconciliation && incoming.archiveAuthority == null && incoming.archiveScope == null &&
+                    received.sentTimeSource == null && incoming.mucFacts?.evidence == MucOccupantEvidence.LIVE_ROOM
+            })
+            dao.insertMessage(admitted)
             if (observation != null) {
                 check(
                     database.accountDao().advanceReconciliationWallFloor(
@@ -2508,7 +2512,7 @@ class MessageStore private constructor(
                 ) { "Reconciliation state changed during live insert" }
             }
             writeBoundary(MessageWriteBoundary.AFTER_MESSAGE)
-            winner = created
+            winner = admitted
         } else {
             winner = matched
         }

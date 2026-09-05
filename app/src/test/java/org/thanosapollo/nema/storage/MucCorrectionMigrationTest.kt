@@ -14,6 +14,10 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.thanosapollo.nema.thread.MessageKind
+import org.thanosapollo.nema.chat.toIncomingMessage
+import org.thanosapollo.nema.session.*
+import org.thanosapollo.nema.xmpp.smack.*
+import org.thanosapollo.nema.xmpp.transport.*
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
@@ -29,7 +33,10 @@ class MucCorrectionMigrationTest {
     @Test
     fun schema25RowsSafelyEnrichThroughActualPageReplay() = replay(true)
 
-    private fun replay(enrich: Boolean) = runBlocking {
+    @Test
+    fun schema25RowsSafelyEnrichThroughAuthenticatedWirePage() = replay(true, wire = true)
+
+    private fun replay(enrich: Boolean, wire: Boolean = false) = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Application>()
         val name = "muc-migration-${UUID.randomUUID()}.db"
         try {
@@ -66,7 +73,7 @@ class MucCorrectionMigrationTest {
                 val aliases = store.aliases("a").toSet()
                 val positions = db.messageDao().archivePositions("a").toSet()
                 // A redacted new boundary makes the overlapping page advance without adding a message.
-                val page = ArchivePage(key, ArchiveDirection.AFTER, "edit-uid", true, false, true,
+                val syntheticPage = ArchivePage(key, ArchiveDirection.AFTER, "edit-uid", true, false, true,
                     "root-uid", "next-uid", listOf("root", "edit").map { id ->
                         ArchivedIncomingMessage("$id-uid", IncomingMessage("a", "replay-$id", room,
                             "$room/nick", MessageDirection.INBOUND, MessageKind.GROUPCHAT, null, null,
@@ -76,6 +83,8 @@ class MucCorrectionMigrationTest {
                                 if (id == "edit") MucClaimState.VALID else MucClaimState.NONE, "opaque",
                                 MucOccupantEvidence.ROOM_MAM, MucPayloadState.PLAIN) else null))
                     } + ArchivedIncomingMessage("next-uid", null))
+                val page = if (!wire) syntheticPage else syntheticPage.copy(messages = wirePage() + ArchivedIncomingMessage("next-uid", null))
+                val preservedTables = before.keys - "archive_cursors" - if (wire) setOf("trusted_identity_aliases") else emptySet()
                 if (enrich) {
                     sql.execSQL("CREATE TRIGGER reject_cursor BEFORE INSERT ON archive_cursors BEGIN SELECT RAISE(ABORT, 'fault'); END")
                     assertTrue(runCatching { store.applyArchivePage(page) }.isFailure)
@@ -96,11 +105,16 @@ class MucCorrectionMigrationTest {
                         assertNull(row.mucLiveOrderEpoch)
                         assertNull(row.replaceId)
                     }
-                    assertEquals(aliases, store.aliases("a").toSet())
+                    if (!wire) assertEquals(aliases, store.aliases("a").toSet())
+                    else {
+                        assertTrue(store.aliases("a").containsAll(aliases))
+                        assertEquals(setOf("wire-root", "wire-edit"), (store.aliases("a").toSet() - aliases).map { it.value }.toSet())
+                        assertTrue((store.aliases("a").toSet() - aliases).all { it.kind == IdentityAliasKind.MESSAGE_ID })
+                    }
                     assertEquals(positions, db.messageDao().archivePositions("a").toSet())
                     assertEquals("next-uid", store.archiveCursor(key)?.newestId)
                     val after = snapshot(db.openHelper.writableDatabase)
-                    assertEquals(before - "archive_cursors", after - "archive_cursors")
+                    assertEquals(before.filterKeys { it in preservedTables }, after.filterKeys { it in preservedTables })
                     if (!enrich) assertUnknown(db.openHelper.writableDatabase)
                     db.close()
                     db = NemaDatabase.create(context, name)
@@ -114,7 +128,7 @@ class MucCorrectionMigrationTest {
                         } + ArchivedIncomingMessage("final-uid", null))
                     assertEquals(ArchivePageStatus.APPLIED, store.applyArchivePage(omitted).status)
                     assertEquals(retainedRows, store.messages("a"))
-                    assertEquals(before - "archive_cursors", snapshot(db.openHelper.writableDatabase) - "archive_cursors")
+                    assertEquals(before.filterKeys { it in preservedTables }, snapshot(db.openHelper.writableDatabase).filterKeys { it in preservedTables })
                     val changed = page.messages[1].message!!.copy(localMessageId = "actor-conflict",
                         mucFacts = page.messages[1].message!!.mucFacts!!.copy(occupantId = "different"))
                     store.ingest(changed)
@@ -140,6 +154,32 @@ class MucCorrectionMigrationTest {
             }
         } finally {
             context.deleteDatabase(name)
+        }
+    }
+
+    private fun wirePage(): List<ArchivedIncomingMessage> {
+        installNemaSidProviders()
+        installNemaMamResultProvider()
+        installNemaOccupantIdProvider()
+        installNemaCorrectionProvider()
+        val attempt = SessionAttemptIdentity(AccountId.require("a"), ConnectionGeneration.require(1),
+            ConnectionAttempt.require(1), LifecycleEpoch.require(1))
+        val registry = RoomStableIdAuthorityRegistry().apply { begin(attempt) }
+        val lease = requireNotNull(registry.beginJoin(attempt, room))
+        check(registry.publish(lease, true, true, "self", true))
+        val facts = copyRoomConsumerFacts(Any(), registry, attempt, room)
+        val carriers = listOf("root", "edit").map { id ->
+            val claim = if (id == "edit") "<replace xmlns='urn:xmpp:message-correct:0' id='wire-root'/>" else ""
+            org.jivesoftware.smack.util.PacketParserUtils.parseStanza(
+                "<message xmlns='jabber:client' from='$room'><result xmlns='urn:xmpp:mam:2' queryid='query' id='$id-uid'>" +
+                    "<forwarded xmlns='urn:xmpp:forward:0'><delay xmlns='urn:xmpp:delay' stamp='1970-01-01T00:00:01.234Z'/>" +
+                    "<message xmlns='jabber:client' from='$room/nick' type='groupchat' id='wire-$id'><body>$id body</body>" +
+                    "$claim<occupant-id xmlns='urn:xmpp:occupant-id:0' id='opaque'/></message></forwarded></result></message>"
+            ) as org.jivesoftware.smack.packet.Message
+        }
+        return normalizeMamResults(carriers, carriers.map { org.jivesoftware.smackx.mam.element.MamElements.MamResultExtension.from(it) },
+            attempt, room, true, mappingBareJid = "self@example.org", archiveRoom = facts).map {
+            ArchivedIncomingMessage(it.resultId, it.message!!.toIncomingMessage("replay-${it.resultId}"))
         }
     }
 

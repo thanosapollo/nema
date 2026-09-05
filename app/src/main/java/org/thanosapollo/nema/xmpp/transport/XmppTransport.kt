@@ -180,6 +180,8 @@ data class IncomingMessageEnvelope(
     val receiptRecipient: String? = null,
     val markable: Boolean = false,
     val replaceId: String? = null,
+    val mucFacts: org.thanosapollo.nema.storage.MucEventFacts? = null,
+    val mucLiveOrderEpoch: String? = null,
 ) {
     init {
         require(peer.isNotEmpty()) { "Peer must not be empty" }

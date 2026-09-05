@@ -136,8 +136,9 @@ class RoomArchiveIdentityTest {
                     if (mode == "quarantine") db.openHelper.writableDatabase.execSQL(
                         "UPDATE trusted_identity_aliases SET status = 'QUARANTINED' WHERE kind = 'STANZA_ID'")
                     assertEquals(ArchivePageStatus.APPLIED, store.applyArchivePage(page).status)
-                    assertEquals(2, store.messages("account").size)
-                    assertEquals(IdentityAliasStatus.QUARANTINED,
+                    // Authenticated metadata activates S2's uniquely pinned conflict outcome.
+                    assertEquals(if (mode == "conflict") 1 else 2, store.messages("account").size)
+                    assertEquals(if (mode == "conflict") IdentityAliasStatus.TRUSTED else IdentityAliasStatus.QUARANTINED,
                         store.aliases("account").single { it.kind == IdentityAliasKind.STANZA_ID }.status)
                     assertEquals("archive-1", store.archiveCursor(key)?.newestId)
                 }

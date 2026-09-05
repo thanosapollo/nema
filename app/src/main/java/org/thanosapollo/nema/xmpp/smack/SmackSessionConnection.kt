@@ -151,6 +151,7 @@ class SmackSessionConnectionFactory : SessionConnectionFactory {
         requireNemaMucUserProvider()
         requireNemaMamResultProvider()
         installNemaOccupantIdProvider()
+        installNemaCorrectionProvider()
         installNemaReplyProviders()
         installNemaChatMarkerProviders()
         installNemaChatStateProviders()
@@ -261,6 +262,7 @@ internal class SmackSessionConnection(
     },
 ) : SessionConnection {
     private val entryGate = Any()
+    private val mucOrderInstance = java.util.UUID.randomUUID().toString()
     private val rosterLifecycle = RosterConnectionLifecycle(entryGate)
     private val revoked = AtomicBoolean(false)
     private val disconnectStarted = AtomicBoolean(false)
@@ -966,6 +968,13 @@ internal class SmackSessionConnection(
     }
 
     private fun deliver(decision: StableIdMessageDecision) {
+        // Durable callbacks can synchronously await IO sends or controller shutdown.
+        // Capture admission once; never hold the transport monitor across that callback.
+        admitIncoming(decision)?.let(event)
+    }
+
+    private fun admitIncoming(decision: StableIdMessageDecision): SessionEvent.Incoming? = synchronized(entryGate) {
+        if (revoked.get() || connectionListener.currentAttempt() != decision.attempt) return@synchronized null
         val room = if (decision.carbonDirection == CarbonCarrier.Direction.SENT &&
             decision.message.type == Message.Type.groupchat
         ) decision.message.to?.asBareJid()?.toString() else decision.message.from?.asBareJid()?.toString()
@@ -986,7 +995,11 @@ internal class SmackSessionConnection(
             decision.sentTimeSource,
             decision.receivedAtEpochMs,
             decision.carbonDirection,
-        )?.let { event(SessionEvent.Incoming(decision.attempt, it)) }
+        )?.let { envelope ->
+            val admitted = decision.retainLiveMucFacts(envelope, roomFacts,
+                connectionListener.currentAttempt(), "$mucOrderInstance:${decision.attempt}")
+            admitted?.let { SessionEvent.Incoming(decision.attempt, it) }
+        }
     }
 
     private suspend fun establish(
@@ -1516,7 +1529,7 @@ internal fun Message.toIncomingEnvelope(
         }
             .singleOrNull()
             ?.let { it as? MessageCorrectExtension }
-            ?.idInitialMessage
+            ?.let { if (it is NemaCorrectionElement) it.wireId else it.idInitialMessage }
             ?.takeIf(String::isNotEmpty)
     } else {
         null
@@ -1839,7 +1852,8 @@ internal fun normalizeMamResults(
             require(claims.isEmpty() || claims.size == 1 && inner.trustedStanzaIds(expectedArchiveAuthority) == listOf(identity)) {
                 "Room archive UID contradicts inner stanza identity"
             }
-            mappedMessage = mappedMessage?.copy(stanzaIds = listOf(identity))
+            val facts = inner.mucEventFacts(attempt, archiveRoom, org.thanosapollo.nema.storage.MucOccupantEvidence.ROOM_MAM)
+            mappedMessage = mappedMessage?.copy(stanzaIds = listOf(identity), mucFacts = facts, messageId = facts?.messageId)
         }
         ArchiveMessageEnvelope(
             resultId = owned.id,

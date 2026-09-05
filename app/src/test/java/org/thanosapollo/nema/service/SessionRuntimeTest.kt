@@ -1843,6 +1843,134 @@ class SessionRuntimeTest {
         withTimeout(5_000) { await() }
     }
 
+    @Test
+    fun `Smack receipt callback returns from actual IO acknowledgement`() = runBlocking {
+        smackCallbackSchedule(null)
+    }
+
+    @Test
+    fun `Smack incoming and stop settle before and inside durable callback`() = runBlocking {
+        listOf(false, true).forEach { smackCallbackSchedule(it) }
+    }
+
+    private suspend fun smackCallbackSchedule(stopInsideDurable: Boolean?) {
+        org.thanosapollo.nema.xmpp.smack.SmackAndroid.initialize(context)
+        val active = account("smack-${stopInsideDurable}")
+        val sent = java.util.Collections.synchronizedList(mutableListOf<org.jivesoftware.smack.packet.Stanza>())
+        val transport = object : org.jivesoftware.smack.tcp.XMPPTCPConnection(
+            org.jivesoftware.smack.tcp.XMPPTCPConnectionConfiguration.builder()
+                .setXmppDomain(org.jxmpp.jid.impl.JidCreate.domainBareFrom("example.org"))
+                .setUsernameAndPassword("account", null).build(),
+        ) {
+            init {
+                connected = true
+                authenticated = true
+                user = org.jxmpp.jid.impl.JidCreate.entityFullFrom("${active.bareJid.value}/test")
+            }
+            override fun throwNotConnectedExceptionIfAppropriate() = Unit
+            override fun sendStanzaInternal(packet: org.jivesoftware.smack.packet.Stanza) { sent += packet }
+        }
+        val boundary = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val revoked = CompletableDeferred<Unit>()
+        val observations = mutableListOf<Boolean>()
+        lateinit var smack: org.thanosapollo.nema.xmpp.smack.SmackSessionConnection
+        fun field(owner: Any, name: String): Any = owner.javaClass.getDeclaredField(name).let {
+            it.isAccessible = true
+            requireNotNull(it.get(owner))
+        }
+        val factory = SessionConnectionFactory { configuration, _, event ->
+            smack = org.thanosapollo.nema.xmpp.smack.SmackSessionConnection(
+                connection = transport, authenticationId = "account", expectedBareJid = active.bareJid.value,
+                event = { incoming ->
+                    if (incoming is SessionEvent.Incoming) {
+                        val held = Thread.holdsLock(field(smack, "entryGate"))
+                        observations += held
+                        // Fail by ownership assertion, not a deadlocked worker or timeout.
+                        if (!held) {
+                            if (stopInsideDurable == false) runBlocking {
+                                boundary.complete(Unit)
+                                release.await()
+                            }
+                            event(incoming)
+                        } else boundary.complete(Unit)
+                    } else event(incoming)
+                },
+            )
+            val otherOperations = RecordingConnection(configuration.id, null, null, event)
+            object : SessionConnection by otherOperations {
+                override val isUsable get() = smack.isUsable
+                override suspend fun connect(credential: CharArray, attempt: SessionAttemptIdentity) {
+                    otherOperations.connect(credential, attempt)
+                    smack.updateAttempt(attempt)
+                }
+                override fun updateAttempt(attempt: SessionAttemptIdentity) { smack.updateAttempt(attempt) }
+                override suspend fun sendSignal(signal: OutgoingMessageSignal) { smack.sendSignal(signal) }
+                override fun revoke() {
+                    smack.revoke()
+                    revoked.complete(Unit)
+                }
+            }
+        }
+        val scope = CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.Default)
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val store = MessageStore.observingWrites(database, observer = { write ->
+            if (stopInsideDurable == true && write == MessageWriteBoundary.AFTER_MESSAGE) runBlocking {
+                boundary.complete(Unit)
+                release.await()
+            }
+        })
+        val runtime = SessionRuntime(accounts, credentials, store, PeerIdentityStore(database.messageDao()), scope, factory)
+        var deliveries = 0
+        runtime.onInsertedInbound = { _, _ -> deliveries++ }
+        try {
+            accounts.save(active)
+            accounts.activate(active.id)
+            credentials.store(active.id, "secret".toCharArray())
+            assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
+            val stanza = org.jivesoftware.smack.packet.StanzaBuilder.buildMessage("receipt-wire")
+                .from(org.jxmpp.jid.impl.JidCreate.entityFullFrom("peer@example.org/device"))
+                .to(org.jxmpp.jid.impl.JidCreate.entityFullFrom("${active.bareJid.value}/test"))
+                .ofType(if (stopInsideDurable == null) org.jivesoftware.smack.packet.Message.Type.chat
+                    else org.jivesoftware.smack.packet.Message.Type.groupchat)
+                .setBody("callback body")
+                .apply { if (stopInsideDurable == null) addExtension(
+                    org.jivesoftware.smackx.receipts.DeliveryReceiptRequest(),
+                ) }
+                .build()
+            val listener = field(smack, "messageListener") as org.jivesoftware.smack.StanzaListener
+            val incoming = scope.async { listener.processStanza(stanza) }
+            if (stopInsideDurable != null) {
+                withTimeout(5_000) { boundary.await() }
+                assertEquals(listOf(false), observations)
+                val stopping = scope.async { runtime.stop() }
+                withTimeout(5_000) { revoked.await() }
+                // Stop has retired the transport while the incoming callback is held.
+                assertFalse(smack.isUsable)
+                if (stopInsideDurable) assertFalse(stopping.isCompleted)
+                release.complete(Unit)
+                withTimeout(5_000) { incoming.await(); stopping.await() }
+                assertTrue(runtime.state.value is ConnectionState.Stopped)
+                assertEquals(if (stopInsideDurable) 1 else 0, store.messages(active.id.value).size)
+                assertEquals(0, deliveries)
+                assertTrue(sent.isEmpty())
+            } else {
+                withTimeout(5_000) { incoming.await() }
+                assertEquals(listOf(false), observations)
+                assertEquals(1, deliveries)
+                val receipt = sent.single() as org.jivesoftware.smack.packet.Message
+                assertEquals("peer@example.org/device", receipt.to.toString())
+                assertEquals("receipt-wire", org.jivesoftware.smackx.receipts.DeliveryReceipt.from(receipt).id)
+                assertEquals(1, store.messages(active.id.value).size)
+            }
+        } finally {
+            release.complete(Unit)
+            runtime.stop()
+            scope.coroutineContext[Job]?.cancelAndJoin()
+        }
+    }
+
     private suspend fun connectedRuntime(
         scope: CoroutineScope, id: String, clock: () -> Long = { REACTION_NOW },
     ): RuntimeFixture {

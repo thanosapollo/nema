@@ -58,6 +58,8 @@ internal fun IncomingMessageEnvelope.toIncomingMessage(localMessageId: String): 
         markerTargetId = messageId?.takeIf {
             markable && !outbound && kind == org.thanosapollo.nema.thread.MessageKind.CHAT
         },
+        mucFacts = mucFacts,
+        mucLiveOrderEpoch = mucLiveOrderEpoch,
         replaceId = replaceId?.takeIf {
             kind == org.thanosapollo.nema.thread.MessageKind.CHAT
         },
