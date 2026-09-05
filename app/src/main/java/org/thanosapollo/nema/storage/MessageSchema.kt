@@ -5,6 +5,21 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 internal object MessageSchema {
+    val MIGRATION_24_25: Migration = object : Migration(24, 25) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN locallyRead INTEGER NOT NULL DEFAULT 0")
+            db.execSQL(
+                """
+                UPDATE messages SET locallyRead = 1
+                WHERE localSequence <= COALESCE((
+                  SELECT lastReadLocalSequence FROM peers
+                  WHERE peers.accountId = messages.accountId AND peers.jid = messages.peerJid
+                ), 0)
+                """.trimIndent(),
+            )
+        }
+    }
+
     val MIGRATION_23_24: Migration = object : Migration(23, 24) {
         override fun migrate(db: SupportSQLiteDatabase) {
             db.execSQL("ALTER TABLE message_drafts ADD COLUMN attachmentUrl TEXT")

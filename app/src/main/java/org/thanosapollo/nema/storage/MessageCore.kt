@@ -37,6 +37,69 @@ data class PendingReactionSelection(
     val accepted: List<MessageReactionEntity>, val unsupported: List<MessageReactionEntity>,
 )
 
+// Metadata updates cannot overwrite durable local read evidence from a stale entity.
+data class MessageMetadata(
+    val accountId: String,
+    val localMessageId: String,
+    val peerJid: String,
+    val senderJid: String,
+    val direction: MessageDirection,
+    val messageKind: MessageKind,
+    val threadId: String?,
+    val parentThreadId: String?,
+    val body: String,
+    val localSequence: Long,
+    val archiveOrdinal: Long?,
+    val sentAtEpochMs: Long? = null,
+    val sentTimeSource: MessageTimeSource? = null,
+    val reconciliationObservedAtMs: Long? = null,
+    val attachmentUrl: String? = null,
+    val attachmentName: String? = null,
+    val attachmentMime: String? = null,
+    val attachmentSize: Long? = null,
+    val replyToId: String? = null,
+    val replyToJid: String? = null,
+    val replyFallbackBody: String? = null,
+    val markable: Boolean = false,
+    val markerTargetId: String? = null,
+    val replaceId: String? = null,
+    val correctionTargetMessageId: String? = null,
+    val directSessionTransitionApplied: Boolean = false,
+    val liveDeliveryObserved: Boolean = false,
+    val unreadEligible: Boolean = true,
+)
+
+private fun MessageEntity.metadata() = MessageMetadata(
+    accountId = accountId,
+    localMessageId = localMessageId,
+    peerJid = peerJid,
+    senderJid = senderJid,
+    direction = direction,
+    messageKind = messageKind,
+    threadId = threadId,
+    parentThreadId = parentThreadId,
+    body = body,
+    localSequence = localSequence,
+    archiveOrdinal = archiveOrdinal,
+    sentAtEpochMs = sentAtEpochMs,
+    sentTimeSource = sentTimeSource,
+    reconciliationObservedAtMs = reconciliationObservedAtMs,
+    attachmentUrl = attachmentUrl,
+    attachmentName = attachmentName,
+    attachmentMime = attachmentMime,
+    attachmentSize = attachmentSize,
+    replyToId = replyToId,
+    replyToJid = replyToJid,
+    replyFallbackBody = replyFallbackBody,
+    markable = markable,
+    markerTargetId = markerTargetId,
+    replaceId = replaceId,
+    correctionTargetMessageId = correctionTargetMessageId,
+    directSessionTransitionApplied = directSessionTransitionApplied,
+    liveDeliveryObserved = liveDeliveryObserved,
+    unreadEligible = unreadEligible,
+)
+
 @Dao
 abstract class MessageDao {
     @Query("SELECT EXISTS(SELECT 1 FROM accounts WHERE id = :accountId)")
@@ -50,22 +113,36 @@ abstract class MessageDao {
 
     @Query(
         """
-        UPDATE peers SET lastReadLocalSequence = (
-          SELECT COALESCE(MAX(localSequence), 0) FROM messages
-          WHERE accountId = :accountId AND peerJid = :peerJid
-        )
-        WHERE accountId = :accountId AND jid = :peerJid
+        UPDATE messages SET locallyRead = 1
+        WHERE accountId = :accountId AND peerJid = :peerJid
         """,
     )
-    abstract suspend fun updatePeerLastRead(accountId: String, peerJid: String): Int
+    abstract suspend fun markPeerMessagesRead(accountId: String, peerJid: String): Int
 
     @Query(
         """
-        UPDATE peers SET lastReadLocalSequence = MAX(lastReadLocalSequence, :localSequence)
-        WHERE accountId = :accountId AND jid = :peerJid
+        UPDATE messages SET locallyRead = 1
+        WHERE accountId = :accountId AND peerJid = :peerJid AND localSequence <= :localSequence
         """,
     )
-    abstract suspend fun advancePeerLastRead(accountId: String, peerJid: String, localSequence: Long): Int
+    abstract suspend fun markMessagesReadThrough(accountId: String, peerJid: String, localSequence: Long): Int
+
+    @Query("""
+        UPDATE messages SET locallyRead = 1
+        WHERE accountId = :accountId AND peerJid = :peerJid
+          AND localMessageId IN (:messageIds)
+          AND direction = 'INBOUND' AND replaceId IS NULL
+    """)
+    abstract suspend fun markMessageIdsRead(accountId: String, peerJid: String, messageIds: List<String>): Int
+
+    @Query("""
+        UPDATE messages SET locallyRead = 1
+        WHERE accountId = :accountId AND peerJid = :peerJid AND localMessageId = :winnerId
+          AND EXISTS (SELECT 1 FROM messages AS loser WHERE loser.accountId = :accountId
+            AND loser.peerJid = :peerJid AND loser.localMessageId = :loserId AND loser.locallyRead = 1)
+    """)
+    abstract suspend fun mergeReadState(accountId: String, peerJid: String, winnerId: String, loserId: String): Int
+
 
     @Query(
         """
@@ -634,8 +711,10 @@ abstract class MessageDao {
     @Insert
     abstract suspend fun insertMessage(message: MessageEntity)
 
-    @Update
-    abstract suspend fun updateMessage(message: MessageEntity)
+    @Update(entity = MessageEntity::class)
+    protected abstract suspend fun updateMessageMetadata(message: MessageMetadata)
+
+    suspend fun updateMessage(message: MessageEntity) = updateMessageMetadata(message.metadata())
 
     @Query(
         """
@@ -981,7 +1060,7 @@ abstract class MessageDao {
               AND unread.direction = 'INBOUND'
               AND unread.replaceId IS NULL
               AND unread.unreadEligible = 1
-              AND unread.localSequence > COALESCE(peers.lastReadLocalSequence, 0)
+              AND unread.locallyRead = 0
           ) AS unreadCount
         FROM latest_messages AS messages
         LEFT JOIN peers
@@ -1891,10 +1970,18 @@ class MessageStore private constructor(
                 ?: createDirectThreadSession(dao, accountId, peerJid)
         }
 
+    suspend fun markMessagesRead(accountId: String, peerJid: String, messageIds: List<String>): Unit =
+        database.withTransaction {
+            messageIds.distinct().chunked(500).forEach { ids ->
+                database.messageDao().markMessageIdsRead(accountId, peerJid, ids)
+            }
+        }
+
     suspend fun markConversationRead(accountId: String, peerJid: String): Boolean = database.withTransaction {
         val dao = database.messageDao()
         dao.insertPeer(PeerEntity(accountId, peerJid))
-        dao.updatePeerLastRead(accountId, peerJid) == 1
+        dao.markPeerMessagesRead(accountId, peerJid)
+        true
     }
 
     suspend fun compose(intent: OutboundIntent): OutboxEntity = database.withTransaction {
@@ -1935,7 +2022,7 @@ class MessageStore private constructor(
             val matches = dao.inboundChatByAliasValue(accountId, peerJid, targetId)
                 .distinctBy(MessageEntity::localMessageId)
             val target = matches.singleOrNull() ?: return null
-            dao.advancePeerLastRead(accountId, peerJid, target.localSequence)
+            dao.markMessagesReadThrough(accountId, peerJid, target.localSequence)
             return null
         }
         if (senderJid != peerJid) return null
@@ -2460,7 +2547,7 @@ class MessageStore private constructor(
             winner.direction == MessageDirection.OUTBOUND &&
             winner.messageKind == MessageKind.CHAT
         ) {
-            dao.advancePeerLastRead(winner.accountId, winner.peerJid, winner.localSequence)
+            dao.markMessagesReadThrough(winner.accountId, winner.peerJid, winner.localSequence)
         }
         attachPendingReactions(dao, winner)
         return IngestionResult(
@@ -3456,6 +3543,7 @@ class MessageStore private constructor(
         dao.reparentCorrections(winner.accountId, loser.localMessageId, winner.localMessageId)
         reparentReactions(loser, winner)
         writeBoundary(MessageWriteBoundary.AFTER_DEPENDENT_REPARENT)
+        dao.mergeReadState(winner.accountId, winner.peerJid, winner.localMessageId, loser.localMessageId)
         dao.deleteMessage(loser)
         val withArchive = if (winner.archiveOrdinal == null && loser.archiveOrdinal != null) {
             winner.copy(archiveOrdinal = loser.archiveOrdinal)
@@ -3465,7 +3553,7 @@ class MessageStore private constructor(
         } else {
             withArchive
         }
-        val reconciled = withTransition
+        val reconciled = withTransition.copy(locallyRead = winner.locallyRead || loser.locallyRead)
             .withLiveDeliveryObserved(loser.liveDeliveryObserved)
             .withUnreadEligible(loser.unreadEligible)
             .withPreferredTime(loser.sentAtEpochMs, loser.sentTimeSource)

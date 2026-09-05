@@ -37,7 +37,7 @@ internal const val CHEAP_CONVERSATION_SUMMARIES = """
               AND unread.direction = 'INBOUND'
               AND unread.replaceId IS NULL
               AND unread.unreadEligible = 1
-              AND unread.localSequence > COALESCE(peers.lastReadLocalSequence, 0)
+              AND unread.locallyRead = 0
           ) AS unreadCount
         FROM messages
         INNER JOIN (

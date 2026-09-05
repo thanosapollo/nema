@@ -50,6 +50,82 @@ class MessageStoreTest {
     }
 
     @Test
+    fun exactReadIdsKeepHolesAcrossScopesReopenAndStaleMetadata() = runBlocking {
+        var store = MessageStore(database)
+        addAccount(OTHER_ACCOUNT)
+        for (n in 1..5) {
+            store.ingest(incoming(localId = "id$n", threadId = if (n % 2 == 0) "child" else "root"))
+            store.ingest(incoming(accountId = OTHER_ACCOUNT, localId = "id$n"))
+        }
+        store.ingest(incoming(localId = "other-peer", peerJid = "other@example.org"))
+        val stale = requireNotNull(database.messageDao().message(ACCOUNT, "id2"))
+        store.markMessagesRead(ACCOUNT, PEER, listOf("id2", "id5", "other-peer", "missing"))
+        store.markMessagesRead(ACCOUNT, PEER, emptyList())
+        database.messageDao().updateMessage(stale.copy(body = "metadata"))
+        store = reopenStore()
+        assertEquals(listOf("id1", "id3", "id4"), store.messages(ACCOUNT).filter { it.peerJid == PEER && !it.locallyRead }.map { it.localMessageId })
+        assertEquals(3, database.messageDao().observeConversationSummaries(ACCOUNT).first().single { it.peerJid == PEER }.unreadCount)
+        assertEquals(3, database.messageDao().cachedConversationSummaries(ACCOUNT).single { it.peerJid == PEER }.unreadCount)
+        assertTrue(store.messages(OTHER_ACCOUNT).none { it.locallyRead })
+        assertFalse(requireNotNull(database.messageDao().message(ACCOUNT, "other-peer")).locallyRead)
+        assertEquals(0L, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+    }
+
+    @Test
+    fun exactReadSurvivesEligibilityPromotionAndMergeInEitherDirection() = runBlocking {
+        val store = MessageStore(database)
+        val historicalAlias = alias("historical")
+        store.ingest(incoming(localId = "historical", aliases = listOf(historicalAlias)).copy(unreadEligible = false))
+        store.markMessagesRead(ACCOUNT, PEER, listOf("historical"))
+        store.ingest(incoming(localId = "replay", aliases = listOf(historicalAlias)))
+        val promoted = requireNotNull(database.messageDao().message(ACCOUNT, "historical"))
+        assertTrue(promoted.unreadEligible)
+        assertTrue(promoted.locallyRead)
+        for (readSide in listOf("winner", "loser", "neither")) {
+            val first = alias("$readSide-first")
+            val second = alias("$readSide-second")
+            store.ingest(incoming(localId = "$readSide-winner", aliases = listOf(first)))
+            store.ingest(incoming(localId = "$readSide-loser", aliases = listOf(second)))
+            store.markMessagesRead(ACCOUNT, PEER, listOf("$readSide-$readSide"))
+            val result = store.ingest(incoming(localId = "$readSide-bridge", aliases = listOf(first, second)))
+            assertEquals(1, result.mergedRows)
+            assertEquals(readSide != "neither", requireNotNull(database.messageDao().message(ACCOUNT, result.messageId)).locallyRead)
+        }
+    }
+
+    @Test
+    fun exactReadCorrectionConflictRollbackAndDeletionPreserveEvidence() = runBlocking {
+        val store = MessageStore(database)
+        val first = alias("first-read")
+        val second = alias("second-read")
+        store.ingest(incoming(localId = "first-read", aliases = listOf(first)))
+        store.ingest(incoming(localId = "second-read", aliases = listOf(second)))
+        store.markMessagesRead(ACCOUNT, PEER, listOf("second-read"))
+        val before = store.messages(ACCOUNT)
+        val faulting = MessageStore.observingWrites(database) {
+            if (it == MessageWriteBoundary.AFTER_ALIAS) error("after merge")
+        }
+        assertSuspendFailure<IllegalStateException> {
+            faulting.ingest(incoming(localId = "bridge-read", aliases = listOf(first, second)))
+        }
+        assertEquals(before, store.messages(ACCOUNT))
+        val target = TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "original-wire")
+        store.ingest(incoming(localId = "original-read", aliases = listOf(target)))
+        store.markMessagesRead(ACCOUNT, PEER, listOf("original-read"))
+        store.ingest(incoming(localId = "correction-read", replaceId = target.value, body = "edited"))
+        assertTrue(requireNotNull(database.messageDao().message(ACCOUNT, "original-read")).locallyRead)
+        val conflict = store.ingest(incoming(localId = "conflict-read", aliases = listOf(target), body = "incompatible"))
+        assertTrue(conflict.identityConflict)
+        assertTrue(requireNotNull(database.messageDao().message(ACCOUNT, "original-read")).locallyRead)
+        assertFalse(requireNotNull(database.messageDao().message(ACCOUNT, "conflict-read")).locallyRead)
+        database.accountDao().remove(ACCOUNT)
+        assertTrue(store.messages(ACCOUNT).isEmpty())
+        addAccount(ACCOUNT)
+        store.ingest(incoming(localId = "original-read", aliases = listOf(target)))
+        assertFalse(requireNotNull(database.messageDao().message(ACCOUNT, "original-read")).locallyRead)
+    }
+
+    @Test
     fun directReceiptStateIsExactScopedMonotonicAndDurable() = runBlocking {
         var store = MessageStore(database)
         val intent = outbound("receipt")
@@ -190,7 +266,7 @@ class MessageStoreTest {
                 MessageReceiptStage.DISPLAYED,
             ),
         )
-        assertEquals(first.localSequence, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+        assertTrue(requireNotNull(database.messageDao().message(ACCOUNT, first.localMessageId)).locallyRead)
         assertNull(
             store.recordReceiptSignal(
                 ACCOUNT,
@@ -209,7 +285,7 @@ class MessageStoreTest {
                 MessageReceiptStage.DISPLAYED,
             ),
         )
-        assertEquals(first.localSequence, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+        assertTrue(requireNotNull(database.messageDao().message(ACCOUNT, first.localMessageId)).locallyRead)
         assertNull(
             store.recordReceiptSignal(
                 ACCOUNT,
@@ -219,7 +295,7 @@ class MessageStoreTest {
                 MessageReceiptStage.DISPLAYED,
             ),
         )
-        assertEquals(later.localSequence, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+        assertTrue(requireNotNull(database.messageDao().message(ACCOUNT, later.localMessageId)).locallyRead)
         assertNull(store.outbox(ACCOUNT, outbound.operationId)?.receiptStage)
     }
 
@@ -254,7 +330,7 @@ class MessageStoreTest {
         )
 
         assertEquals(ArchivePageStatus.APPLIED, result.status)
-        assertEquals(inbound.localSequence, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+        assertTrue(requireNotNull(database.messageDao().message(ACCOUNT, inbound.localMessageId)).locallyRead)
         assertEquals(null, store.outbox(ACCOUNT, intent.operationId)?.receiptStage)
     }
 
@@ -276,12 +352,12 @@ class MessageStoreTest {
             ),
         )
         val outbound = requireNotNull(database.messageDao().message(ACCOUNT, "emacs-reply"))
-        assertEquals(outbound.localSequence, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+        assertTrue(requireNotNull(database.messageDao().message(ACCOUNT, outbound.localMessageId)).locallyRead)
         assertTrue(outbound.localSequence > inbound.localSequence)
 
         store.ingest(incoming(localId = "after-reply"))
         val later = requireNotNull(database.messageDao().message(ACCOUNT, "after-reply"))
-        assertEquals(outbound.localSequence, database.messageDao().peer(ACCOUNT, PEER)?.lastReadLocalSequence)
+        assertTrue(requireNotNull(database.messageDao().message(ACCOUNT, outbound.localMessageId)).locallyRead)
         assertTrue(later.localSequence > outbound.localSequence)
     }
 

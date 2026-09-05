@@ -219,6 +219,8 @@ data class MessageEntity(
     val liveDeliveryObserved: Boolean = false,
     @ColumnInfo(defaultValue = "1")
     val unreadEligible: Boolean = true,
+    @ColumnInfo(defaultValue = "0")
+    val locallyRead: Boolean = false,
 )
 
 @Entity(
