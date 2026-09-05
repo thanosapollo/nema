@@ -23,6 +23,11 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.coroutines.flow.filter
+
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -667,29 +672,69 @@ class DirectChatPresenter(
     private fun emptySelection(occurrence: ChatRouteOccurrence, status: ChatContentStatus) =
         SelectedConversation(occurrence, emptyList(), StoredDraft(), null, null, null, emptyList(), status = status)
 
+    private data class LocalSubscription(val route: ChatRoute, val generation: Int)
+    private val localSubscription = MutableStateFlow<LocalSubscription?>(null)
+
+    private data class LocalConversation(
+        val subscription: LocalSubscription,
+        val messages: List<TimelineMessage> = emptyList(),
+        val peer: PeerIdentityFacts? = null,
+        val currentSession: ThreadRef? = null,
+        val recentThreads: List<RecentThread> = emptyList(),
+        val status: ChatContentStatus = ChatContentStatus.Loading,
+    )
+
+    // Keep exactly the last route's Room subscriptions live while Home is visible.
+    // This is not a draft cache: each occurrence below must read its draft anew.
+    // Peer/thread changes replace this read model; closing the account cancels it.
+    private val localConversation = localSubscription.mapNotNull { it }
+        .flatMapLatest { subscription ->
+            val route = subscription.route
+            flow {
+                emit(LocalConversation(subscription))
+                emitAll(combine(
+                    repository.observeTimeline(DirectConversationKey(account.id.value, route.peerJid, route.thread)),
+                    repository.observePeer(account.id.value, route.peerJid),
+                    repository.observeCurrentSession(account.id.value, route.peerJid),
+                    repository.observeRecentThreads(account.id.value, route.peerJid),
+                ) { messages, peer, session, recent ->
+                    LocalConversation(subscription, messages, peer, session, recent, ChatContentStatus.Ready)
+                })
+            }.retryWhen { failure, _ ->
+                if (failure is CancellationException) throw failure
+                val failedAt = selectedRoute.value
+                emit(LocalConversation(subscription, status = ChatContentStatus.Failed))
+                // A deliberate new occurrence retries failed local queries, not a timer.
+                selectedRoute.first { it != failedAt && it.route == route }
+                true
+            }
+        }.stateIn(presenterScope, SharingStarted.Eagerly, null)
+
     private val selectedConversation = selectedRoute.flatMapLatest { occurrence ->
         val route = occurrence.route
         if (route == null) {
             flowOf(emptySelection(occurrence, ChatContentStatus.Ready))
         } else {
             val key = DirectConversationKey(account.id.value, route.peerJid, route.thread)
+            val subscription = synchronized(selectedRoute) { localSubscription.value }
             flow {
                 emit(emptySelection(occurrence, ChatContentStatus.Loading))
                 emitAll(
                     combine(
-                        repository.observeTimeline(key),
+                        localConversation.mapNotNull { it }.filter { it.subscription == subscription },
                         repository.observeStoredDraft(key),
-                        repository.observePeer(account.id.value, route.peerJid),
-                        observeRoom(route.peerJid),
-                        repository.observeCurrentSession(account.id.value, route.peerJid),
-                    ) { messages, draft, peer, room, currentSession ->
-                        SelectedConversation(occurrence, messages, draft, peer, room, currentSession, emptyList())
-                    }.combine(repository.observeRecentThreads(account.id.value, route.peerJid)) { selected, recent ->
-                        selected.copy(recentThreads = recent)
-                    }.combine(observeTyping(route.peerJid)) { selected, composers ->
-                        selected.copy(composers = composers)
-                    }.combine(observeRtt(route.peerJid)) { selected, rttText ->
-                        selected.copy(rttText = rttText)
+                        observeRoom(route.peerJid).onStart { emit(null) },
+                        observeTyping(route.peerJid).onStart { emit(emptyList()) },
+                        observeRtt(route.peerJid).onStart { emit(null) },
+                    ) { local, draft, room, composers, rttText ->
+                        if (local.status != ChatContentStatus.Ready) {
+                            emptySelection(occurrence, local.status)
+                        } else {
+                            SelectedConversation(
+                                occurrence, local.messages, draft, local.peer, room,
+                                local.currentSession, local.recentThreads, composers, rttText,
+                            )
+                        }
                     },
                 )
             }.catch { failure ->
@@ -760,7 +805,7 @@ class DirectChatPresenter(
                 val restored = repository.observeRoute(account.id.value).first()
                 synchronized(selectedRoute) {
                     if (routeGeneration.get() == 0) {
-                        selectedRoute.value = ChatRouteOccurrence(restored, routeGeneration.incrementAndGet())
+                        publishRoute(restored, routeGeneration.incrementAndGet())
                     }
                 }
             } else if (routeGeneration.get() == 0) {
@@ -1135,9 +1180,18 @@ class DirectChatPresenter(
 
     private fun selectRoute(route: ChatRoute?) = synchronized(selectedRoute) {
         val generation = routeGeneration.incrementAndGet()
-        selectedRoute.value = ChatRouteOccurrence(route, generation)
+        publishRoute(route, generation)
         presenterScope.launch { persistRoute(generation) }
         Unit
+    }
+
+    // Called under selectedRoute's lock: invalidate before publishing navigation, not
+    // after flatMapLatest finishes cancelling. Home retains the uninterrupted lifetime.
+    private fun publishRoute(route: ChatRoute?, generation: Int) {
+        if (route != null && localSubscription.value?.route != route) {
+            localSubscription.value = LocalSubscription(route, generation)
+        }
+        selectedRoute.value = ChatRouteOccurrence(route, generation)
     }
 
     private suspend fun persistRoute(generation: Int) {

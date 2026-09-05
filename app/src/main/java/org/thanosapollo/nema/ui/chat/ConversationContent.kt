@@ -324,12 +324,27 @@ fun ConversationContent(
                             }
                         }
                     }) {
-                    TextButton(onClick = { close() }) { Text("Back") }
-                    Text(selectedPeer)
-                    state.selectedThread?.let { Text("Thread ${it.id.value}") }
-                    Text(if (state.contentStatus == ChatContentStatus.Failed) {
-                        "Unable to load conversation"
-                    } else "Loading conversation")
+                    TopAppBar(
+                        modifier = Modifier.height(64.dp).testTag("conversation-top-bar"),
+                        title = {
+                            Column {
+                                Text(selectedPeer, style = MaterialTheme.typography.titleMedium,
+                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                state.selectedThread?.let {
+                                    Text("Thread ${it.id.value}", style = MaterialTheme.typography.labelSmall,
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
+                            }
+                        },
+                        navigationIcon = { TextButton(onClick = { close() }) { Text("Back") } },
+                        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
+                        windowInsets = WindowInsets(0, 0, 0, 0),
+                    )
+                    if (state.contentStatus == ChatContentStatus.Failed) {
+                        Text("Unable to load conversation")
+                    } else {
+                        org.thanosapollo.nema.ui.LoadingContent("Loading conversation", Modifier.weight(1f))
+                    }
                 }
             }
             if (selectedPeer != null && state.contentStatus == ChatContentStatus.Ready) {

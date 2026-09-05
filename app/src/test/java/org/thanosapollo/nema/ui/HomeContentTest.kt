@@ -32,6 +32,49 @@ class HomeContentTest {
     val composeRule = createComposeRule()
 
     @Test
+    fun coldLoadingIsCenteredLabelledAndKeepsChrome() {
+        var state by mutableStateOf(DirectChatState(accountId = "account-a"))
+        var backs = 0
+        composeRule.setContent {
+            MaterialTheme {
+                ConversationContent(
+                    state = state, connectionStatus = "Connected", onSelectPeer = { true },
+                    onCloseConversation = { backs++ }, onDraftChange = { CompletableDeferred(true) },
+                    onSend = { CompletableDeferred(true) },
+                )
+            }
+        }
+        fun centered(label: String) {
+            composeRule.onNodeWithText(label).assertIsDisplayed()
+            val area = composeRule.onNodeWithTag("loading-area").fetchSemanticsNode().boundsInRoot
+            val status = composeRule.onNodeWithTag("loading-status").fetchSemanticsNode()
+            assertEquals(area.center.x, status.boundsInRoot.center.x, 1f)
+            assertEquals(area.center.y, status.boundsInRoot.center.y, 1f)
+            assertEquals(androidx.compose.ui.semantics.ProgressBarRangeInfo.Indeterminate,
+                status.config[androidx.compose.ui.semantics.SemanticsProperties.ProgressBarRangeInfo])
+        }
+        centered("Loading conversations")
+        composeRule.onNodeWithContentDescription("Search").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Own profile").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("New chat").assertIsDisplayed()
+        composeRule.runOnIdle {
+            state = state.copy(selectedPeer = "alice@example.org", contentStatus = org.thanosapollo.nema.chat.ChatContentStatus.Loading)
+        }
+        centered("Loading conversation")
+        val loadingBar = composeRule.onNodeWithTag("conversation-top-bar").fetchSemanticsNode().boundsInRoot
+        composeRule.onNodeWithTag("message-composer").assertDoesNotExist()
+        composeRule.onNodeWithText("Back").performClick()
+        assertEquals(1, backs)
+        composeRule.runOnIdle { state = state.copy(contentStatus = org.thanosapollo.nema.chat.ChatContentStatus.Failed) }
+        composeRule.onNodeWithText("Unable to load conversation").assertIsDisplayed()
+        composeRule.onNodeWithTag("loading-status").assertDoesNotExist()
+        composeRule.runOnIdle { state = state.copy(contentStatus = org.thanosapollo.nema.chat.ChatContentStatus.Ready) }
+        composeRule.onNodeWithTag("message-composer").assertIsDisplayed()
+        assertEquals(loadingBar, composeRule.onNodeWithTag("conversation-top-bar").fetchSemanticsNode().boundsInRoot)
+        composeRule.onNodeWithTag("loading-status").assertDoesNotExist()
+    }
+
+    @Test
     fun homeShowsCompactChromeWithoutPermanentJidForm() {
         var profileClicks = 0
         composeRule.setContent {

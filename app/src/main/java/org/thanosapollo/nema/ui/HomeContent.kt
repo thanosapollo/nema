@@ -150,16 +150,16 @@ fun HomeContent(
             )
             if (visible.isEmpty()) {
                 Box(Modifier.weight(1f).fillMaxSize()) {
-                    Text(
-                        when {
-                            !conversationsReady -> "Loading conversations"
-                            conversations.isEmpty() -> "No conversations"
-                            else -> "No matches"
-                        },
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 24.dp),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    if (!conversationsReady) {
+                        LoadingContent("Loading conversations")
+                    } else {
+                        Text(
+                            if (conversations.isEmpty()) "No conversations" else "No matches",
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 24.dp),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                     FloatingActionButton(
                         onClick = { newChatOpen = true },
                         modifier = Modifier

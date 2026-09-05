@@ -76,6 +76,246 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
+    fun localContentDoesNotWaitForLiveRoomTypingOrRtt() = runBlocking {
+        val repository = ChatRepository(database)
+        MessageStore(database).ingest(incoming(ACCOUNT, "local", "already on disk"))
+        repository.saveDraft(DirectConversationKey(ACCOUNT, PEER), "saved draft")
+        val release = CompletableDeferred<Unit>()
+        val presenter = DirectChatPresenter(
+            accountConfiguration(ACCOUNT, SELF), repository, scope, { _, _ -> true },
+            observeRoom = { kotlinx.coroutines.flow.flow { release.await(); emit(null) } },
+            observeTyping = { kotlinx.coroutines.flow.flow { release.await(); emit(listOf("typing")) } },
+            observeRtt = { kotlinx.coroutines.flow.flow { release.await(); emit("live text") } },
+        )
+        try {
+            presenter.selectPeer(PEER)
+            val beforeLive = kotlinx.coroutines.withTimeoutOrNull(3_000) {
+                presenter.state.first { it.selectedPeer == PEER && it.contentStatus == ChatContentStatus.Ready }
+            }
+            release.complete(Unit)
+            val ready = withTimeout(3_000) { presenter.state.first { it.typingLabel != null } }
+            assertEquals("local", ready.messages.single().id)
+            assertEquals("saved draft", ready.draft)
+            assertTrue("local content must be ready before live dependencies emit", beforeLive != null)
+            assertEquals(null, beforeLive?.typingLabel)
+        } finally {
+            release.complete(Unit)
+            presenter.close()
+        }
+    }
+
+    @Test
+    fun reopeningKeepsLivePeerQueriesButReadsFreshDraft() = runBlocking {
+        MessageStore(database).ingest(incoming(ACCOUNT, "local", "already on disk"))
+        database.close()
+        val aliasQueries = java.util.concurrent.atomic.AtomicInteger()
+        database = Room.databaseBuilder(context, NemaDatabase::class.java, databaseName)
+            .setQueryCallback({ sql, _ ->
+                if (sql.contains("FROM trusted_identity_aliases AS alias")) aliasQueries.incrementAndGet()
+            }, java.util.concurrent.Executor { it.run() }).build()
+        val repository = ChatRepository(database)
+        val presenter = DirectChatPresenter(accountConfiguration(ACCOUNT, SELF), repository, scope, { _, _ -> true })
+        try {
+            presenter.selectPeer(PEER)
+            val first = withTimeout(5_000) { presenter.state.first { it.messages.isNotEmpty() } }
+            val queries = aliasQueries.get()
+            assertTrue(queries > 0)
+            presenter.closeConversation()
+            withTimeout(5_000) { presenter.state.first { it.selectedPeer == null } }
+            repository.saveDraft(DirectConversationKey(ACCOUNT, PEER), "changed while closed")
+            presenter.selectPeer(PEER)
+            val reopened = withTimeout(5_000) { presenter.state.first {
+                it.contentStatus == ChatContentStatus.Ready && it.routeOccurrence != first.routeOccurrence && it.selectedPeer == PEER
+            } }
+            assertEquals("changed while closed", reopened.draft)
+            assertEquals("local", reopened.messages.single().id)
+            assertEquals("reopening must not restart peer timeline/alias queries", queries, aliasQueries.get())
+            MessageStore(database).ingest(incoming(ACCOUNT, "new", "invalidation"))
+            withTimeout(5_000) { presenter.state.first { it.messages.size == 2 } }
+            assertTrue(aliasQueries.get() > queries)
+        } finally {
+            presenter.close()
+        }
+    }
+
+    @Test
+    fun retiredPeerQueriesCannotBecomeReadyDuringCancellation() = retiredQueriesCannotBecomeReady(false)
+
+    @Test
+    fun retiredFullThreadLineageCannotBecomeReadyDuringCancellation() = retiredQueriesCannotBecomeReady(true)
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun retiredQueriesCannotBecomeReady(threadDetour: Boolean) = runTest {
+        val message = incoming(ACCOUNT, "retired", "actionable content").let {
+            if (threadDetour) it.copy(threadId = "child", parentThreadId = "original-parent") else it
+        }
+        MessageStore(database).ingest(message)
+        database.close()
+        val gate = RouteQueryGate(StandardTestDispatcher(testScheduler), localQueryOnly = true)
+        var draftReads = 0
+        database = Room.databaseBuilder(context, NemaDatabase::class.java, databaseName)
+            .setQueryCoroutineContext(gate).allowMainThreadQueries()
+            .setQueryCallback({ sql, _ -> if (sql.contains("FROM message_drafts")) draftReads++ },
+                java.util.concurrent.Executor { it.run() }).build()
+        val repository = ChatRepository(database)
+        val presenter = DirectChatPresenter(accountConfiguration(ACCOUNT, SELF), repository, backgroundScope, { _, _ -> true })
+        try {
+            presenter.selectPeer(PEER)
+            presenter.state.first { it.messages.isNotEmpty() }
+            val original = ThreadRef(ThreadId.require("child"), ThreadId.require("original-parent"))
+            if (threadDetour) {
+                assertTrue(presenter.continueThread(original))
+                presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedThread == original }
+            }
+            val retired = presenter.state.value
+            val entered = gate.hold()
+            // Start a real local invalidation query before cancelling its subscription.
+            MessageStore(database).ingest(message.copy(localMessageId = "fresh", aliases = emptyList()))
+            kotlinx.coroutines.withContext(Dispatchers.Default) {
+                withTimeout(5_000) {
+                    while (!entered.isCompleted) { testScheduler.runCurrent(); yield() }
+                }
+            }
+            assertTrue("old local query must be parked", entered.isCompleted)
+            if (threadDetour) presenter.continueThread(original.copy(parentId = ThreadId.require("other-parent")))
+            else presenter.selectPeer(OTHER_PEER)
+            runCurrent()
+            val draftsBeforeReturn = draftReads
+            if (threadDetour) presenter.continueThread(original) else presenter.selectPeer(PEER)
+            runCurrent()
+            assertTrue("fresh draft query must finish independently", draftReads > draftsBeforeReturn)
+            val pending = presenter.state.value
+            assertTrue(pending.routeOccurrence != retired.routeOccurrence)
+            assertEquals(retired.routeOccurrence.route, pending.routeOccurrence.route)
+            assertEquals("retired subscription must not be relabelled Ready", ChatContentStatus.Loading, pending.contentStatus)
+            assertTrue(pending.messages.isEmpty())
+            assertTrue(!presenter.markVisibleConversationRead(VisibleReadRequest(
+                ACCOUNT, pending.routeOccurrence, setOf("retired"), listOf("retired"),
+            )))
+            gate.release()
+            val fresh = presenter.state.first {
+                it.routeOccurrence == pending.routeOccurrence && it.contentStatus == ChatContentStatus.Ready
+            }
+            assertTrue(fresh.messages.any { it.id == "fresh" })
+        } finally {
+            gate.release()
+            presenter.close()
+            runCurrent()
+        }
+    }
+
+    @Test
+    fun retainedLocalFailureRequiresReopenAndCancellationStopsRetry() = retainedLocalFailure(false)
+
+    @Test
+    fun retainedLocalFailureWhileHomeAndCloseStopsLiveQueries() = retainedLocalFailure(true)
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun retainedLocalFailure(whileHome: Boolean) = runTest {
+        MessageStore(database).ingest(incoming(ACCOUNT, "local", "actionable content"))
+        database.close()
+        var fail = false
+        var reads = 0
+        val failures = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        database = Room.databaseBuilder(context, NemaDatabase::class.java, databaseName)
+            .setQueryCoroutineContext(StandardTestDispatcher(testScheduler)).allowMainThreadQueries()
+            .openHelperFactory { configuration ->
+                val helper = androidx.sqlite.db.framework.FrameworkSQLiteOpenHelperFactory().create(configuration)
+                fun wrap(db: androidx.sqlite.db.SupportSQLiteDatabase) = object : androidx.sqlite.db.SupportSQLiteDatabase by db {
+                    override fun query(query: androidx.sqlite.db.SupportSQLiteQuery): android.database.Cursor = query(query, null)
+                    override fun query(query: androidx.sqlite.db.SupportSQLiteQuery, signal: android.os.CancellationSignal?): android.database.Cursor {
+                        if (query.sql.contains("FROM direct_thread_sessions")) {
+                            reads++
+                            if (fail) {
+                                failures.trySend(Unit)
+                                return db.query("SELECT * FROM deliberately_missing_local_source")
+                            }
+                        }
+                        return if (signal == null) db.query(query) else db.query(query, signal)
+                    }
+                }
+                object : androidx.sqlite.db.SupportSQLiteOpenHelper by helper {
+                    override val writableDatabase get() = wrap(helper.writableDatabase)
+                    override val readableDatabase get() = wrap(helper.readableDatabase)
+                }
+            }.build()
+        val owner = SupervisorJob(backgroundScope.coroutineContext[Job])
+        val presenter = DirectChatPresenter(accountConfiguration(ACCOUNT, SELF), ChatRepository(database),
+            CoroutineScope(backgroundScope.coroutineContext + owner), { _, _ -> true })
+        suspend fun invalidate(peer: String, thread: String) {
+            database.messageDao().insertPeer(org.thanosapollo.nema.storage.PeerEntity(ACCOUNT, peer))
+            database.messageDao().insertThread(
+                org.thanosapollo.nema.storage.MessageThreadEntity(ACCOUNT, peer, MessageKind.CHAT, thread, null),
+            )
+            database.messageDao().saveDirectThreadSession(
+                org.thanosapollo.nema.storage.DirectThreadSessionEntity(ACCOUNT, peer, threadId = thread),
+            )
+        }
+        suspend fun ready(peer: String) = presenter.state.first {
+            it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == peer
+        }
+        try {
+            presenter.selectPeer(PEER)
+            assertEquals("local", ready(PEER).messages.single().id)
+            if (whileHome) {
+                presenter.closeConversation()
+                presenter.state.first { it.selectedPeer == null }
+            }
+            fail = true
+            invalidate(PEER, "failed-session")
+            failures.receive()
+            if (whileHome) {
+                runCurrent()
+                assertEquals(null, presenter.state.value.selectedPeer)
+                assertEquals(ChatContentStatus.Ready, presenter.state.value.contentStatus)
+                assertTrue(presenter.state.value.messages.isEmpty())
+                presenter.selectPeer(PEER)
+            }
+            val failed = presenter.state.first { it.contentStatus == ChatContentStatus.Failed }
+            assertTrue(failed.messages.isEmpty())
+            assertEquals("", failed.draft)
+            assertEquals(null, failed.currentSession)
+            var attempts = reads
+            testScheduler.advanceTimeBy(60_000); runCurrent()
+            assertEquals("failure must not timer-retry", attempts, reads)
+            presenter.closeConversation()
+            runCurrent()
+            testScheduler.advanceTimeBy(60_000); runCurrent()
+            assertEquals("Home is not a retry request", attempts, reads)
+            fail = false
+            presenter.selectPeer(PEER)
+            assertEquals("local", ready(PEER).messages.single().id)
+            fail = true
+            invalidate(PEER, "fail-again")
+            presenter.state.first { it.contentStatus == ChatContentStatus.Failed }
+            attempts = reads
+            fail = false
+            presenter.selectPeer(OTHER_PEER)
+            ready(OTHER_PEER)
+            assertEquals("replacement must cancel A's waiting retry", attempts + 1, reads)
+            if (whileHome) {
+                presenter.closeConversation()
+                presenter.state.first { it.selectedPeer == null }
+            } else {
+                fail = true
+                invalidate(OTHER_PEER, "close-failed")
+                presenter.state.first { it.contentStatus == ChatContentStatus.Failed }
+            }
+            presenter.close()
+            owner.children.toList().forEach { it.join() }
+            attempts = reads
+            invalidate(OTHER_PEER, "after-close")
+            testScheduler.advanceTimeBy(60_000); runCurrent()
+            assertEquals("close stops retained observers and retry waits", attempts, reads)
+        } finally {
+            presenter.close()
+            owner.cancel()
+            owner.join()
+            failures.close()
+        }
+    }
+
+    @Test
     fun conversationsUseLatestMessagePerPeerAndIncludeGroupchats() = runBlocking {
         val store = MessageStore(database)
         store.ingest(incoming(ACCOUNT, "old", "old body"))
