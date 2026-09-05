@@ -10,6 +10,7 @@ internal const val CHEAP_CONVERSATION_SUMMARIES = """
               FROM messages AS correction
               WHERE correction.accountId = messages.accountId
                 AND correction.correctionTargetMessageId = messages.localMessageId
+              AND (correction.messageKind != 'GROUPCHAT' OR correction.mucCorrectionSelected = 1)
               ORDER BY correction.sentAtEpochMs IS NULL,
                 correction.sentAtEpochMs DESC,
                 correction.localSequence DESC,

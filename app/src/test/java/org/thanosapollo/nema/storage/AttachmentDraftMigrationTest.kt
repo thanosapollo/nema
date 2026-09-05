@@ -39,7 +39,7 @@ class AttachmentDraftMigrationTest {
             // Opening normally proves the production builder registered the upgrade.
             var db = NemaDatabase.create(context, name)
             try {
-                assertEquals(26, db.openHelper.writableDatabase.version)
+                assertEquals(27, db.openHelper.writableDatabase.version)
                 val draft = requireNotNull(db.messageDao().draft("a", "peer@example.org", "6:parentchild"))
                 assertEquals("caption", draft.body)
                 assertEquals(listOf("id", "peer@example.org", "quote", "Peer"),
@@ -49,7 +49,7 @@ class AttachmentDraftMigrationTest {
             } finally {
                 db.close()
             }
-            migrations.runMigrationsAndValidate(name, 26, true, MessageSchema.MIGRATION_23_24, MessageSchema.MIGRATION_24_25, MessageSchema.MIGRATION_25_26).close()
+            migrations.runMigrationsAndValidate(name, 27, true, MessageSchema.MIGRATION_23_24, MessageSchema.MIGRATION_24_25, MessageSchema.MIGRATION_25_26, MessageSchema.MIGRATION_26_27).close()
             db = NemaDatabase.create(context, name)
             try {
                 assertNull(db.messageDao().draft("a", "peer@example.org", ""))

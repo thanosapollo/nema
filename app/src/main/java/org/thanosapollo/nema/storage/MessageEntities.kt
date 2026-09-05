@@ -343,6 +343,8 @@ data class TrustedIdentityAliasEntity(
     indices = [
         Index(value = ["accountId", "firstMessageId"]),
         Index(value = ["accountId", "secondMessageId"]),
+        Index(value = ["accountId", "firstMessageId", "kind"]),
+        Index(value = ["accountId", "secondMessageId", "kind"]),
     ],
 )
 data class IdentityConflictEntity(

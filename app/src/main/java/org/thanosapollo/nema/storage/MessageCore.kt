@@ -756,6 +756,33 @@ abstract class MessageDao {
     @Delete
     abstract suspend fun deleteMessage(message: MessageEntity)
 
+    @Query("""
+        SELECT * FROM messages WHERE accountId = :accountId AND peerJid = :room
+          AND senderJid = :sender AND mucReplaceId = :target LIMIT 129
+    """)
+    abstract suspend fun mucCorrectionClaims(accountId: String, room: String, sender: String, target: String): List<MessageEntity>
+
+    @Query("""
+        SELECT * FROM messages WHERE accountId = :accountId AND correctionTargetMessageId = :root
+          AND messageKind = 'GROUPCHAT' LIMIT 129
+    """)
+    abstract suspend fun acceptedMucCorrections(accountId: String, root: String): List<MessageEntity>
+
+    @Query("""
+        SELECT * FROM archive_message_positions WHERE accountId = :accountId
+          AND archiveAuthority = :room AND archiveScope = :room AND messageId IN (:ids)
+    """)
+    abstract suspend fun mucCorrectionPositions(accountId: String, room: String, ids: List<String>): List<ArchiveMessagePositionEntity>
+
+    @Query("""
+        SELECT localMessageId FROM messages WHERE accountId = :accountId AND localMessageId IN (:ids)
+          AND (EXISTS(SELECT 1 FROM identity_conflicts c WHERE c.accountId = :accountId
+               AND c.firstMessageId = messages.localMessageId AND c.kind IN ('STANZA_ID', 'MAM_RESULT'))
+            OR EXISTS(SELECT 1 FROM identity_conflicts c WHERE c.accountId = :accountId
+               AND c.secondMessageId = messages.localMessageId AND c.kind IN ('STANZA_ID', 'MAM_RESULT')))
+    """)
+    abstract suspend fun mucConflictedEvents(accountId: String, ids: List<String>): List<String>
+
     @Insert
     abstract suspend fun insertArchivePosition(position: ArchiveMessagePositionEntity)
 
@@ -926,6 +953,7 @@ abstract class MessageDao {
                 FROM messages AS correction
                 WHERE correction.accountId = messages.accountId
                   AND correction.correctionTargetMessageId = messages.localMessageId
+              AND (correction.messageKind != 'GROUPCHAT' OR correction.mucCorrectionSelected = 1)
                 ORDER BY correction.sentAtEpochMs IS NULL,
                   correction.sentAtEpochMs DESC,
                   correction.localSequence DESC,
@@ -1108,6 +1136,7 @@ abstract class MessageDao {
             FROM messages AS correction
             WHERE correction.accountId = messages.accountId
               AND correction.correctionTargetMessageId = messages.localMessageId
+              AND (correction.messageKind != 'GROUPCHAT' OR correction.mucCorrectionSelected = 1)
             ORDER BY correction.sentAtEpochMs IS NULL,
               correction.sentAtEpochMs DESC,
               correction.localSequence DESC,
@@ -1118,6 +1147,7 @@ abstract class MessageDao {
             SELECT 1 FROM messages AS correction
             WHERE correction.accountId = messages.accountId
               AND correction.correctionTargetMessageId = messages.localMessageId
+              AND (correction.messageKind != 'GROUPCHAT' OR correction.mucCorrectionSelected = 1)
           ) AS edited,
           CASE
             WHEN messages.messageKind = 'GROUPCHAT' THEN (
@@ -2256,14 +2286,18 @@ class MessageStore private constructor(
         }
 
     suspend fun ingest(incoming: IncomingMessage): IngestionResult = database.withTransaction {
+        val muc = MucCorrectionBatch(database.messageDao())
         val position = incoming.archivePosition()
         val result = ingestInTransaction(
             incoming.withoutArchivePosition(),
+            muc,
             preserveStoredThreadLineage = true,
             allowSentCarbonRead = incoming.sentTimeSource == MessageTimeSource.CARBON,
             allowLiveReconciliation = position == null,
         )
         if (position != null) attachArchivePosition(result.messageId, incoming.accountId, position)
+        muc.capture(incoming.accountId, result.messageId)
+        muc.settle()
         result
     }
 
@@ -2426,6 +2460,7 @@ class MessageStore private constructor(
 
     private suspend fun ingestInTransaction(
         received: IncomingMessage,
+        muc: MucCorrectionBatch,
         preserveStoredThreadLineage: Boolean = false,
         allowDirectSessionTransition: Boolean = true,
         allowSentCarbonRead: Boolean = false,
@@ -2488,6 +2523,7 @@ class MessageStore private constructor(
         }
         ensureScope(incoming.accountId, incoming.peerJid, incoming.messageKind,
             incoming.threadId, incoming.parentThreadId, preserveStoredThreadLineage)
+        muc.capture(pinned)
         val enriched = pinned?.enrichMuc(incoming.mucFacts)
         if (enriched != null && enriched != pinned) dao.updateMessage(enriched)
         val matched = enriched ?: existingLocal ?: mappedMessages
@@ -2533,9 +2569,11 @@ class MessageStore private constructor(
                         dao.message(incoming.accountId, requireNotNull(mapped.messageId)),
                     )
                     if (alias in incoming.eventAliases() && canMerge(winner, other, incoming)) {
-                        winner = mergePair(winner, other)
+                        winner = mergePair(winner, other, muc)
                         mergedRows += 1
                     } else {
+                        muc.capture(other)
+                        muc.capture(winner)
                         check(
                             dao.quarantineAlias(
                                 incoming.accountId,
@@ -2590,6 +2628,7 @@ class MessageStore private constructor(
             dao.markMessagesReadThrough(winner.accountId, winner.peerJid, winner.localSequence)
         }
         attachPendingReactions(dao, winner)
+        muc.capture(winner)
         return IngestionResult(
             messageId = winner.localMessageId,
             mergedRows = mergedRows,
@@ -2769,6 +2808,7 @@ class MessageStore private constructor(
         incoming: IncomingMessage,
         stored: MessageEntity,
     ): MessageEntity {
+        if (stored.messageKind == MessageKind.GROUPCHAT) return stored
         var winner = stored
         val replaceId = winner.replaceId
         if (replaceId != null && winner.correctionTargetMessageId == null) {
@@ -2849,6 +2889,7 @@ class MessageStore private constructor(
 
     suspend fun applyArchivePage(page: ArchivePage): ArchivePageResult = database.withTransaction {
         val dao = database.messageDao()
+        val muc = MucCorrectionBatch(dao)
         require(dao.accountExists(page.key.accountId)) { "Unknown archive account" }
         val current = dao.archiveCursor(
             page.key.accountId,
@@ -3120,6 +3161,7 @@ class MessageStore private constructor(
                 position.copy(ordinal = Math.addExact(startOrdinal, position.index.toLong()))
             }
             prefixPositions.forEach { position ->
+                muc.capture(page.key.accountId, position.messageId)
                 check(
                     dao.deleteArchivePosition(
                         position.accountId,
@@ -3131,6 +3173,7 @@ class MessageStore private constructor(
                 ) { "Migrated archive prefix changed during reconciliation" }
             }
             mapped.forEach { position ->
+                muc.capture(page.key.accountId, position.messageId)
                 check(
                     dao.deleteArchivePosition(
                         page.key.accountId,
@@ -3188,6 +3231,7 @@ class MessageStore private constructor(
                     unreadEligible = page.direction == ArchiveDirection.AFTER &&
                         archived.resultId != page.boundaryId,
                 ),
+                muc = muc,
                 preserveStoredThreadLineage = true,
                 allowDirectSessionTransition = false,
                 allowSentCarbonRead = false,
@@ -3202,6 +3246,7 @@ class MessageStore private constructor(
                     ordinal = Math.addExact(startOrdinal, index.toLong()),
                 ),
             )
+            muc.capture(page.key.accountId, result.messageId)
             ingestedContent += archived to result
         }
 
@@ -3233,9 +3278,10 @@ class MessageStore private constructor(
             )?.messageId?.let(seedIds::add)
         }
         if (seedIds.size <= IDENTITYLESS_RECONCILIATION_CANDIDATE_CAP) {
-            seedIds.forEach { reconcileIdentitylessArchiveSeed(it, closure, floor) }
+            seedIds.forEach { reconcileIdentitylessArchiveSeed(it, closure, floor, muc) }
         }
 
+        muc.settle()
         var inserted = 0
         val insertedInbound = mutableListOf<InsertedInbound>()
         ingestedContent.forEach { (archived, result) ->
@@ -3294,6 +3340,7 @@ class MessageStore private constructor(
         seedMessageId: String,
         closure: IdentitylessArchiveClosure,
         wallFloorMs: Long?,
+        muc: MucCorrectionBatch,
     ) {
         if (wallFloorMs == null) return
         val dao = database.messageDao()
@@ -3336,7 +3383,7 @@ class MessageStore private constructor(
         ) ?: return
         val live = dao.message(closure.key.accountId, pair.liveMessageId) ?: return
         val mam = dao.message(closure.key.accountId, pair.mamMessageId) ?: return
-        mergePair(live, mam)
+        mergePair(live, mam, muc)
     }
 
     suspend fun repairRoomArchiveDuplicates(
@@ -3373,7 +3420,9 @@ class MessageStore private constructor(
             }
         }
         // Classification and compatibility of the entire frozen universe precede the first merge.
-        pairs.forEach { (live, mam) -> mergePair(live, mam) }
+        val muc = MucCorrectionBatch(dao)
+        pairs.forEach { (live, mam) -> mergePair(live, mam, muc) }
+        muc.settle()
         val after = dao.messages(accountId).size.toLong()
         check(messages.size.toLong() - after == pairs.size.toLong())
         check(accounts.completeReconciliationState(accountId, messages.size.toLong(), after,
@@ -3426,11 +3475,13 @@ class MessageStore private constructor(
             val plan = requireNotNull(identitylessRepairPlan(candidates)) {
                 "Identityless repair candidate IDs are not unique"
             }
+            val muc = MucCorrectionBatch(dao)
             plan.pairs.forEach { pair ->
                 val live = requireNotNull(dao.message(accountId, pair.liveMessageId))
                 val mam = requireNotNull(dao.message(accountId, pair.mamMessageId))
-                mergePair(live, mam)
+                mergePair(live, mam, muc)
             }
+            muc.settle()
             val afterCount = dao.messages(accountId).size.toLong()
             check(
                 accountDao.completeReconciliationState(
@@ -3637,10 +3688,13 @@ class MessageStore private constructor(
     private suspend fun mergePair(
         first: MessageEntity,
         second: MessageEntity,
+        muc: MucCorrectionBatch,
     ): MessageEntity {
         val dao = database.messageDao()
-        val winner = minOf(first, second, compareBy(MessageEntity::localSequence, MessageEntity::localMessageId))
-        val loser = if (winner.localMessageId == first.localMessageId) second else first
+        muc.beforeMerge(first)
+        muc.beforeMerge(second)
+        val winner = minOf(first, second, compareBy(MessageEntity::localSequence, MessageEntity::localMessageId)).withoutMucAcceptance()
+        val loser = (if (winner.localMessageId == first.localMessageId) second else first).withoutMucAcceptance()
         dao.reparentAliases(winner.accountId, loser.localMessageId, winner.localMessageId)
         dao.reparentOutbox(winner.accountId, loser.localMessageId, winner.localMessageId)
         reparentConflicts(loser, winner)
@@ -3667,6 +3721,7 @@ class MessageStore private constructor(
             .withPreferredTime(loser.sentAtEpochMs, loser.sentTimeSource)
             .withAttachmentMetadata(loser.attachmentName, loser.attachmentMime, loser.attachmentSize)
         if (reconciled != winner) dao.updateMessage(reconciled)
+        muc.capture(reconciled)
         return reconciled
     }
 
@@ -3723,10 +3778,10 @@ class MessageStore private constructor(
                     conflict.secondMessageId
                 },
             ).sorted()
-            if (ids[0] != ids[1]) {
-                dao.insertConflict(
-                    conflict.copy(firstMessageId = ids[0], secondMessageId = ids[1]),
-                )
+            // Coalescing owners does not restore quarantined room-event authority.
+            if (ids[0] != ids[1] || (winner.messageKind == MessageKind.GROUPCHAT &&
+                    conflict.kind in listOf(IdentityAliasKind.STANZA_ID, IdentityAliasKind.MAM_RESULT))) {
+                dao.insertConflict(conflict.copy(firstMessageId = ids[0], secondMessageId = ids[1]))
             }
         }
     }

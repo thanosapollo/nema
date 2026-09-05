@@ -5,6 +5,15 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 internal object MessageSchema {
+    val MIGRATION_26_27: Migration = object : Migration(26, 27) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("CREATE INDEX index_identity_conflicts_accountId_firstMessageId_kind " +
+                "ON identity_conflicts (accountId, firstMessageId, kind)")
+            db.execSQL("CREATE INDEX index_identity_conflicts_accountId_secondMessageId_kind " +
+                "ON identity_conflicts (accountId, secondMessageId, kind)")
+        }
+    }
+
     val MIGRATION_25_26: Migration = object : Migration(25, 26) {
         override fun migrate(db: SupportSQLiteDatabase) {
             db.execSQL("ALTER TABLE messages ADD COLUMN mucMessageId TEXT")

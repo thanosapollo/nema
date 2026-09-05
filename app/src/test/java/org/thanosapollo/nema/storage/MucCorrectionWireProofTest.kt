@@ -17,7 +17,7 @@ import org.thanosapollo.nema.session.*
 import org.thanosapollo.nema.xmpp.smack.*
 import org.thanosapollo.nema.xmpp.transport.*
 
-/** Retained room claims must not suppress their visible fallback. */
+/** Authenticated, accepted room claims project through the real archive page transaction. */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 internal class MucCorrectionWireProofTest : ReactionStoreTestFixture() {
@@ -39,7 +39,7 @@ internal class MucCorrectionWireProofTest : ReactionStoreTestFixture() {
             "<body>$body</body>$extension<occupant-id xmlns='urn:xmpp:occupant-id:0' id='actor-a'/>" +
             "<stanza-id xmlns='urn:xmpp:sid:0' by='$ROOM' id='archive-$id'/></message>"
 
-    @Test fun authenticatedRoomPageRetainsClaimsWithoutSuppressingFallback() = runBlocking {
+    @Test fun authenticatedRoomPageSelectsCorrectionAndSuppressesOnlyAcceptedFallback() = runBlocking {
         val registry = RoomStableIdAuthorityRegistry().apply { begin(attempt) }
         val lease = requireNotNull(registry.beginJoin(attempt, ROOM))
         check(registry.publish(lease, true, true, "self", true))
@@ -61,12 +61,14 @@ internal class MucCorrectionWireProofTest : ReactionStoreTestFixture() {
         assertEquals("edit1", saved.mucMessageId)
         assertEquals(MucClaimState.VALID, saved.mucClaimState)
         assertEquals(MucOccupantEvidence.ROOM_MAM, saved.mucOccupantEvidence)
-        assertNull(saved.replaceId)
-        assertNull(saved.correctionTargetMessageId)
+        assertEquals("original1", saved.replaceId)
+        assertEquals("archive-original1", saved.correctionTargetMessageId)
+        assertTrue(saved.mucCorrectionSelected)
         assertNull(saved.mucLiveOrderEpoch)
         val timeline = database.messageDao().observeDirectTimeline(ACCOUNT, ROOM).first()
-        assertEquals(2, timeline.size)
-        assertTrue(timeline.all { it.correctedBody == null })
+        assertEquals(1, timeline.size)
+        assertEquals("gym", timeline.single().correctedBody)
+        assertTrue(timeline.single().edited)
         assertEquals("archive-edit1", store.archiveCursor(key)?.newestId)
     }
 }

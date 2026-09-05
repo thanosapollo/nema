@@ -113,7 +113,8 @@ class RoomArchiveRepairTest {
             assertEquals(winner.localSequence, result.localSequence)
             assertTrue(result.liveDeliveryObserved)
             assertEquals(MessageTimeSource.MAM, result.sentTimeSource)
-            assertEquals(winner.localMessageId, dao.message("a", prefix + "correction")?.correctionTargetMessageId)
+            // The synthetic legacy MUC link has no trusted retained claim; repair revokes it.
+            assertNull(dao.message("a", prefix + "correction")?.correctionTargetMessageId)
             assertEquals(winner.localMessageId, dao.messageReactions("a", r).single().localMessageId)
             assertEquals(winner.localMessageId, dao.archivePositions("a").single { it.archiveAuthority == r }.messageId)
         }

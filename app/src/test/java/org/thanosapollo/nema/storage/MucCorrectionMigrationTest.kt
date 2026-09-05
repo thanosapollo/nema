@@ -65,7 +65,7 @@ class MucCorrectionMigrationTest {
             var db = NemaDatabase.create(context, name)
             try {
                 val sql = db.openHelper.writableDatabase
-                assertEquals(26, sql.version)
+                assertEquals(27, sql.version)
                 assertEquals(before, snapshot(sql))
                 assertUnknown(sql)
                 var store = MessageStore(db)
@@ -103,7 +103,8 @@ class MucCorrectionMigrationTest {
                         assertEquals("opaque", row.mucOccupantId)
                         assertEquals(MucPayloadState.PLAIN, row.mucPayloadState)
                         assertNull(row.mucLiveOrderEpoch)
-                        assertNull(row.replaceId)
+                        assertEquals(if (wire && row.localMessageId == "edit") "wire-root" else null, row.replaceId)
+                        assertEquals(if (wire && row.localMessageId == "edit") "root" else null, row.correctionTargetMessageId)
                     }
                     if (!wire) assertEquals(aliases, store.aliases("a").toSet())
                     else {
@@ -199,7 +200,8 @@ class MucCorrectionMigrationTest {
         for (table in listOf("accounts", "peers", "messages", "archive_message_positions", "trusted_identity_aliases",
             "message_outbox", "message_reactions", "message_drafts", "message_threads", "account_message_sequences", "archive_cursors")) {
             sql.query("SELECT * FROM $table ORDER BY rowid").use { c ->
-                val columns = c.columnNames.indices.filterNot { c.columnNames[it].startsWith("muc") }
+                val columns = c.columnNames.indices.filterNot { c.columnNames[it].startsWith("muc") ||
+                    c.columnNames[it] in setOf("replaceId", "correctionTargetMessageId") }
                 result[table] = buildList { while (c.moveToNext()) add(columns.map { if (c.isNull(it)) null else c.getString(it) }) }
             }
         }
