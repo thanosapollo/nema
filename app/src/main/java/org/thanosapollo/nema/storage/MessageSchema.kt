@@ -5,6 +5,21 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 internal object MessageSchema {
+    val MIGRATION_25_26: Migration = object : Migration(25, 26) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN mucMessageId TEXT")
+            db.execSQL("ALTER TABLE messages ADD COLUMN mucReplaceId TEXT")
+            db.execSQL("ALTER TABLE messages ADD COLUMN mucClaimState TEXT NOT NULL DEFAULT 'UNKNOWN'")
+            db.execSQL("ALTER TABLE messages ADD COLUMN mucOccupantId TEXT")
+            db.execSQL("ALTER TABLE messages ADD COLUMN mucOccupantEvidence TEXT NOT NULL DEFAULT 'UNKNOWN'")
+            db.execSQL("ALTER TABLE messages ADD COLUMN mucPayloadState TEXT NOT NULL DEFAULT 'UNKNOWN'")
+            db.execSQL("ALTER TABLE messages ADD COLUMN mucLiveOrderEpoch TEXT")
+            db.execSQL("ALTER TABLE messages ADD COLUMN mucCorrectionSelected INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("CREATE INDEX index_messages_accountId_peerJid_senderJid_mucReplaceId " +
+                "ON messages (accountId, peerJid, senderJid, mucReplaceId)")
+        }
+    }
+
     val MIGRATION_24_25: Migration = object : Migration(24, 25) {
         override fun migrate(db: SupportSQLiteDatabase) {
             db.execSQL("ALTER TABLE messages ADD COLUMN locallyRead INTEGER NOT NULL DEFAULT 0")

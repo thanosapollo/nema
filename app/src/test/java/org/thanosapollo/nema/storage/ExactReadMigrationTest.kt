@@ -55,7 +55,7 @@ class ExactReadMigrationTest {
                 val db = NemaDatabase.create(context, name)
                 try {
                     val sql = db.openHelper.writableDatabase
-                    assertEquals(25, sql.version)
+                    assertEquals(26, sql.version)
                     sql.query("SELECT localMessageId FROM messages WHERE accountId = 'a' AND peerJid = 'p' AND locallyRead = 1 ORDER BY localSequence").use { rows ->
                         val ids = mutableListOf<String>()
                         while (rows.moveToNext()) ids += rows.getString(0)

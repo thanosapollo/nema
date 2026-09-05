@@ -187,6 +187,7 @@ enum class MessageDirection {
         Index(value = ["accountId", "peerJid"]),
         Index(value = ["accountId", "peerJid", "messageKind", "threadId"]),
         Index(value = ["accountId", "correctionTargetMessageId"]),
+        Index(value = ["accountId", "peerJid", "senderJid", "mucReplaceId"]),
     ],
 )
 data class MessageEntity(
@@ -221,6 +222,20 @@ data class MessageEntity(
     val unreadEligible: Boolean = true,
     @ColumnInfo(defaultValue = "0")
     val locallyRead: Boolean = false,
+    // Dormant retained facts: no ingress populates these until safe legacy enrichment lands.
+    val mucMessageId: String? = null,
+    val mucReplaceId: String? = null,
+    @ColumnInfo(defaultValue = "'UNKNOWN'")
+    val mucClaimState: MucClaimState = MucClaimState.UNKNOWN,
+    val mucOccupantId: String? = null,
+    @ColumnInfo(defaultValue = "'UNKNOWN'")
+    val mucOccupantEvidence: MucOccupantEvidence = MucOccupantEvidence.UNKNOWN,
+    @ColumnInfo(defaultValue = "'UNKNOWN'")
+    val mucPayloadState: MucPayloadState = MucPayloadState.UNKNOWN,
+    // Non-null certifies live insertion sequence provenance, not a later live observation.
+    val mucLiveOrderEpoch: String? = null,
+    @ColumnInfo(defaultValue = "0")
+    val mucCorrectionSelected: Boolean = false,
 )
 
 @Entity(
@@ -497,6 +512,24 @@ data class MessageReactionEntity(
 )
 
 class MessageConverters {
+    @TypeConverter
+    fun mucClaimState(value: MucClaimState): String = value.name
+
+    @TypeConverter
+    fun mucClaimState(value: String): MucClaimState = MucClaimState.valueOf(value)
+
+    @TypeConverter
+    fun mucOccupantEvidence(value: MucOccupantEvidence): String = value.name
+
+    @TypeConverter
+    fun mucOccupantEvidence(value: String): MucOccupantEvidence = MucOccupantEvidence.valueOf(value)
+
+    @TypeConverter
+    fun mucPayloadState(value: MucPayloadState): String = value.name
+
+    @TypeConverter
+    fun mucPayloadState(value: String): MucPayloadState = MucPayloadState.valueOf(value)
+
     @TypeConverter
     fun messageKind(value: MessageKind): String = value.name
 

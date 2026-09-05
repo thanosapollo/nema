@@ -67,6 +67,14 @@ data class MessageMetadata(
     val directSessionTransitionApplied: Boolean = false,
     val liveDeliveryObserved: Boolean = false,
     val unreadEligible: Boolean = true,
+    val mucMessageId: String? = null,
+    val mucReplaceId: String? = null,
+    val mucClaimState: MucClaimState = MucClaimState.UNKNOWN,
+    val mucOccupantId: String? = null,
+    val mucOccupantEvidence: MucOccupantEvidence = MucOccupantEvidence.UNKNOWN,
+    val mucPayloadState: MucPayloadState = MucPayloadState.UNKNOWN,
+    val mucLiveOrderEpoch: String? = null,
+    val mucCorrectionSelected: Boolean = false,
 )
 
 private fun MessageEntity.metadata() = MessageMetadata(
@@ -98,6 +106,14 @@ private fun MessageEntity.metadata() = MessageMetadata(
     directSessionTransitionApplied = directSessionTransitionApplied,
     liveDeliveryObserved = liveDeliveryObserved,
     unreadEligible = unreadEligible,
+    mucMessageId = mucMessageId,
+    mucReplaceId = mucReplaceId,
+    mucClaimState = mucClaimState,
+    mucOccupantId = mucOccupantId,
+    mucOccupantEvidence = mucOccupantEvidence,
+    mucPayloadState = mucPayloadState,
+    mucLiveOrderEpoch = mucLiveOrderEpoch,
+    mucCorrectionSelected = mucCorrectionSelected,
 )
 
 @Dao
