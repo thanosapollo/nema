@@ -118,8 +118,23 @@ class SessionRuntimeTest {
         var holdName: String? = null
         val captured = CompletableDeferred<Unit>()
         private var held: Pair<kotlin.coroutines.CoroutineContext, Runnable>? = null
+        private val holdingCaller = ThreadLocal<Boolean>()
+
+        fun holdLaunchFromCaller(launch: () -> Unit): Job {
+            check(held == null)
+            holdingCaller.set(true)
+            try {
+                launch()
+                // launch dispatches synchronously, after reportComposer captures its lease.
+                return checkNotNull(checkNotNull(held).first[Job])
+            } finally {
+                holdingCaller.remove()
+            }
+        }
+
         override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) {
-            if (holdNext && (holdName == null || context[kotlinx.coroutines.CoroutineName]?.name == holdName)) {
+            if (holdingCaller.get() == true ||
+                (holdNext && (holdName == null || context[kotlinx.coroutines.CoroutineName]?.name == holdName))) {
                 holdNext = false
                 check(held == null)
                 held = context to block
@@ -136,24 +151,34 @@ class SessionRuntimeTest {
     @Test
     fun `outbound queued composer cannot retarget A B A or reconnect`() = runTest {
         val dispatcher = HoldNextDispatcher(kotlinx.coroutines.test.StandardTestDispatcher(testScheduler))
-        val first = connectedRuntime(CoroutineScope(backgroundScope.coroutineContext + dispatcher), "first") {
+        val runtimeScope = CoroutineScope(backgroundScope.coroutineContext + dispatcher)
+        val first = connectedRuntime(runtimeScope, "first") {
             testScheduler.currentTime
         }
-        runCurrent()
-        dispatcher.holdNext = true
-        first.runtime.reportComposer("first", REACTION_PEER, true)
+        fun queueComposer(): Job = dispatcher.holdLaunchFromCaller {
+            // A Room completion may dispatch from another thread while the gate is armed.
+            // Force that ordering instead of hoping background work has drained.
+            Thread { runtimeScope.launch {} }.apply {
+                start()
+                join(5_000)
+                assertFalse("Unrelated dispatch must have returned", isAlive)
+            }
+            first.runtime.reportComposer("first", REACTION_PEER, true)
+        }
+        val queuedBeforeSwitch = queueComposer()
+        assertFalse(queuedBeforeSwitch.isCompleted)
         val second = switchAccount(first, "second")
         val returned = switchAccount(second, "first")
         dispatcher.release()
-        runCurrent()
+        queuedBeforeSwitch.join()
         advanceTimeBy(20_000)
         runCurrent()
         assertTrue(first.connections.created.all { it.sentTyping.isEmpty() })
-        dispatcher.holdNext = true
-        returned.runtime.reportComposer("first", REACTION_PEER, true)
+        val queuedBeforeReconnect = queueComposer()
+        assertFalse(queuedBeforeReconnect.isCompleted)
         completeReconnect(returned, returned.connection.attemptIdentity)
         dispatcher.release()
-        runCurrent()
+        queuedBeforeReconnect.join()
         advanceTimeBy(20_000)
         runCurrent()
         assertTrue(first.connections.created.all { it.sentTyping.isEmpty() })
