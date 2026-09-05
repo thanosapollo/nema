@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -1350,7 +1351,9 @@ class SessionRuntimeTest {
 
         val first = async { fixture.runtime.reactTo(REACTION_ROOM, GROUP_TARGET.localId, "🔥") }
         steps[0].entered.await()
+        val sameAtLock = observeReactionLockEntry(fixture, REACTION_ROOM, GROUP_TARGET.localId)
         val same = async { fixture.runtime.reactTo(REACTION_ROOM, GROUP_TARGET.localId, "👍") }
+        sameAtLock.awaitReactionLockEntry()
         val other = async { fixture.runtime.reactTo(REACTION_ROOM, SECOND_GROUP_TARGET.localId, "❤️") }
         steps[1].entered.await()
         assertFalse(same.isCompleted)
@@ -1403,8 +1406,9 @@ class SessionRuntimeTest {
 
         val first = async { fixture.runtime.reactTo(REACTION_PEER, DIRECT_TARGET.localId, "🔥") }
         steps[0].entered.await()
+        val secondAtLock = observeReactionLockEntry(fixture, REACTION_PEER, DIRECT_TARGET.localId)
         val second = async { fixture.runtime.reactTo(REACTION_PEER, CORRECTION.localId, "👍") }
-        runCurrent()
+        secondAtLock.awaitReactionLockEntry()
         steps[0].release.complete(Unit)
         steps[1].entered.await()
         assertTrue(first.await())
@@ -1464,14 +1468,11 @@ class SessionRuntimeTest {
         runCurrent()
         assertEquals(expectedOwnReaction(fixture, DIRECT_TARGET, "❤️", SECOND_TARGET.delayedAtMs!!),
             ownReactionSnapshot(fixture, DIRECT_TARGET.localId))
-        val queued = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+        val queuedAtLock = observeReactionLockEntry(fixture, REACTION_PEER, DIRECT_TARGET.localId)
+        val queued = async {
             fixture.runtime.reactTo(REACTION_PEER, CORRECTION.localId, "👍")
         }
-        fixture.runtime.activeAccount.first()
-        runCurrent()
-        requireNotNull(fixture.store.resolveDirectReactionTarget(
-            fixture.account.id.value, REACTION_PEER, CORRECTION.localId))
-        runCurrent()
+        queuedAtLock.awaitReactionLockEntry()
 
         assertEquals(1, ingest("bridge", listOf(origin, message)).mergedRows)
         val dao = database.messageDao()
@@ -1635,6 +1636,46 @@ class SessionRuntimeTest {
     private fun reactToSource() = java.io.File(
         "src/main/java/org/thanosapollo/nema/service/XmppConnectionService.kt",
     ).readText().substringAfter("suspend fun reactTo(").substringBefore("fun reportComposer")
+
+    private fun observeReactionLockEntry(
+        fixture: RuntimeFixture,
+        peerJid: String,
+        canonicalLocalId: String,
+    ): CompletableDeferred<Unit> {
+        val field = SessionRuntime::class.java.getDeclaredField("reactionMutexes").apply { isAccessible = true }
+        @Suppress("UNCHECKED_CAST")
+        val mutexes = field.get(fixture.runtime) as MutableMap<Any, Mutex>
+        val entered = CompletableDeferred<Unit>()
+        synchronized(mutexes) {
+            val expected = mapOf(
+                "accountId" to fixture.account.id.value,
+                "peerJid" to peerJid,
+                "ownSender" to fixture.account.bareJid.value,
+                "canonicalLocalId" to canonicalLocalId,
+            )
+            val entry = mutexes.entries.single { (key, _) ->
+                expected.all { (name, value) ->
+                    key.javaClass.getDeclaredField(name).apply { isAccessible = true }.get(key) == value
+                }
+            }
+            val original = entry.value
+            assertTrue("First reaction must still hold the exact canonical mutex", original.isLocked)
+            // Observe selection after real Room resolution, without changing acquisition or release.
+            // The first holder and queued wrapper both retain the same underlying mutex.
+            entry.setValue(object : Mutex by original {
+                override suspend fun lock(owner: Any?) {
+                    entered.complete(Unit)
+                    original.lock(owner)
+                }
+            })
+        }
+        return entered
+    }
+
+    private suspend fun CompletableDeferred<Unit>.awaitReactionLockEntry() = withContext(Dispatchers.Default) {
+        // Room runs outside the virtual scheduler; bound this acknowledgement in real time.
+        withTimeout(5_000) { await() }
+    }
 
     private suspend fun connectedRuntime(
         scope: CoroutineScope, id: String, clock: () -> Long = { REACTION_NOW },
