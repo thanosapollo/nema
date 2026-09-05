@@ -58,13 +58,24 @@ class VisibleReadSettlementTest {
                         archiveOrdinal = null, aliases = emptyList(),
                     ))
                 }
+                if (!thread) repeat(12) { index ->
+                    MessageStore(f.database).ingest(IncomingMessage(
+                        accountId = f.account, localMessageId = "older-$index", peerJid = f.peer,
+                        senderJid = f.peer, direction = MessageDirection.INBOUND,
+                        messageKind = if (room) MessageKind.GROUPCHAT else MessageKind.CHAT,
+                        threadId = null, parentThreadId = null, body = "older body $index",
+                        archiveOrdinal = null, aliases = emptyList(), sentAtEpochMs = index + 1L,
+                        sentTimeSource = org.thanosapollo.nema.xmpp.transport.MessageTimeSource.MAM,
+                    ))
+                }
                 p.selectPeer(f.peer)
                 if (thread) p.continueThread(selectedThread)
                 withTimeout(5_000) { p.state.first {
-                    it.contentStatus == ChatContentStatus.Ready && it.messages.isNotEmpty() &&
+                    it.contentStatus == ChatContentStatus.Ready && it.messages.size == (if (thread) 1 else 13) &&
                         it.selectedThread == (if (thread) selectedThread else null)
                 } }
             }
+            val readCount = if (thread) 1 else 13
             val target = if (thread) "child-message" else "message-0"
             val before = p.state.value.conversations.single { it.peerJid == f.peer }
             val visible = mutableStateOf(true)
@@ -113,13 +124,17 @@ class VisibleReadSettlementTest {
                 // Wait for invalidation, then assert durable state separately from Home projection.
                 try {
                     compose.waitUntil(5_000) {
-                        p.state.value.conversations.single { it.peerJid == f.peer }.unreadCount == before.unreadCount - 1
+                        p.state.value.conversations.single { it.peerJid == f.peer }.unreadCount == before.unreadCount - readCount
                     }
                 } catch (_: androidx.compose.ui.test.ComposeTimeoutException) { }
                 assertEquals("admitted visible ID must survive effect cancellation", true,
                     runBlocking { f.database.messageDao().message(f.account, target) }?.locallyRead)
+                if (!thread) repeat(12) { index ->
+                    assertEquals("offscreen history must read through the visible boundary", true,
+                        runBlocking { f.database.messageDao().message(f.account, "older-$index") }?.locallyRead)
+                }
                 val after = p.state.value.conversations.single { it.peerJid == f.peer }
-                assertEquals(before.unreadCount - 1, after.unreadCount)
+                assertEquals(before.unreadCount - readCount, after.unreadCount)
                 assertEquals(before.preview, after.preview)
                 assertEquals(before.localSequence, after.localSequence)
                 if (thread) assertEquals(false,

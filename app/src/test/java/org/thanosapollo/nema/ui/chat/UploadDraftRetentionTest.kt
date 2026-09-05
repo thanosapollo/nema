@@ -17,6 +17,11 @@ import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertHeightIsAtLeast
+import androidx.compose.ui.test.assert
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.longClick
@@ -68,6 +73,8 @@ class UploadDraftRetentionTest {
         val upload = CompletableDeferred<UploadedFile?>()
         var entered = false
         val saves = mutableListOf<DraftSnapshot>()
+        val sends = mutableListOf<DraftSnapshot>()
+        val restoration = StateRestorationTester(composeRule)
         val peer = if (origin == "room") "room@conference.example.org" else "a@example.org"
         val thread = if (origin == "thread") ThreadRef(ThreadId.require("child"), ThreadId.require("parent")) else null
         val key = DirectConversationKey("route-account", peer, thread)
@@ -86,7 +93,7 @@ class UploadDraftRetentionTest {
                 presenter.state.value.selectedThread == thread }
             composeRule.waitForIdle()
         }
-        composeRule.setContent {
+        restoration.setContent {
             CompositionLocalProvider(LocalActivityResultRegistryOwner provides registry) {
                 active.value?.let { presenter ->
                     val state by presenter.state.collectAsState()
@@ -94,7 +101,7 @@ class UploadDraftRetentionTest {
                     MaterialTheme {
                         ConversationContent(state = state, composerOwner = owner, connectionStatus = "Connected",
                             onSelectPeer = presenter::selectPeer, onCloseConversation = presenter::closeConversation,
-                            onSend = presenter::sendDraft,
+                            onSend = { sends += it; presenter.sendDraft(it) },
                             onDraftChange = { saves += it; presenter.updateDraft(it) },
                             onUploadFile = { _, _, _ -> entered = true; upload.await() })
                     }
@@ -134,8 +141,47 @@ class UploadDraftRetentionTest {
                 open(presenter)
                 composeRule.runOnIdle {
                     assertEquals(expected.copy(composerRevision = 0), owner.composerStates.value.getValue(key).toDraftSnapshot(venue))
-                    active.value = null
                 }
+                fun assertPreview() {
+                    composeRule.onNodeWithTag("composer-attachment-preview").assertIsDisplayed()
+                    composeRule.onNodeWithText("file.pdf").assertIsDisplayed()
+                    composeRule.onNodeWithText("application/pdf").assertIsDisplayed()
+                    composeRule.onNodeWithContentDescription("Remove attachment").assertHasClickAction()
+                        .assertHeightIsAtLeast(48.dp)
+                    composeRule.onNodeWithTag("message-composer").assert(
+                        androidx.compose.ui.test.SemanticsMatcher.expectValue(
+                            androidx.compose.ui.semantics.SemanticsProperties.EditableText,
+                            androidx.compose.ui.text.AnnotatedString(body),
+                        ),
+                    )
+                }
+                assertPreview()
+                restoration.emulateSavedInstanceStateRestore()
+                assertPreview()
+                composeRule.onNodeWithContentDescription("Remove attachment").performClick()
+                composeRule.waitUntil { owner.pendingDraftAttempts.value.isEmpty() }
+                composeRule.onNodeWithTag("composer-attachment-preview").assertDoesNotExist()
+                val cleared = expected.copy(composerRevision = saves.last().composerRevision,
+                    attachmentUrl = null, attachmentName = null, attachmentMime = null, attachmentSize = null)
+                assertEquals(cleared, saves.last())
+                assertEquals(cleared, owner.composerStates.value.getValue(key).toDraftSnapshot(venue))
+                if (body.isBlank()) composeRule.onNodeWithContentDescription("Send").assertIsNotEnabled()
+                composeRule.runOnIdle { active.value = null }
+            }
+            RoutePresentationFixture(database, seed = false).use { fixture ->
+                val presenter = fixture.presenter()
+                composeRule.runOnIdle { active.value = presenter }
+                open(presenter)
+                composeRule.onNodeWithTag("composer-attachment-preview").assertDoesNotExist()
+                assertEquals(expected.copy(composerRevision = 0, attachmentUrl = null, attachmentName = null,
+                    attachmentMime = null, attachmentSize = null), owner.composerStates.value.getValue(key).toDraftSnapshot(venue))
+                composeRule.onNodeWithTag("message-composer").performTextReplacement("text only")
+                composeRule.waitUntil { owner.pendingDraftAttempts.value.isEmpty() }
+                composeRule.onNodeWithContentDescription("Send").performClick()
+                composeRule.waitUntil { sends.isNotEmpty() }
+                assertEquals(expected.copy(body = "text only", composerRevision = sends.single().composerRevision,
+                    attachmentUrl = null, attachmentName = null, attachmentMime = null, attachmentSize = null), sends.single())
+                composeRule.runOnIdle { active.value = null }
             }
         } finally { context.deleteDatabase(database) }
     }
@@ -151,9 +197,11 @@ class UploadDraftRetentionTest {
     @Test fun pendingBackupSaveFailsAfterCorrectionCancel() = correctionCompletion(false, true, heldSave = true)
     @Test fun newerCorrectionTextSurvivesOldSendAndUpload() = correctionCompletion(true, false, heldSend = true, newerEdit = true)
 
+    @Test fun restoredCorrectionBackupAttachmentCanBeRemoved() = correctionCompletion(false, false, remove = true)
+
     // Controlled enqueue proves composer settlement, not durable-send acceptance (see S1 store tests).
     private fun correctionCompletion(send: Boolean, failSave: Boolean, heldSend: Boolean = false,
-        throwSave: Boolean = false, heldSave: Boolean = false, newerEdit: Boolean = false) {
+        throwSave: Boolean = false, heldSave: Boolean = false, newerEdit: Boolean = false, remove: Boolean = false) {
         val context = androidx.test.core.app.ApplicationProvider.getApplicationContext<android.content.Context>()
         val database = "correction-upload-${java.util.UUID.randomUUID()}.db"
         val active = mutableStateOf<org.thanosapollo.nema.chat.DirectChatPresenter?>(null)
@@ -220,6 +268,8 @@ class UploadDraftRetentionTest {
                     assertEquals("stored A", saves.single().body)
                     assertEquals(org.thanosapollo.nema.chat.DraftReply("reply", fixture.peer, "quoted", "A"), saves.single().reply)
                 }
+                composeRule.onNodeWithTag("composer-attachment-preview").assertDoesNotExist()
+                composeRule.onNodeWithContentDescription("Remove attachment").assertDoesNotExist()
                 if (failSave) {
                     composeRule.onNodeWithTag("message-composer").performTextReplacement("edited after save failure")
                     composeRule.runOnIdle {
@@ -262,6 +312,13 @@ class UploadDraftRetentionTest {
                     composeRule.onNodeWithTag("message-composer").performTextReplacement("stored A")
                 }
                 composeRule.waitUntil { owner.pendingDraftAttempts.value.isEmpty() }
+                composeRule.onNodeWithTag("composer-attachment-preview").assertIsDisplayed()
+                composeRule.onNodeWithText("file.pdf").assertIsDisplayed()
+                if (remove) {
+                    composeRule.onNodeWithContentDescription("Remove attachment").performClick()
+                    composeRule.waitUntil { owner.pendingDraftAttempts.value.isEmpty() }
+                    composeRule.onNodeWithTag("composer-attachment-preview").assertDoesNotExist()
+                }
                 if (send) { assertTrue(fixture.sendEntered.isCompleted); assertEquals(1, sendAttempts) }
                 composeRule.runOnIdle { active.value = null }
             }
@@ -275,10 +332,10 @@ class UploadDraftRetentionTest {
                     val restored = owner.composerStates.value.getValue(DirectConversationKey(fixture.account, fixture.peer))
                     assertEquals("stored A", restored.body)
                     assertEquals(org.thanosapollo.nema.chat.DraftReply("reply", fixture.peer, "quoted", "A"), restored.reply)
-                    assertEquals("https://example.org/file", restored.attachmentUrl)
-                    assertEquals("file.pdf", restored.attachmentName)
-                    assertEquals("application/pdf", restored.attachmentMime)
-                    assertEquals(4L, restored.attachmentSize)
+                    assertEquals(if (remove) null else "https://example.org/file", restored.attachmentUrl)
+                    assertEquals(if (remove) null else "file.pdf", restored.attachmentName)
+                    assertEquals(if (remove) null else "application/pdf", restored.attachmentMime)
+                    assertEquals(if (remove) null else 4L, restored.attachmentSize)
                     active.value = null
                 }
             }

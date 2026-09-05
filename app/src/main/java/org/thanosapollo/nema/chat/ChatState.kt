@@ -201,8 +201,11 @@ class VisibleReadRequest(
     val accountId: String,
     val occurrence: ChatRouteOccurrence,
     messageIds: Set<String>,
+    observedTimelineIds: List<String> = messageIds.toList(),
 ) {
     val messageIds: Set<String> = messageIds.toSet()
+    // Chronological, route-projected snapshot at layout observation, not dispatch time.
+    val observedTimelineIds: List<String> = observedTimelineIds.toList()
 }
 
 data class DirectChatState(
@@ -805,7 +808,10 @@ class DirectChatPresenter(
                 snapshot.contentStatus != ChatContentStatus.Ready
             ) return false
             val rendered = snapshot.messages.mapTo(hashSetOf()) { it.id }
-            peer to request.messageIds.filter { it in rendered }
+            val boundary = request.observedTimelineIds.indexOfLast {
+                it in request.messageIds && it in rendered
+            }
+            peer to request.observedTimelineIds.take(boundary + 1).filter { it in rendered }
         }
         if (admitted.second.isEmpty()) return false
         // The effect may disappear after admission; only presenter retirement cancels this write.

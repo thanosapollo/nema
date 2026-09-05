@@ -130,7 +130,7 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
-    fun selectionLeavesUnreadAndVisibleLaterMessagePreservesEarlierHole() = runBlocking {
+    fun selectionLeavesUnreadUntilVisibleBoundaryReadsThroughEarlierHistory() = runBlocking {
         val store = MessageStore(database)
         store.ingest(incoming(ACCOUNT, "first", "first body"))
         val repository = ChatRepository(database)
@@ -147,11 +147,78 @@ class ChatRepositoryPresenterTest {
 
         store.ingest(incoming(ACCOUNT, "later", "later body"))
         val ready = presenter.state.first { it.messages.size == 2 && it.conversations.single().unreadCount == 2 }
-        assertTrue(presenter.markVisibleConversationRead(VisibleReadRequest(ACCOUNT, ready.routeOccurrence, setOf("later"))))
-        presenter.state.first { it.conversations.single().unreadCount == 1 }
-        assertEquals(false, database.messageDao().message(ACCOUNT, "first")?.locallyRead)
+        assertTrue(presenter.markVisibleConversationRead(VisibleReadRequest(ACCOUNT, ready.routeOccurrence, setOf("later"), ready.messages.map { it.id })))
+        withTimeout(5_000) { presenter.state.first { it.conversations.single().unreadCount == 0 } }
+        assertEquals(true, database.messageDao().message(ACCOUNT, "first")?.locallyRead)
         assertEquals(true, database.messageDao().message(ACCOUNT, "later")?.locallyRead)
         presenter.close()
+    }
+
+    @Test
+    fun readThroughUsesObservedChronologyNotInsertionSequenceOrLaterProjection() = runBlocking {
+        val store = MessageStore(database)
+        val repository = ChatRepository(database)
+        repository.markRoom(ACCOUNT, PEER)
+        // Insert the newest first, exactly as a reordered archive can arrive.
+        for ((id, time) in listOf("newest" to 3000L, "boundary" to 2000L, "oldest" to 1000L)) {
+            store.ingest(incoming(ACCOUNT, id, id).copy(
+                messageKind = MessageKind.GROUPCHAT, sentAtEpochMs = time,
+                sentTimeSource = MessageTimeSource.MAM,
+            ))
+        }
+        val presenter = DirectChatPresenter(accountConfiguration(ACCOUNT, SELF), repository, scope,
+            enqueue = { _, _ -> true })
+        try {
+            presenter.selectPeer(PEER)
+            val observed = withTimeout(5_000) { presenter.state.first { it.messages.size == 3 } }
+            assertEquals(listOf("oldest", "boundary", "newest"), observed.messages.map { it.id })
+            val request = VisibleReadRequest(ACCOUNT, observed.routeOccurrence, setOf("boundary"),
+                observed.messages.map { it.id })
+            // A late backdated arrival is now in the presenter's prefix but was not observed.
+            store.ingest(incoming(ACCOUNT, "late-history", "late").copy(
+                messageKind = MessageKind.GROUPCHAT, sentAtEpochMs = 500L,
+                sentTimeSource = MessageTimeSource.MAM,
+            ))
+            withTimeout(5_000) { presenter.state.first { it.messages.size == 4 } }
+            assertTrue(presenter.markVisibleConversationRead(request))
+            for (id in listOf("oldest", "boundary"))
+                assertEquals(id, true, database.messageDao().message(ACCOUNT, id)?.locallyRead)
+            for (id in listOf("newest", "late-history"))
+                assertEquals(id, false, database.messageDao().message(ACCOUNT, id)?.locallyRead)
+            assertEquals(2, repository.cachedConversations(ACCOUNT).single().unreadCount)
+        } finally { presenter.close() }
+    }
+
+    @Test
+    fun parentReadThroughPreservesIsolatedChildUntilThatContextIsRead() = runBlocking {
+        val store = MessageStore(database)
+        val repository = ChatRepository(database)
+        store.ingest(incoming(ACCOUNT, "main-old", "old"))
+        store.ingest(incoming(ACCOUNT, "child-root", "root", "child", "parent"))
+        store.ingest(incoming(ACCOUNT, "child-reply", "reply", "child", "parent"))
+        store.ingest(incoming(ACCOUNT, "main-latest", "latest"))
+        val presenter = DirectChatPresenter(accountConfiguration(ACCOUNT, SELF), repository, scope,
+            enqueue = { _, _ -> true })
+        try {
+            presenter.selectPeer(PEER)
+            val main = withTimeout(5_000) { presenter.state.first { it.messages.size == 3 } }
+            assertEquals(listOf("main-old", "child-root", "main-latest"), main.messages.map { it.id })
+            assertTrue(presenter.markVisibleConversationRead(VisibleReadRequest(
+                ACCOUNT, main.routeOccurrence, setOf("main-latest"), main.messages.map { it.id })))
+            assertEquals(1, repository.cachedConversations(ACCOUNT).single().unreadCount)
+            assertEquals(false, database.messageDao().message(ACCOUNT, "child-reply")?.locallyRead)
+            presenter.continueThread(ThreadRef(ThreadId.require("child"), ThreadId.require("parent")))
+            val child = withTimeout(5_000) { presenter.state.first {
+                it.selectedThread != null && it.contentStatus == ChatContentStatus.Ready
+            } }
+            assertEquals(listOf("child-root", "child-reply"), child.messages.map { it.id })
+            store.ingest(incoming(ACCOUNT, "main-arrival", "new"))
+            assertTrue(presenter.markVisibleConversationRead(VisibleReadRequest(
+                ACCOUNT, child.routeOccurrence, setOf("child-reply"), child.messages.map { it.id })))
+            assertEquals(true, database.messageDao().message(ACCOUNT, "child-reply")?.locallyRead)
+            assertEquals(false, database.messageDao().message(ACCOUNT, "main-arrival")?.locallyRead)
+            assertEquals(1, repository.cachedConversations(ACCOUNT).single().unreadCount)
+        } finally { presenter.close() }
     }
 
     @Test

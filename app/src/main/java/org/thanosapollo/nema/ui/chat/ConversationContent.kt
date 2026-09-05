@@ -783,8 +783,7 @@ fun ConversationContent(
                                     false
                                 }
                                 if (applied) {
-                                    failedSendIdentities -= identity
-                                    completedSendSnapshots += identity to snapshot
+                                    composerOwner.completeSend(snapshot, venue)
                                 } else {
                                     pendingSendIdentities -= identity
                                     markFailed()
@@ -862,6 +861,42 @@ fun ConversationContent(
                                                 },
                                             ) { Text("Cancel") }
                                         }
+                                    }
+                                }
+                                if (composer.attachmentUrl != null) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth()
+                                            .testTag("composer-attachment-preview")
+                                            .padding(start = 16.dp, end = 4.dp, top = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        Column(Modifier.weight(1f).semantics(mergeDescendants = true) {}) {
+                                            Text(
+                                                composer.attachmentName?.takeIf(String::isNotBlank) ?: "Attached file",
+                                                style = MaterialTheme.typography.labelMedium,
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                            Text(
+                                                composer.attachmentMime?.takeIf(String::isNotBlank) ?: "File",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                            )
+                                        }
+                                        TextButton(
+                                            modifier = Modifier.heightIn(min = 48.dp)
+                                                .semantics { contentDescription = "Remove attachment" },
+                                            onClick = {
+                                                updateComposer(composer.copy(
+                                                    attachmentUrl = null,
+                                                    attachmentName = null,
+                                                    attachmentMime = null,
+                                                    attachmentSize = null,
+                                                    revision = composer.revision + 1,
+                                                ))
+                                            },
+                                        ) { Text("Remove") }
                                     }
                                 }
                                 BasicTextField(
@@ -1500,6 +1535,17 @@ class ComposerOwner internal constructor(internal val scope: kotlinx.coroutines.
     internal val pendingDraftAttempts = mutableStateOf(emptyMap<DirectConversationKey, Any>())
     internal val venueByConversation = mutableMapOf<DirectConversationKey, ConversationVenue>()
 
+    internal fun completeSend(snapshot: DraftSnapshot, venue: ConversationVenue) {
+        val identity = PendingSendIdentity(snapshot.key, snapshot.composerRevision)
+        // Settle saveable input before queuing route-only focus/viewport effects.
+        // Home may be absent until after this owner and the presenter are recreated.
+        composerStates.value[snapshot.key]?.let { current ->
+            composerStates.value += snapshot.key to current.clearAfterSend(snapshot, venue)
+        }
+        failedSendIdentities.value -= identity
+        completedSendSnapshots.value += identity to snapshot
+    }
+
     internal fun saveOrdinary(
         next: ComposerState,
         venue: ConversationVenue,
@@ -1949,7 +1995,11 @@ internal fun MessageTimeline(
     var newIncoming by remember { mutableIntStateOf(0) }
     var followLatest by remember { mutableStateOf(true) }
     var viewportRestored by remember { mutableStateOf(initialViewport == null) }
-    var visibleMessageIds by remember(accountId, routeOccurrence) { mutableStateOf(emptySet<String>()) }
+    var readObservation by remember(accountId, routeOccurrence) {
+        mutableStateOf(emptySet<String>() to emptyList<String>())
+    }
+    val visibleMessageIds = readObservation.first
+    val observedTimelineIds = readObservation.second
     var reportedMarkerTargets by remember { mutableStateOf(emptySet<String>()) }
     val currentMessages = remember {
         mutableStateOf(messages, referentialEqualityPolicy())
@@ -1993,17 +2043,20 @@ internal fun MessageTimeline(
         withFrameNanos { }
         snapshotFlow {
             val layout = listState.layoutInfo
-            val rendered = currentMessages.value.mapTo(hashSetOf()) { it.id }
-            layout.visibleItemsInfo.asSequence()
+            val observedTimelineIds = currentMessages.value.map { it.id }
+            val rendered = observedTimelineIds.toHashSet()
+            val visible = layout.visibleItemsInfo.asSequence()
                 .filter { it.offset + it.size > layout.viewportStartOffset && it.offset < layout.viewportEndOffset }
                 .mapNotNull { it.key as? String }
                 .filter { it in rendered }
                 .toSet()
-        }.distinctUntilChanged().collect { visibleMessageIds = it }
+            visible to observedTimelineIds
+        }.distinctUntilChanged().collect { readObservation = it }
     }
+    // History-only insertions do not admit another read until visibility or lifecycle changes.
     LaunchedEffect(accountId, routeOccurrence, visibleMessageIds, viewportRestored, activityResumed) {
         if (viewportRestored && activityResumed && visibleMessageIds.isNotEmpty()) {
-            onMarkVisibleRead(VisibleReadRequest(accountId, routeOccurrence, visibleMessageIds))
+            onMarkVisibleRead(VisibleReadRequest(accountId, routeOccurrence, visibleMessageIds, observedTimelineIds))
         }
     }
     LaunchedEffect(
