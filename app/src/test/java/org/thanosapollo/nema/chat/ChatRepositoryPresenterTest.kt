@@ -2127,6 +2127,97 @@ class ChatRepositoryPresenterTest {
         presenter.close()
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun blockedIdentityFetchDoesNotDelayRoomEntryOrChangeItsThread() = runBlocking {
+        val controlledScope = TestScope()
+        val identityEntered = CompletableDeferred<Unit>()
+        val releaseIdentity = CompletableDeferred<Unit>()
+        val identityCancelled = CompletableDeferred<Unit>()
+        val joinFinished = CompletableDeferred<Unit>()
+        val releaseJoin = CompletableDeferred<Unit>()
+        val joins = CopyOnWriteArrayList<String>()
+        val identities = CopyOnWriteArrayList<String>()
+        val room = "room@conference.example.org"
+        val thread = ThreadRef(ThreadId.require("room-thread"))
+        database.messageDao().upsertPeer(PeerEntity(ACCOUNT, room, room = true))
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = ChatRepository(database),
+            scope = controlledScope,
+            enqueue = { _, _ -> error("send not expected") },
+            ensurePeerIdentities = { _, peers ->
+                identities.addAll(peers)
+                if (PEER in peers) {
+                    identityEntered.complete(Unit)
+                    try {
+                        releaseIdentity.await()
+                    } finally {
+                        identityCancelled.complete(Unit)
+                    }
+                }
+            },
+            joinMuc = { peer ->
+                joins += peer
+                try {
+                    releaseJoin.await()
+                    true
+                } finally {
+                    joinFinished.complete(Unit)
+                }
+            },
+        )
+        suspend fun awaitPhase(predicate: () -> Boolean) {
+            withTimeout(5_000) {
+                while (!predicate()) {
+                    controlledScope.runCurrent()
+                    yield()
+                }
+            }
+            controlledScope.runCurrent()
+        }
+        try {
+            assertTrue(presenter.selectPeer(PEER))
+            awaitPhase { identityEntered.isCompleted }
+            assertTrue(presenter.selectPeer(room))
+            assertTrue(presenter.continueThread(thread))
+            awaitPhase {
+                presenter.state.value.let {
+                    it.contentStatus == ChatContentStatus.Ready && it.selectedThread == thread
+                }
+            }
+            val occurrence = presenter.state.value.routeOccurrence
+            assertEquals(ChatRoute(room, thread), occurrence.route)
+            assertTrue(!releaseIdentity.isCompleted)
+            assertEquals(listOf(room), joins)
+            assertEquals(occurrence, presenter.state.value.routeOccurrence)
+            releaseJoin.complete(Unit)
+            awaitPhase { joinFinished.isCompleted }
+            repeat(3) { index ->
+                val body = "room draft $index"
+                val saved = presenter.updateDraft(snapshot(ACCOUNT, room, body).copy(
+                    key = DirectConversationKey(ACCOUNT, room, thread),
+                ))
+                awaitPhase { saved.isCompleted && presenter.state.value.draft == body }
+                assertTrue(saved.await())
+                assertEquals(listOf(room), joins)
+                assertEquals(occurrence, presenter.state.value.routeOccurrence)
+                assertEquals(thread, presenter.state.value.selectedThread)
+            }
+            presenter.close()
+            awaitPhase { identityCancelled.isCompleted && joinFinished.isCompleted }
+            releaseIdentity.complete(Unit)
+            releaseJoin.complete(Unit)
+            controlledScope.runCurrent()
+            assertEquals(listOf(PEER), identities)
+            assertEquals(listOf(room), joins)
+        } finally {
+            presenter.close()
+            controlledScope.cancel()
+            controlledScope.runCurrent()
+        }
+    }
+
     @Test
     fun openingARoomDoesNotWaitForMucJoin() = runBlocking {
         val joined = CompletableDeferred<Unit>()

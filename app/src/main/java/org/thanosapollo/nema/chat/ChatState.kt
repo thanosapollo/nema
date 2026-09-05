@@ -762,6 +762,12 @@ class DirectChatPresenter(
                 val peer = snapshot.selectedPeer ?: return@collect
                 if (snapshot.contentStatus != ChatContentStatus.Ready) return@collect
                 if (snapshot.selectedPeerGroupChat) joinSelectedRoom(peer)
+            }
+        }
+        presenterScope.launch {
+            state.collect { snapshot ->
+                val peer = snapshot.selectedPeer ?: return@collect
+                if (snapshot.contentStatus != ChatContentStatus.Ready) return@collect
                 if (peer == ensuredPeerJids.singleOrNull()) return@collect
                 ensuredPeerJids = setOf(peer)
                 try {
