@@ -783,8 +783,7 @@ fun ConversationContent(
                                     false
                                 }
                                 if (applied) {
-                                    failedSendIdentities -= identity
-                                    completedSendSnapshots += identity to snapshot
+                                    composerOwner.completeSend(snapshot, venue)
                                 } else {
                                     pendingSendIdentities -= identity
                                     markFailed()
@@ -1499,6 +1498,17 @@ class ComposerOwner internal constructor(internal val scope: kotlinx.coroutines.
     internal val failedSendIdentities = mutableStateOf(emptySet<PendingSendIdentity>())
     internal val pendingDraftAttempts = mutableStateOf(emptyMap<DirectConversationKey, Any>())
     internal val venueByConversation = mutableMapOf<DirectConversationKey, ConversationVenue>()
+
+    internal fun completeSend(snapshot: DraftSnapshot, venue: ConversationVenue) {
+        val identity = PendingSendIdentity(snapshot.key, snapshot.composerRevision)
+        // Settle saveable input before queuing route-only focus/viewport effects.
+        // Home may be absent until after this owner and the presenter are recreated.
+        composerStates.value[snapshot.key]?.let { current ->
+            composerStates.value += snapshot.key to current.clearAfterSend(snapshot, venue)
+        }
+        failedSendIdentities.value -= identity
+        completedSendSnapshots.value += identity to snapshot
+    }
 
     internal fun saveOrdinary(
         next: ComposerState,
