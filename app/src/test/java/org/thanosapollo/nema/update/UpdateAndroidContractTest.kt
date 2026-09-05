@@ -113,8 +113,39 @@ class UpdateAndroidContractTest {
     }
 
     @Test
+    fun installerHiddenFromQueriesStillLaunchesAndSettles() {
+        val base = ApplicationProvider.getApplicationContext<Application>()
+        var launched: Intent? = null
+        val context = object : ContextWrapper(base) {
+            override fun startActivity(intent: Intent) {
+                launched = intent
+            }
+        }
+        val file = File(base.cacheDir, "updates/hidden.apk")
+        val accepted = AcceptedGeneration(1, AcceptedUpdate.Available(manifest()))
+        val bound = BoundUpdateArtifact(accepted, file, 1, "a".repeat(64))
+        val handoff = InstallHandoffLease(verifiedFixture(bound))
+        val gate = org.thanosapollo.nema.InstallResumeGate()
+        assertEquals(null, gate.onResumeAndBeginSettlement())
+        val uri = Uri.parse("content://${base.packageName}.files/updates/hidden.apk")
+        val intent = Intent(Intent.ACTION_VIEW).setDataAndType(uri, APK_MIME_FOR_TEST)
+        assertEquals(null, intent.resolveActivity(base.packageManager))
+
+        assertTrue(packageInstallerLauncher(context, gate) { _, _, _ -> uri }(bound, handoff))
+        assertEquals(uri, launched?.data)
+        assertEquals(APK_MIME_FOR_TEST, launched?.type)
+        gate.onPause()
+        assertSame(handoff, gate.onResumeAndBeginSettlement())
+    }
+
+    @Test
     fun missingInstallerHandlerFailsClosed() {
-        val context = ApplicationProvider.getApplicationContext<Application>()
+        val base = ApplicationProvider.getApplicationContext<Application>()
+        val context = object : ContextWrapper(base) {
+            override fun startActivity(intent: Intent) {
+                throw ActivityNotFoundException("no installer handler")
+            }
+        }
         val file = File(context.cacheDir, "updates/candidate.apk").also {
             it.parentFile?.mkdirs()
             it.writeBytes(byteArrayOf(1))

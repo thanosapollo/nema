@@ -134,8 +134,7 @@ internal fun packageInstallerLauncher(
             setDataAndType(uri, APK_MIME)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
         }
-        if (intent.resolveActivity(context.packageManager) == null) false
-        else if (!installResumeGate.arm(handoff)) false
+        if (!installResumeGate.arm(handoff)) false
         else try {
             context.startActivity(intent)
             true
