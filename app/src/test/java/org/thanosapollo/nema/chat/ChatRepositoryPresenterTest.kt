@@ -2,10 +2,13 @@ package org.thanosapollo.nema.chat
 
 import android.app.Application
 import android.content.Context
+import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import java.util.UUID
 import java.util.concurrent.CopyOnWriteArrayList
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -14,6 +17,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.withTimeout
@@ -2178,6 +2183,172 @@ class ChatRepositoryPresenterTest {
         assertEquals(listOf(ACCOUNT to PEER), sent)
         assertEquals("", repository.observeDraft(ACCOUNT, PEER).first())
         assertEquals("hello", store.messages(ACCOUNT).single().body)
+    }
+
+    @Test
+    fun delayedThreadSendPreservesLaterPeer() = delayedThreadSendPreservesNavigation("peer")
+
+    @Test
+    fun delayedThreadSendPreservesClosedConversation() = delayedThreadSendPreservesNavigation("close")
+
+    @Test
+    fun delayedThreadSendPreservesNewOccurrenceOfSameRoute() = delayedThreadSendPreservesNavigation("return")
+
+    private fun delayedThreadSendPreservesNavigation(destination: String) = runBlocking {
+        withTimeout(10_000) {
+            val entered = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val sent = mutableListOf<DraftSnapshot>()
+            val store = MessageStore(database)
+            val presenter = DirectChatPresenter(
+                account = accountConfiguration(ACCOUNT, SELF),
+                repository = ChatRepository(database),
+                scope = scope,
+                enqueue = { account, captured ->
+                    entered.complete(Unit)
+                    release.await()
+                    sent += captured
+                    store.composeDirectDraft(
+                        accountId = account.id.value,
+                        operationId = "delayed-topic-operation",
+                        localMessageId = "delayed-topic-message",
+                        originId = "delayed-topic-origin",
+                        peerJid = captured.key.canonicalBarePeer,
+                        senderJid = account.bareJid.value,
+                        body = captured.body,
+                        thread = captured.outboundThread,
+                        draftThread = captured.key.thread,
+                    ) != null
+                },
+            )
+            try {
+                assertTrue(presenter.selectPeer(PEER))
+                presenter.state.first { it.selectedPeer == PEER }
+                val captured = snapshot(ACCOUNT, PEER, "accepted topic")
+                val send = presenter.sendDraftAsNewThread(captured)
+                entered.await()
+                if (destination == "close") {
+                    presenter.closeConversation()
+                } else {
+                    assertTrue(presenter.selectPeer(OTHER_PEER))
+                    if (destination == "return") assertTrue(presenter.selectPeer(PEER))
+                }
+                release.complete(Unit)
+                assertTrue(send.await())
+                assertEquals(captured.key, sent.single().key)
+                assertEquals(captured.body, sent.single().body)
+                assertTrue(sent.single().outboundThread != null)
+                assertEquals(PEER, store.messages(ACCOUNT).single().peerJid)
+                assertEquals(captured.body, store.messages(ACCOUNT).single().body)
+                assertEquals(sent.single().outboundThread?.id?.value, store.messages(ACCOUNT).single().threadId)
+                assertEquals(1, store.outboxes(ACCOUNT).size)
+                val marker = ThreadRef(ThreadId.require("navigation-observation"))
+                // The public route command reads authoritative state synchronously;
+                // a matching marker then makes the asynchronous projection observable.
+                if (destination == "close") {
+                    assertTrue(!presenter.continueThread(marker))
+                } else {
+                    // A stale topic in A->B->A is observable via child creation.
+                    assertTrue(!presenter.startChildThread())
+                    assertTrue(presenter.continueThread(marker))
+                    val observed = presenter.state.first { it.selectedThread == marker }
+                    assertEquals(if (destination == "return") PEER else OTHER_PEER, observed.selectedPeer)
+                }
+            } finally {
+                release.complete(Unit)
+                presenter.close()
+            }
+        }
+    }
+
+    @Test
+    fun queuedThreadSendCapturesOccurrenceBeforeActionStarts() = runBlocking {
+        withTimeout(10_000) {
+            val entered = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val sent = mutableListOf<DraftSnapshot>()
+            val presenter = DirectChatPresenter(
+                account = accountConfiguration(ACCOUNT, SELF),
+                repository = ChatRepository(database),
+                scope = scope,
+                enqueue = { _, captured ->
+                    if (captured.body == "predecessor") {
+                        entered.complete(Unit)
+                        release.await()
+                    }
+                    sent += captured
+                    true
+                },
+            )
+            try {
+                assertTrue(presenter.selectPeer(PEER))
+                val predecessor = presenter.sendDraft(snapshot(ACCOUNT, PEER, "predecessor", revision = 1))
+                entered.await()
+                val queued = presenter.sendDraftAsNewThread(snapshot(ACCOUNT, PEER, "queued", revision = 2))
+                assertTrue(!queued.isCompleted)
+                assertTrue(presenter.selectPeer(OTHER_PEER))
+                assertTrue(presenter.selectPeer(PEER))
+                release.complete(Unit)
+                assertTrue(predecessor.await())
+                assertTrue(queued.await())
+                assertEquals(listOf("predecessor", "queued"), sent.map { it.body })
+                assertEquals(PEER, sent.last().key.canonicalBarePeer)
+                assertTrue(sent.last().outboundThread != null)
+                assertTrue(!presenter.startChildThread())
+            } finally {
+                release.complete(Unit)
+                presenter.close()
+            }
+        }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun delayedNewThreadReadPreservesNavigationOccurrence() = runTest {
+        database.close()
+        database = Room.databaseBuilder(context, NemaDatabase::class.java, databaseName)
+            .setQueryCoroutineContext(StandardTestDispatcher(testScheduler))
+            .allowMainThreadQueries()
+            .build()
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF),
+            repository = ChatRepository(database),
+            scope = backgroundScope,
+            enqueue = { _, _ -> error("send not expected") },
+        )
+        try {
+            assertTrue(presenter.selectPeer(PEER))
+            presenter.state.first { it.selectedPeer == PEER }
+            for (destination in listOf("peer", "close", "return", "current")) {
+                assertTrue(presenter.selectPeer(PEER))
+                runCurrent()
+                // Enter now; Room's first peer read must wait on the controlled
+                // query dispatcher. No repository stub or elapsed-time barrier.
+                val start = async(start = CoroutineStart.UNDISPATCHED) { presenter.startNewThread() }
+                assertTrue(!start.isCompleted)
+                val navigation = if (destination == "peer" || destination == "return") {
+                    async(start = CoroutineStart.UNDISPATCHED) { presenter.selectPeer(OTHER_PEER) }
+                } else null
+                val returned = if (destination == "return") {
+                    async(start = CoroutineStart.UNDISPATCHED) { presenter.selectPeer(PEER) }
+                } else null
+                if (destination == "close") presenter.closeConversation()
+                assertEquals(destination == "current", start.await())
+                navigation?.await()
+                returned?.await()
+                val marker = ThreadRef(ThreadId.require("read-observation-$destination"))
+                if (destination == "close") {
+                    assertTrue(!presenter.continueThread(marker))
+                } else {
+                    assertEquals(destination == "current", presenter.startChildThread())
+                    assertTrue(presenter.continueThread(marker))
+                    val observed = presenter.state.first { it.selectedThread == marker }
+                    assertEquals(if (destination == "peer") OTHER_PEER else PEER, observed.selectedPeer)
+                }
+            }
+        } finally {
+            presenter.close()
+        }
     }
 
     @Test

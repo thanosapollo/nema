@@ -705,7 +705,9 @@ class DirectChatPresenter(
         presenterScope.launch {
             if (restoreRouteOnStart) {
                 val restored = repository.observeRoute(account.id.value).first()
-                if (routeGeneration.get() == 0) selectedRoute.value = restored
+                synchronized(selectedRoute) {
+                    if (routeGeneration.get() == 0) selectedRoute.value = restored
+                }
             } else if (routeGeneration.get() == 0) {
                 repository.saveRoute(account.id.value, null)
             }
@@ -758,7 +760,8 @@ class DirectChatPresenter(
     }
 
     suspend fun startNewThread(): Boolean {
-        val route = selectedRoute.value ?: return false
+        val origin = currentRouteOccurrence() ?: return false
+        val route = origin.route
         val groupChat = repository.observePeer(account.id.value, route.peerJid).first()?.room == true
         val currentSession = if (groupChat) {
             null
@@ -766,26 +769,23 @@ class DirectChatPresenter(
             repository.observeCurrentSession(account.id.value, route.peerJid).first()
                 ?: repository.ensureCurrentSession(account.id.value, route.peerJid)
         }
-        selectRoute(route.copy(thread = newTopic(currentSession)))
-        return true
+        return selectRouteIfCurrent(origin, route.copy(thread = newTopic(currentSession)))
     }
 
     suspend fun continueThread(thread: ThreadRef): Boolean {
-        val route = selectedRoute.value ?: return false
-        selectRoute(route.copy(thread = threadingPolicy.replyTo(thread)))
-        return true
+        val origin = currentRouteOccurrence() ?: return false
+        return selectRouteIfCurrent(origin, origin.route.copy(thread = threadingPolicy.replyTo(thread)))
     }
 
     suspend fun startChildThread(): Boolean {
-        val route = selectedRoute.value ?: return false
-        val parent = route.thread ?: return false
-        return startChildThreadOf(parent)
+        val origin = currentRouteOccurrence() ?: return false
+        val parent = origin.route.thread ?: return false
+        return selectRouteIfCurrent(origin, origin.route.copy(thread = threadingPolicy.childOf(parent)))
     }
 
     suspend fun startChildThreadOf(parent: ThreadRef): Boolean {
-        val route = selectedRoute.value ?: return false
-        selectRoute(route.copy(thread = threadingPolicy.childOf(parent)))
-        return true
+        val origin = currentRouteOccurrence() ?: return false
+        return selectRouteIfCurrent(origin, origin.route.copy(thread = threadingPolicy.childOf(parent)))
     }
 
     suspend fun startThreadFrom(message: TimelineMessage): Boolean {
@@ -871,6 +871,7 @@ class DirectChatPresenter(
     }
 
     fun sendDraftAsNewThread(snapshot: DraftSnapshot): Deferred<Boolean> {
+        val origin = currentRouteOccurrence()
         val identity = PendingSendIdentity(snapshot.key, snapshot.composerRevision)
         if (!claimSend(identity)) return CompletableDeferred(false)
         return submitAction {
@@ -895,8 +896,8 @@ class DirectChatPresenter(
             }
             val thread = newTopic(currentSession)
             val sent = enqueue(account, snapshot.copy(outboundThread = thread))
-            if (sent) {
-                selectRoute(ChatRoute(snapshot.key.canonicalBarePeer, thread))
+            if (sent && origin != null && origin.route == ChatRoute(snapshot.key.canonicalBarePeer)) {
+                selectRouteIfCurrent(origin, origin.route.copy(thread = thread))
             }
             settleSend(identity, snapshot, sent)
             sent
@@ -1022,10 +1023,26 @@ class DirectChatPresenter(
         }
     }
 
-    private fun selectRoute(route: ChatRoute?) {
-        selectedRoute.value = route
+    private data class RouteOccurrence(val route: ChatRoute, val generation: Int)
+
+    private fun currentRouteOccurrence(): RouteOccurrence? = synchronized(selectedRoute) {
+        selectedRoute.value?.let { RouteOccurrence(it, routeGeneration.get()) }
+    }
+
+    private fun selectRouteIfCurrent(origin: RouteOccurrence, route: ChatRoute): Boolean =
+        synchronized(selectedRoute) {
+            if (routeGeneration.get() != origin.generation || selectedRoute.value != origin.route) {
+                return@synchronized false
+            }
+            selectRoute(route)
+            true
+        }
+
+    private fun selectRoute(route: ChatRoute?) = synchronized(selectedRoute) {
         val generation = routeGeneration.incrementAndGet()
+        selectedRoute.value = route
         presenterScope.launch { persistRoute(generation) }
+        Unit
     }
 
     private suspend fun persistRoute(generation: Int) {
