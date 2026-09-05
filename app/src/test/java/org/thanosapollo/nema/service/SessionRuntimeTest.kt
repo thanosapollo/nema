@@ -104,6 +104,120 @@ class SessionRuntimeTest {
         context.deleteDatabase(databaseName)
     }
 
+    @OptIn(kotlinx.coroutines.InternalCoroutinesApi::class)
+    private class HoldNextDispatcher(
+        private val delegate: kotlinx.coroutines.CoroutineDispatcher,
+    ) : kotlinx.coroutines.CoroutineDispatcher(),
+        kotlinx.coroutines.Delay by (delegate as kotlinx.coroutines.Delay) {
+        var holdNext = false
+        var holdName: String? = null
+        val captured = CompletableDeferred<Unit>()
+        private var held: Pair<kotlin.coroutines.CoroutineContext, Runnable>? = null
+        override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) {
+            if (holdNext && (holdName == null || context[kotlinx.coroutines.CoroutineName]?.name == holdName)) {
+                holdNext = false
+                check(held == null)
+                held = context to block
+                captured.complete(Unit)
+            } else delegate.dispatch(context, block)
+        }
+        fun release() {
+            val (context, block) = checkNotNull(held)
+            held = null
+            delegate.dispatch(context, block)
+        }
+    }
+
+    @Test
+    fun `outbound queued composer cannot retarget A B A or reconnect`() = runTest {
+        val dispatcher = HoldNextDispatcher(kotlinx.coroutines.test.StandardTestDispatcher(testScheduler))
+        val first = connectedRuntime(CoroutineScope(backgroundScope.coroutineContext + dispatcher), "first") {
+            testScheduler.currentTime
+        }
+        runCurrent()
+        dispatcher.holdNext = true
+        first.runtime.reportComposer("first", REACTION_PEER, true)
+        val second = switchAccount(first, "second")
+        val returned = switchAccount(second, "first")
+        dispatcher.release()
+        runCurrent()
+        advanceTimeBy(20_000)
+        runCurrent()
+        assertTrue(first.connections.created.all { it.sentTyping.isEmpty() })
+        dispatcher.holdNext = true
+        returned.runtime.reportComposer("first", REACTION_PEER, true)
+        completeReconnect(returned, returned.connection.attemptIdentity)
+        dispatcher.release()
+        runCurrent()
+        advanceTimeBy(20_000)
+        runCurrent()
+        assertTrue(first.connections.created.all { it.sentTyping.isEmpty() })
+        returned.runtime.reportComposer("first", REACTION_PEER, true)
+        runCurrent()
+        assertEquals(listOf(org.thanosapollo.nema.xmpp.chatstates.ChatActivity.COMPOSING),
+            returned.connection.sentTyping.map { it.activity })
+        first.runtime.serviceDestroyed()
+    }
+
+    @Test
+    fun `outbound pause retirement resets throttle and rejects old account callback`() = runTest {
+        var now = 0L
+        val first = connectedRuntime(backgroundScope, "first") { now }
+        first.runtime.reportComposer("first", REACTION_PEER, true)
+        runCurrent()
+        assertEquals(1, first.connection.sentTyping.size)
+        val second = switchAccount(first, "second")
+        first.runtime.reportComposer("first", "stale@example.org", true)
+        second.runtime.reportComposer("second", REACTION_PEER, true)
+        runCurrent()
+        assertEquals(listOf(REACTION_PEER), second.connection.sentTyping.map { it.recipient })
+        assertEquals(org.thanosapollo.nema.xmpp.chatstates.ChatActivity.COMPOSING,
+            second.connection.sentTyping.single().activity)
+        val returned = switchAccount(second, "first")
+        advanceTimeBy(20_000)
+        runCurrent()
+        assertTrue(returned.connection.sentTyping.isEmpty())
+        returned.runtime.reportComposer("first", REACTION_PEER, true)
+        runCurrent()
+        now = org.thanosapollo.nema.xmpp.chatstates.OUTBOUND_COMPOSING_PAUSE_MS
+        advanceTimeBy(org.thanosapollo.nema.xmpp.chatstates.OUTBOUND_COMPOSING_PAUSE_MS)
+        runCurrent()
+        assertEquals(listOf(org.thanosapollo.nema.xmpp.chatstates.ChatActivity.COMPOSING,
+            org.thanosapollo.nema.xmpp.chatstates.ChatActivity.PAUSED),
+            returned.connection.sentTyping.map { it.activity })
+        first.runtime.serviceDestroyed()
+    }
+
+    @Test
+    fun `outbound old accepted send settlement cannot cancel successor pause`() = runTest {
+        val first = connectedRuntime(backgroundScope, "first") { testScheduler.currentTime }
+        first.runtime.reportComposer("first", REACTION_PEER, true)
+        runCurrent()
+        val dispatcher = HoldNextDispatcher(kotlinx.coroutines.test.StandardTestDispatcher(testScheduler))
+        dispatcher.holdName = "held-send"
+        dispatcher.holdNext = true
+        val send = async(dispatcher + kotlinx.coroutines.CoroutineName("held-send"),
+            start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) {
+            first.runtime.enqueueDirect(first.account, org.thanosapollo.nema.chat.DraftSnapshot(
+                org.thanosapollo.nema.chat.DirectConversationKey("first", REACTION_PEER), "body", 1,
+            ))
+        }
+        dispatcher.captured.await()
+        // The Room transaction has committed, but enqueueDirect has not resumed.
+        assertEquals("body", first.store.messages("first").single().body)
+        val second = switchAccount(first, "second")
+        second.runtime.reportComposer("second", REACTION_PEER, true)
+        runCurrent()
+        dispatcher.release()
+        assertTrue(send.await())
+        advanceTimeBy(org.thanosapollo.nema.xmpp.chatstates.OUTBOUND_COMPOSING_PAUSE_MS)
+        runCurrent()
+        assertEquals(listOf(org.thanosapollo.nema.xmpp.chatstates.ChatActivity.COMPOSING,
+            org.thanosapollo.nema.xmpp.chatstates.ChatActivity.PAUSED),
+            second.connection.sentTyping.map { it.activity })
+        first.runtime.serviceDestroyed()
+    }
+
     @Test
     fun `ephemeral old body continuation cannot clear successor typing or RTT`() = runTest {
         val first = connectedRuntime(backgroundScope, "first")
@@ -1522,13 +1636,15 @@ class SessionRuntimeTest {
         "src/main/java/org/thanosapollo/nema/service/XmppConnectionService.kt",
     ).readText().substringAfter("suspend fun reactTo(").substringBefore("fun reportComposer")
 
-    private suspend fun connectedRuntime(scope: CoroutineScope, id: String): RuntimeFixture {
+    private suspend fun connectedRuntime(
+        scope: CoroutineScope, id: String, clock: () -> Long = { REACTION_NOW },
+    ): RuntimeFixture {
         val accounts = AccountRepository(database.accountDao())
         val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
         val store = MessageStore(database) { REACTION_NOW }
         val connections = RecordingConnectionFactory()
         val runtime = SessionRuntime(
-            accounts, credentials, store, PeerIdentityStore(database.messageDao()), scope, connections,
+            accounts, credentials, store, PeerIdentityStore(database.messageDao()), scope, connections, clock,
         )
         val account = account(id)
         accounts.save(account)
@@ -1828,6 +1944,11 @@ class SessionRuntimeTest {
         val roomArchiveRequested = CompletableDeferred<Unit>()
         var archiveSupported = false
         val archiveRequests = mutableListOf<org.thanosapollo.nema.xmpp.transport.ArchivePageRequest>()
+        val sentTyping = mutableListOf<org.thanosapollo.nema.xmpp.transport.OutgoingChatState>()
+        override suspend fun sendChatState(state: org.thanosapollo.nema.xmpp.transport.OutgoingChatState) {
+            sentTyping += state
+        }
+
         val sentSignals = mutableListOf<OutgoingMessageSignal>()
         val sentReactions = mutableListOf<OutgoingReactionEnvelope>()
         val reactionSteps = ArrayDeque<ReactionSendStep>()

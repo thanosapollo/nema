@@ -4,6 +4,11 @@ class OutboundChatStateHub {
     private val last = mutableMapOf<String, Pair<ChatActivity, Long>>()
 
     @Synchronized
+    internal fun clear() {
+        last.clear()
+    }
+
+    @Synchronized
     fun onDraft(peer: String, composingNow: Boolean, nowMs: Long): ChatActivity? {
         val next = nextOutboundChatState(last[peer]?.first, composingNow)
         remember(peer, next, nowMs, composingNow)

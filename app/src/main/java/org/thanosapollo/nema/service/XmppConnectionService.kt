@@ -134,6 +134,7 @@ class SessionRuntime(
     private val peerIdentities: PeerIdentityStore,
     runtimeScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     connectionFactory: SessionConnectionFactory = SmackSessionConnectionFactory(),
+    private val typingClock: () -> Long = System::currentTimeMillis,
 ) {
     private val scope = runtimeScope
     private val accountCommands = Mutex()
@@ -285,6 +286,9 @@ class SessionRuntime(
                 chatStates.clear()
                 realTimeText.clear()
                 rooms.clear()
+                pauseJobs.values.forEach(Job::cancel)
+                pauseJobs.clear()
+                outboundChatStates.clear()
             },
         )
         scope.launch {
@@ -583,6 +587,8 @@ class SessionRuntime(
 
     suspend fun enqueueDirect(account: AccountConfiguration, snapshot: DraftSnapshot): Boolean {
         if (snapshot.key.accountId != account.id.value) return false
+        val typingLease = controller.lifecycle.value.dispatchLease()
+            ?.takeIf { it.identity.accountId == account.id }
         messages.composeDirectDraft(
             accountId = account.id.value,
             operationId = UUID.randomUUID().toString(),
@@ -605,9 +611,11 @@ class SessionRuntime(
             replaceId = snapshot.correction?.referenceId,
             correctionTargetMessageId = snapshot.correction?.localMessageId,
         ) ?: return false
-        if (!snapshot.groupChat) {
-            outboundChatStates.onSent(snapshot.key.canonicalBarePeer, System.currentTimeMillis())
-            synchronized(pauseJobs) { pauseJobs.remove(snapshot.key.canonicalBarePeer)?.cancel() }
+        if (!snapshot.groupChat && typingLease != null) {
+            withTypingLease(typingLease) {
+                outboundChatStates.onSent(snapshot.key.canonicalBarePeer, typingClock())
+                pauseJobs.remove(snapshot.key.canonicalBarePeer)?.cancel()
+            }
         }
         val observation = controller.lifecycle.value
         val lease = observation.dispatchLease()
@@ -819,31 +827,48 @@ class SessionRuntime(
         }
     }
 
-    fun reportComposer(peer: String, composingNow: Boolean) {
+    // The controller lifecycle lock owns both throttle state and pause jobs.
+    private suspend fun withTypingLease(lease: DispatchLease, apply: () -> Unit) {
+        controller.commitIfConnected(
+            lease.identity, { controller.lifecycle.value.dispatchLease() == lease },
+        ) { apply() }
+    }
+
+    fun reportComposer(accountId: String, peer: String, composingNow: Boolean) {
         if (peer.isEmpty()) return
-        val next = outboundChatStates.onDraft(peer, composingNow, System.currentTimeMillis())
-        if (next != null) sendOutboundChatState(peer, next)
-        synchronized(pauseJobs) {
-            pauseJobs.remove(peer)?.cancel()
-            if (composingNow) {
-                pauseJobs[peer] = scope.launch {
-                    delay(OUTBOUND_COMPOSING_PAUSE_MS)
-                    outboundChatStates.duePauses(System.currentTimeMillis()).forEach { (pausedPeer, paused) ->
-                        sendOutboundChatState(pausedPeer, paused)
+        val lease = controller.lifecycle.value.dispatchLease()
+            ?.takeIf { it.identity.accountId.value == accountId } ?: return
+        scope.launch {
+            withTypingLease(lease) {
+                val next = outboundChatStates.onDraft(peer, composingNow, typingClock())
+                if (next != null) sendOutboundChatState(lease, peer, next)
+                pauseJobs.remove(peer)?.cancel()
+                if (composingNow) {
+                    pauseJobs[peer] = scope.launch {
+                        delay(OUTBOUND_COMPOSING_PAUSE_MS)
+                        val job = currentCoroutineContext()[Job]
+                        withTypingLease(lease) {
+                            if (pauseJobs[peer] === job) {
+                                pauseJobs.remove(peer)
+                                outboundChatStates.duePauses(typingClock()).forEach { (pausedPeer, paused) ->
+                                    sendOutboundChatState(lease, pausedPeer, paused)
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    private fun sendOutboundChatState(peer: String, activity: ChatActivity) {
+    private fun sendOutboundChatState(lease: DispatchLease, peer: String, activity: ChatActivity) {
         scope.launch {
-            val connected = state.value as? ConnectionState.Connected ?: return@launch
+            if (controller.lifecycle.value.dispatchLease() != lease) return@launch
             try {
                 controller.sendChatState(
                     OutgoingChatState(
-                        accountId = connected.accountId,
-                        generation = connected.generation,
+                        accountId = lease.identity.accountId,
+                        generation = lease.identity.generation,
                         recipient = peer,
                         activity = activity,
                     ),

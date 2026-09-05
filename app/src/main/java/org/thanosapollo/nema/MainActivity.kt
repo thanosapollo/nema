@@ -357,7 +357,9 @@ private fun AccountConnectionScreen(
                 observeRoom = { peer -> application.sessionRuntime.rooms.observe(account.id.value, peer) },
                 observeTyping = { peer -> application.sessionRuntime.chatStates.observe(account.id.value, peer) },
                 observeRtt = { peer -> application.sessionRuntime.realTimeText.observe(account.id.value, peer) },
-                notifyComposer = application.sessionRuntime::reportComposer,
+                notifyComposer = { peer, composing ->
+                    application.sessionRuntime.reportComposer(account.id.value, peer, composing)
+                },
                 restoreRouteOnStart = restoreChatRouteOnStart,
             )
         }
