@@ -355,8 +355,8 @@ private fun AccountConnectionScreen(
                 ensurePeerIdentities = application.sessionRuntime::ensurePeerIdentities,
                 joinMuc = application.sessionRuntime::joinMuc,
                 observeRoom = { peer -> application.sessionRuntime.rooms.observe(account.id.value, peer) },
-                observeTyping = { peer -> application.sessionRuntime.chatStates.observe(peer) },
-                observeRtt = { peer -> application.sessionRuntime.realTimeText.observe(peer) },
+                observeTyping = { peer -> application.sessionRuntime.chatStates.observe(account.id.value, peer) },
+                observeRtt = { peer -> application.sessionRuntime.realTimeText.observe(account.id.value, peer) },
                 notifyComposer = application.sessionRuntime::reportComposer,
                 restoreRouteOnStart = restoreChatRouteOnStart,
             )

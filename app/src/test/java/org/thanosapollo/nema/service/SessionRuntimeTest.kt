@@ -8,10 +8,14 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -98,6 +102,105 @@ class SessionRuntimeTest {
     fun tearDown() {
         database.close()
         context.deleteDatabase(databaseName)
+    }
+
+    @Test
+    fun `ephemeral old body continuation cannot clear successor typing or RTT`() = runTest {
+        val first = connectedRuntime(backgroundScope, "first")
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        first.runtime.onInsertedInbound = { _, _ ->
+            entered.complete(Unit)
+            runBlocking { release.await() }
+        }
+        val old = first.connection.attemptIdentity
+        val incoming = async(kotlinx.coroutines.Dispatchers.Default) {
+            first.connection.emitIncoming(IncomingMessageEnvelope(
+                accountId = old.accountId, generation = old.generation, peer = REACTION_PEER,
+                sender = REACTION_PEER, outbound = false, originId = null, body = "body",
+                thread = null, messageId = "old-body",
+            ))
+        }
+        try {
+            entered.await()
+            val second = switchAccount(first, "second")
+            val returned = switchAccount(second, "first")
+            val fresh = returned.connection.attemptIdentity
+            // The inbound gate still serializes transport callbacks behind the old body.
+            // Seed the current projection directly to isolate its post-ingestion clearing boundary.
+            first.runtime.chatStates.apply(org.thanosapollo.nema.xmpp.transport.IncomingChatState(
+                fresh.accountId, fresh.generation, REACTION_PEER, REACTION_PEER, false,
+                org.thanosapollo.nema.xmpp.chatstates.ChatActivity.COMPOSING,
+            ))
+            first.runtime.realTimeText.apply(org.thanosapollo.nema.xmpp.transport.IncomingRealTimeText(
+                fresh.accountId, fresh.generation, REACTION_PEER,
+                org.thanosapollo.nema.xmpp.rtt.RttElement(0, org.thanosapollo.nema.xmpp.rtt.RttEvent.NEW,
+                    listOf(org.thanosapollo.nema.xmpp.rtt.RttAction.Insert(null, "successor"))), false,
+            ))
+            release.complete(Unit)
+            incoming.await()
+            assertEquals(listOf(REACTION_PEER), first.runtime.chatStates.observe(fresh.accountId.value, REACTION_PEER).first())
+            assertEquals("successor", first.runtime.realTimeText.observe(fresh.accountId.value, REACTION_PEER).first())
+            first.runtime.onInsertedInbound = null
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                returned.connection.emitIncoming(IncomingMessageEnvelope(
+                    accountId = fresh.accountId, generation = fresh.generation, peer = REACTION_PEER,
+                    sender = REACTION_PEER, outbound = false, originId = null, body = "current",
+                    thread = null, messageId = "fresh-body",
+                ))
+            }
+            assertEquals(emptyList<String>(), first.runtime.chatStates.observe(fresh.accountId.value, REACTION_PEER).first())
+            assertNull(first.runtime.realTimeText.observe(fresh.accountId.value, REACTION_PEER).first())
+        } finally {
+            release.complete(Unit)
+            incoming.await()
+        }
+    }
+
+    @Test
+    fun `ephemeral collectors retire on switch return and reconnect`() = runTest {
+        val first = connectedRuntime(backgroundScope, "first")
+        val runtime = first.runtime
+        val typing = runtime.chatStates.observe(first.account.id.value, REACTION_PEER)
+        val rtt = runtime.realTimeText.observe(first.account.id.value, REACTION_PEER)
+        val room = runtime.rooms.observe(first.account.id.value, REACTION_ROOM)
+        val typingValues = mutableListOf<List<String>>()
+        val rttValues = mutableListOf<String?>()
+        val roomValues = mutableListOf<org.thanosapollo.nema.xmpp.muc.RoomView?>()
+        backgroundScope.launch(kotlinx.coroutines.test.UnconfinedTestDispatcher(testScheduler)) { typing.collect { typingValues += it } }
+        backgroundScope.launch(kotlinx.coroutines.test.UnconfinedTestDispatcher(testScheduler)) { rtt.collect { rttValues += it } }
+        backgroundScope.launch(kotlinx.coroutines.test.UnconfinedTestDispatcher(testScheduler)) { room.collect { roomValues += it } }
+        fun populate(connection: RecordingConnection) {
+            connection.emitEphemeral()
+            assertEquals(listOf(REACTION_PEER), typingValues.last())
+            assertEquals("draft", rttValues.last())
+            assertEquals("subject", roomValues.last()?.subject)
+        }
+        fun empty() {
+            assertEquals(emptyList<String>(), typingValues.last())
+            assertNull(rttValues.last())
+            assertNull(roomValues.last())
+        }
+        populate(first.connection)
+        val second = switchAccount(first, "second")
+        empty()
+        first.connection.emitEphemeral()
+        empty()
+        second.connection.emitEphemeral()
+        empty()
+        assertEquals(listOf(REACTION_PEER), runtime.chatStates.observe(second.account.id.value, REACTION_PEER).first())
+        assertEquals("draft", runtime.realTimeText.observe(second.account.id.value, REACTION_PEER).first())
+        val returned = switchAccount(second, "first")
+        empty()
+        populate(returned.connection)
+        val oldAttempt = returned.connection.attemptIdentity
+        completeReconnect(returned, oldAttempt, ::empty)
+        empty()
+        returned.connection.emitEphemeral(oldAttempt)
+        empty()
+        populate(returned.connection)
+        runtime.stop()
+        empty()
     }
 
     @Test
@@ -589,6 +692,150 @@ class SessionRuntimeTest {
     }
 
     @Test
+    fun `completed old join cannot start replacement followups`() = runTest {
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val connections = RecordingConnectionFactory()
+        val runtime = SessionRuntime(
+            accounts, credentials, MessageStore(database), PeerIdentityStore(database.messageDao()),
+            backgroundScope, connections,
+        )
+        val first = account("first")
+        val second = account("second")
+        for (account in listOf(first, second)) {
+            accounts.save(account)
+            credentials.store(account.id, "secret".toCharArray())
+        }
+        accounts.activate(first.id)
+        assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
+        val original = connections.created.single()
+        val release = CompletableDeferred<Unit>()
+        original.nextJoinGate = release
+        original.archiveSupported = true
+        val pending = async { runtime.joinMuc("old@conference.example.org", "Old", "old-secret") }
+        original.joined.await()
+        assertEquals(ConnectionCommandOutcome.RUNNING, runtime.activate(second.id))
+        connections.created.last().archiveSupported = true
+        release.complete(Unit)
+        assertTrue(pending.await())
+        runCurrent()
+        assertTrue(connections.created.all { it.publishedBookmarks.isEmpty() })
+        assertTrue(connections.created.all { connection ->
+            connection.archiveRequests.none { it.archiveAuthority == "old@conference.example.org" }
+        })
+    }
+
+    @Test
+    fun `restoration peer write cannot retarget B`() = restorationPeerWriteRace("switch")
+
+    @Test
+    fun `restoration peer write cannot retarget replacement A`() = restorationPeerWriteRace("return")
+
+    @Test
+    fun `restoration peer write cannot retarget reconnected A`() = restorationPeerWriteRace("reconnect")
+
+    @Test
+    fun `restoration peer write with current lease joins`() = restorationPeerWriteRace("current")
+
+    private fun restorationPeerWriteRace(transition: String) = runTest {
+        val executor = PeerWriteExecutor()
+        val peers = androidx.room.Room.inMemoryDatabaseBuilder(context, NemaDatabase::class.java)
+            .setTransactionExecutor(executor)
+            .build()
+        try {
+            val accounts = AccountRepository(database.accountDao())
+            val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+            val bookmark = RoomBookmark("old@conference.example.org", nick = "Old", password = "old-secret", autojoin = true)
+            val connections = RecordingConnectionFactory(firstBookmarks = listOf(bookmark), archiveSupported = true)
+            val runtime = SessionRuntime(
+                accounts, credentials, MessageStore(database), PeerIdentityStore(peers.messageDao()),
+                backgroundScope, connections,
+            )
+            val first = account("first")
+            val second = account("second")
+            for (account in listOf(first, second)) {
+                accounts.save(account)
+                AccountRepository(peers.accountDao()).save(account)
+                credentials.store(account.id, "secret".toCharArray())
+            }
+            accounts.activate(first.id)
+            executor.arm()
+            assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
+            val original = connections.created.single()
+            // Only this database's peer transaction is held, after restoration's authority check.
+            executor.entered.await()
+            // The fake records the caller's Job at the first bookmark read; the controller
+            // calls it directly, so this is the restoration coroutine, not Room's worker.
+            val restoration = original.firstBookmarkReadJob.await()
+            assertFalse(restoration.isCompleted)
+            assertTrue(original.joinedRooms.isEmpty())
+            original.bookmarks = emptyList()
+            when (transition) {
+                "switch", "return" -> {
+                    assertEquals(ConnectionCommandOutcome.RUNNING, runtime.activate(second.id))
+                    if (transition == "return") {
+                        assertEquals(ConnectionCommandOutcome.RUNNING, runtime.activate(first.id))
+                    }
+                }
+                "reconnect" -> completeReconnect(
+                    RuntimeFixture(accounts, credentials, MessageStore(database), connections, runtime, first, original),
+                    original.attemptIdentity,
+                )
+            }
+            runCurrent()
+            executor.release()
+            executor.finished.await()
+            // A completed SQL task does not fence its coroutine continuation. Join the
+            // captured restoration before asserting that it dispatched no stale effects.
+            restoration.join()
+            assertTrue(restoration.isCompleted)
+            runCurrent()
+            if (transition == "current") {
+                original.joined.await()
+                original.published.await()
+                original.roomArchiveRequested.await()
+                runCurrent()
+                assertEquals(listOf(Triple(bookmark.roomJid, bookmark.nick, bookmark.password)), original.joinedRooms)
+                assertEquals(listOf(bookmark), original.publishedBookmarks)
+                assertEquals(
+                    listOf(first.id),
+                    original.archiveRequests.filter { it.archiveAuthority == bookmark.roomJid }.map { it.accountId },
+                )
+            } else {
+                assertTrue(connections.created.all { it.joinedRooms.isEmpty() })
+                assertTrue(connections.created.all { it.publishedBookmarks.isEmpty() })
+                assertTrue(connections.created.all { connection ->
+                    connection.archiveRequests.none { it.archiveAuthority == bookmark.roomJid }
+                })
+            }
+        } finally {
+            executor.release()
+            peers.close()
+            executor.close()
+        }
+    }
+
+    private class PeerWriteExecutor : java.util.concurrent.Executor, AutoCloseable {
+        private val delegate = java.util.concurrent.Executors.newSingleThreadExecutor()
+        private val armed = java.util.concurrent.atomic.AtomicBoolean(false)
+        private val held = java.util.concurrent.atomic.AtomicReference<Runnable?>()
+        val entered = CompletableDeferred<Unit>()
+        val finished = CompletableDeferred<Unit>()
+
+        fun arm() { armed.set(true) }
+
+        override fun execute(command: Runnable) {
+            if (armed.compareAndSet(true, false)) {
+                held.set(Runnable { try { command.run() } finally { finished.complete(Unit) } })
+                entered.complete(Unit)
+            } else delegate.execute(command)
+        }
+
+        fun release() { held.getAndSet(null)?.let(delegate::execute) }
+        override fun close() { delegate.shutdownNow() }
+    }
+
+    @Test
     fun `stale bookmark read cannot publish after account switch`() = runTest {
         val accounts = AccountRepository(database.accountDao())
         val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
@@ -610,11 +857,14 @@ class SessionRuntimeTest {
         credentials.store(second.id, "second-secret".toCharArray())
         assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
         val oldConnection = connections.created.single()
+        withContext(Dispatchers.Default) {
+            withTimeout(5_000) { oldConnection.initialBookmarkReadCompleted.await() }
+        }
         val releaseOldRead = CompletableDeferred<Unit>()
         oldConnection.nextBookmarkReadGate = releaseOldRead
 
         assertTrue(runtime.joinMuc("old@conference.example.org", nick = "Old"))
-        runCurrent()
+        withTimeout(5_000) { oldConnection.gatedBookmarkReadEntered.await() }
         assertEquals(ConnectionCommandOutcome.RUNNING, runtime.activate(second.id))
         val newConnection = connections.created.last()
         assertTrue(runtime.joinMuc("new@conference.example.org", nick = "New"))
@@ -1407,6 +1657,7 @@ class SessionRuntimeTest {
     private suspend fun TestScope.completeReconnect(
         fixture: RuntimeFixture,
         oldAttempt: SessionAttemptIdentity,
+        onWaiting: () -> Unit = {},
     ): SessionAttemptIdentity {
         assertEquals(oldAttempt, fixture.connection.attemptIdentity)
         fixture.connection.emitLoss(SessionFailureReason.NETWORK)
@@ -1414,6 +1665,7 @@ class SessionRuntimeTest {
             ConnectionState.ReconnectWait(oldAttempt.accountId, oldAttempt.generation),
             fixture.runtime.state.first { it is ConnectionState.ReconnectWait },
         )
+        onWaiting()
         repeat(7) { elapsedSeconds ->
             runCurrent()
             val connected = fixture.runtime.state.value as? ConnectionState.Connected
@@ -1535,6 +1787,8 @@ class SessionRuntimeTest {
         private val connectionStarted: CompletableDeferred<Unit>? = null,
         private val releaseConnection: CompletableDeferred<Unit>? = null,
         private val onCreate: ((AccountId) -> Unit)? = null,
+        private val firstBookmarks: List<RoomBookmark> = emptyList(),
+        private val archiveSupported: Boolean = false,
     ) : SessionConnectionFactory {
         val created = mutableListOf<RecordingConnection>()
 
@@ -1544,7 +1798,11 @@ class SessionRuntimeTest {
             event: (org.thanosapollo.nema.session.SessionEvent) -> Unit,
         ): RecordingConnection {
             onCreate?.invoke(configuration.id)
-            return RecordingConnection(configuration.id, connectionStarted, releaseConnection, event).also(created::add)
+            return RecordingConnection(configuration.id, connectionStarted, releaseConnection, event).also {
+                if (created.isEmpty()) it.bookmarks = firstBookmarks
+                it.archiveSupported = archiveSupported
+                created += it
+            }
         }
     }
 
@@ -1563,6 +1821,13 @@ class SessionRuntimeTest {
         val gatedBookmarkReadEntered = CompletableDeferred<Unit>()
         var nextBookmarkReadGate: CompletableDeferred<Unit>? = null
         val publishedBookmarks = mutableListOf<RoomBookmark>()
+        val joinedRooms = mutableListOf<Triple<String, String?, String?>>()
+        val joined = CompletableDeferred<Unit>()
+        var nextJoinGate: CompletableDeferred<Unit>? = null
+        val published = CompletableDeferred<Unit>()
+        val roomArchiveRequested = CompletableDeferred<Unit>()
+        var archiveSupported = false
+        val archiveRequests = mutableListOf<org.thanosapollo.nema.xmpp.transport.ArchivePageRequest>()
         val sentSignals = mutableListOf<OutgoingMessageSignal>()
         val sentReactions = mutableListOf<OutgoingReactionEnvelope>()
         val reactionSteps = ArrayDeque<ReactionSendStep>()
@@ -1617,12 +1882,22 @@ class SessionRuntimeTest {
             roomJid: String,
             nick: String?,
             password: String?,
-        ): Boolean = true
+        ): Boolean {
+            joinedRooms += Triple(roomJid, nick, password)
+            joined.complete(Unit)
+            val gate = nextJoinGate
+            nextJoinGate = null
+            gate?.await()
+            return true
+        }
+
+        val firstBookmarkReadJob = CompletableDeferred<Job>()
 
         override suspend fun bookmarkedRoomDetails(
             accountId: AccountId,
             generation: org.thanosapollo.nema.xmpp.transport.ConnectionGeneration,
         ): RoomBookmarkSnapshot {
+            firstBookmarkReadJob.complete(requireNotNull(currentCoroutineContext()[Job]))
             val gate = nextBookmarkReadGate
             nextBookmarkReadGate = null
             if (gate != null) {
@@ -1634,12 +1909,28 @@ class SessionRuntimeTest {
             return snapshot
         }
 
+        override suspend fun discoverCapabilities(accountId: AccountId, generation: ConnectionGeneration) =
+            org.thanosapollo.nema.xmpp.transport.SessionCapabilities(
+                archiveSupported, org.thanosapollo.nema.xmpp.transport.CarbonCapabilityState.UNSUPPORTED, false,
+            )
+
+        override suspend fun queryArchive(request: org.thanosapollo.nema.xmpp.transport.ArchivePageRequest):
+            org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope {
+            archiveRequests += request
+            if (request.scope != "ACCOUNT") roomArchiveRequested.complete(Unit)
+            return org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope(
+                request, stable = true, complete = true, hasEarlier = false,
+                firstId = null, lastId = null, messages = emptyList(),
+            )
+        }
+
         override suspend fun publishRoomBookmark(
             accountId: AccountId,
             generation: org.thanosapollo.nema.xmpp.transport.ConnectionGeneration,
             bookmark: RoomBookmark,
         ): Boolean {
             publishedBookmarks += bookmark
+            published.complete(Unit)
             bookmarks = bookmarks.filterNot { it.roomJid == bookmark.roomJid } + bookmark
             return true
         }
@@ -1647,6 +1938,19 @@ class SessionRuntimeTest {
         override suspend fun disconnect() {
             disconnectCalls++
             isUsable = false
+        }
+
+        fun emitEphemeral(attempt: SessionAttemptIdentity = attemptIdentity) {
+            event(SessionEvent.ChatState(attempt, org.thanosapollo.nema.xmpp.transport.IncomingChatState(
+                attempt.accountId, attempt.generation, REACTION_PEER, REACTION_PEER, false,
+                org.thanosapollo.nema.xmpp.chatstates.ChatActivity.COMPOSING,
+            )))
+            event(SessionEvent.RealTimeText(attempt, org.thanosapollo.nema.xmpp.transport.IncomingRealTimeText(
+                attempt.accountId, attempt.generation, REACTION_PEER,
+                org.thanosapollo.nema.xmpp.rtt.RttElement(0, org.thanosapollo.nema.xmpp.rtt.RttEvent.NEW,
+                    listOf(org.thanosapollo.nema.xmpp.rtt.RttAction.Insert(null, "draft"))), false,
+            )))
+            event(SessionEvent.RoomUpdated(attempt, org.thanosapollo.nema.xmpp.muc.RoomView(REACTION_ROOM, subject = "subject")))
         }
 
         fun emitIncoming(message: IncomingMessageEnvelope) {

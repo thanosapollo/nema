@@ -283,6 +283,7 @@ internal class ActiveSessionController(
     private val teardownTimeoutMillis: Long = 5_000L,
     private val nowMillis: () -> Long = { System.nanoTime() / 1_000_000L },
     private val revokeDispatch: (DispatchLease) -> RevokedDispatch? = { null },
+    private val retireEphemeral: () -> Unit = {},
 ) {
     private val controllerJob = SupervisorJob()
     private val controllerScope = CoroutineScope(scope.coroutineContext.minusKey(Job) + controllerJob)
@@ -537,6 +538,18 @@ internal class ActiveSessionController(
             return commit()
         } finally {
             stateMutex.unlock()
+        }
+    }
+
+    // Shares the lifecycle lock: a suspended durable writer cannot revive a retired projection.
+    internal suspend fun applyEphemeral(attempt: SessionAttemptIdentity, apply: () -> Unit) {
+        stateMutex.withLock {
+            val owner = current ?: return
+            if (!owns(owner, attempt) || !isHealthy(owner, attempt)) return
+            if (mutableState.value !is ConnectionState.Connected &&
+                mutableState.value !is ConnectionState.Connecting
+            ) return
+            apply()
         }
     }
 
@@ -1066,6 +1079,8 @@ internal class ActiveSessionController(
         state: ConnectionState,
         owner: SessionIdentity? = current?.identity,
     ) {
+        // Connecting starts a new generation; Connected keeps events received during login.
+        if (state !is ConnectionState.Connected) retireEphemeral()
         mutableState.value = state
         mutableLifecycle.value = SessionLifecycleObservation(
             state,

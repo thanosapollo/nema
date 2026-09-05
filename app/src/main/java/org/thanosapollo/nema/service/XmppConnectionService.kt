@@ -204,36 +204,38 @@ class SessionRuntime(
                         val result = liveMessages.ingest(event.message)
                         emitInsertedLive(event.message, result)
                         acknowledgeReceiptRequest(event.message, result)
-                        chatStates.apply(
-                            IncomingChatState(
-                                accountId = event.message.accountId,
-                                generation = event.message.generation,
-                                peer = event.message.peer,
-                                actor = if (event.message.kind == org.thanosapollo.nema.thread.MessageKind.GROUPCHAT) {
-                                    event.message.sender.substringAfterLast('/')
-                                } else {
-                                    event.message.peer
-                                }.ifEmpty { event.message.peer },
-                                groupChat = event.message.kind == org.thanosapollo.nema.thread.MessageKind.GROUPCHAT,
-                                activity = ChatActivity.ACTIVE,
-                            ),
-                        )
-                        if (!event.message.outbound) {
-                            realTimeText.apply(
-                                IncomingRealTimeText(
+                        controller.applyEphemeral(event.attempt) {
+                            chatStates.apply(
+                                IncomingChatState(
                                     accountId = event.message.accountId,
                                     generation = event.message.generation,
                                     peer = event.message.peer,
-                                    element = null,
-                                    hasBody = true,
+                                    actor = if (event.message.kind == org.thanosapollo.nema.thread.MessageKind.GROUPCHAT) {
+                                        event.message.sender.substringAfterLast('/')
+                                    } else {
+                                        event.message.peer
+                                    }.ifEmpty { event.message.peer },
+                                    groupChat = event.message.kind == org.thanosapollo.nema.thread.MessageKind.GROUPCHAT,
+                                    activity = ChatActivity.ACTIVE,
                                 ),
                             )
+                            if (!event.message.outbound) {
+                                realTimeText.apply(
+                                    IncomingRealTimeText(
+                                        accountId = event.message.accountId,
+                                        generation = event.message.generation,
+                                        peer = event.message.peer,
+                                        element = null,
+                                        hasBody = true,
+                                    ),
+                                )
+                            }
                         }
                     }
                     is org.thanosapollo.nema.session.SessionEvent.ChatState ->
-                        chatStates.apply(event.state)
+                        controller.applyEphemeral(event.attempt) { chatStates.apply(event.state) }
                     is org.thanosapollo.nema.session.SessionEvent.RealTimeText ->
-                        realTimeText.apply(event.state)
+                        controller.applyEphemeral(event.attempt) { realTimeText.apply(event.state) }
                     is org.thanosapollo.nema.session.SessionEvent.Reaction ->
                         messages.applyIncomingReaction(
                             IncomingReactionApply(
@@ -268,7 +270,9 @@ class SessionRuntime(
                             reason = event.failure.reason,
                         )
                     is org.thanosapollo.nema.session.SessionEvent.RoomUpdated -> {
-                        rooms.apply(event.attempt.accountId.value, event.view)
+                        controller.applyEphemeral(event.attempt) {
+                            rooms.apply(event.attempt.accountId.value, event.view)
+                        }
                         persistRoomDisplayName(event.attempt.accountId.value, event.view)
                     }
                     is org.thanosapollo.nema.session.SessionEvent.RosterSnapshot ->
@@ -277,6 +281,11 @@ class SessionRuntime(
                 }
             },
             revokeDispatch = outbox::revoke,
+            retireEphemeral = {
+                chatStates.clear()
+                realTimeText.clear()
+                rooms.clear()
+            },
         )
         scope.launch {
             controller.lifecycle.collect { observation ->
@@ -294,7 +303,10 @@ class SessionRuntime(
         }
         scope.launch {
             var archiveJob: Job? = null
+            var restorationJob: Job? = null
             controller.lifecycle.collect { observation ->
+                restorationJob?.cancel()
+                restorationJob = null
                 archiveJob?.cancelAndJoin()
                 archiveJob = null
                 archive.disconnected()
@@ -316,8 +328,8 @@ class SessionRuntime(
                         reportArchiveStorageFailure(failure, observation)
                     }
                 }
-                scope.launch {
-                    restoreBookmarkedRooms(lease.identity, observation)
+                restorationJob = scope.launch {
+                    restoreBookmarkedRooms(lease)
                 }
             }
         }
@@ -418,6 +430,16 @@ class SessionRuntime(
 
     suspend fun joinMuc(roomJid: String, nick: String? = null, password: String? = null): Boolean {
         val lease = controller.lifecycle.value.dispatchLease() ?: return false
+        return joinMuc(lease, roomJid, nick, password)
+    }
+
+    private suspend fun joinMuc(
+        lease: DispatchLease,
+        roomJid: String,
+        nick: String?,
+        password: String?,
+    ): Boolean {
+        if (controller.lifecycle.value.dispatchLease() != lease) return false
         val joined = try {
             controller.joinMuc(lease.identity.accountId, lease.identity.generation, roomJid, nick, password)
         } catch (cancelled: CancellationException) {
@@ -425,8 +447,7 @@ class SessionRuntime(
         } catch (_: Exception) {
             false
         }
-        if (joined) {
-            val observation = controller.lifecycle.value
+        if (joined && controller.lifecycle.value.dispatchLease() == lease) {
             scope.launch {
                 try {
                     roomArchive.synchronize(
@@ -434,8 +455,7 @@ class SessionRuntime(
                         archiveAuthority = roomJid,
                         scope = roomJid,
                         isAuthoritative = {
-                            controller.lifecycle.value.dispatchLease()?.identity == lease.identity &&
-                                controller.lifecycle.value == observation
+                            controller.lifecycle.value.dispatchLease() == lease
                         },
                     )
                 } catch (_: ArchiveStorageFailure) {
@@ -485,10 +505,8 @@ class SessionRuntime(
         peerIdentities.saveDisplayName(accountId, view.roomJid, fill)
     }
 
-    private suspend fun restoreBookmarkedRooms(
-        identity: SessionIdentity,
-        observation: SessionLifecycleObservation,
-    ) {
+    private suspend fun restoreBookmarkedRooms(lease: DispatchLease) {
+        val identity = lease.identity
         val snapshot = try {
             controller.bookmarkedRoomDetails(identity.accountId, identity.generation)
         } catch (cancelled: CancellationException) {
@@ -497,7 +515,7 @@ class SessionRuntime(
             return
         }
         for (bookmark in snapshot.bookmarks) {
-            if (controller.lifecycle.value != observation) return
+            if (controller.lifecycle.value.dispatchLease() != lease) return
             try {
                 peerIdentities.saveRoom(identity.accountId.value, bookmark.roomJid, true)
                 bookmark.name?.let { name ->
@@ -508,9 +526,10 @@ class SessionRuntime(
             } catch (_: Exception) {
                 continue
             }
+            if (controller.lifecycle.value.dispatchLease() != lease) return
             if (!bookmark.autojoin) continue
             try {
-                joinMuc(bookmark.roomJid, bookmark.nick, bookmark.password)
+                joinMuc(lease, bookmark.roomJid, bookmark.nick, bookmark.password)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {

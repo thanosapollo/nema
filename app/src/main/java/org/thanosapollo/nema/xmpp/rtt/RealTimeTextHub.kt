@@ -7,16 +7,21 @@ import kotlinx.coroutines.flow.map
 import org.thanosapollo.nema.xmpp.transport.IncomingRealTimeText
 
 class RealTimeTextHub {
-    private val states = MutableStateFlow<Map<String, RttState>>(emptyMap())
+    private val states = MutableStateFlow<Map<Pair<String, String>, RttState>>(emptyMap())
 
-    fun observe(peer: String): Flow<String?> =
-        states.map { it[peer]?.text }.distinctUntilChanged()
+    fun observe(accountId: String, peer: String): Flow<String?> =
+        states.map { it[accountId to peer]?.text }.distinctUntilChanged()
+
+    internal fun clear() {
+        states.value = emptyMap()
+    }
 
     fun apply(update: IncomingRealTimeText) {
         val incoming = update.element ?: RttElement(0, RttEvent.CANCEL, emptyList())
+        val key = update.accountId.value to update.peer
         states.value = states.value.let { current ->
-            val next = applyRtt(current[update.peer], incoming, update.hasBody)
-            if (next == null) current - update.peer else current + (update.peer to next)
+            val next = applyRtt(current[key], incoming, update.hasBody)
+            if (next == null) current - key else current + (key to next)
         }
     }
 }

@@ -7,10 +7,14 @@ import kotlinx.coroutines.flow.map
 import org.thanosapollo.nema.xmpp.transport.IncomingChatState
 
 class ChatStateHub {
-    private val composers = MutableStateFlow<Map<String, List<String>>>(emptyMap())
+    private val composers = MutableStateFlow<Map<Pair<String, String>, List<String>>>(emptyMap())
 
-    fun observe(peer: String): Flow<List<String>> =
-        composers.map { it[peer].orEmpty() }.distinctUntilChanged()
+    fun observe(accountId: String, peer: String): Flow<List<String>> =
+        composers.map { it[accountId to peer].orEmpty() }.distinctUntilChanged()
+
+    internal fun clear() {
+        composers.value = emptyMap()
+    }
 
     fun apply(state: IncomingChatState) {
         val actor = if (state.groupChat) {
@@ -19,9 +23,10 @@ class ChatStateHub {
             state.peer
         }
         val composing = state.activity == ChatActivity.COMPOSING
+        val key = state.accountId.value to state.peer
         composers.value = composers.value.let { current ->
-            val next = applyComposer(current[state.peer].orEmpty(), actor, composing)
-            if (next.isEmpty()) current - state.peer else current + (state.peer to next)
+            val next = applyComposer(current[key].orEmpty(), actor, composing)
+            if (next.isEmpty()) current - key else current + (key to next)
         }
     }
 }

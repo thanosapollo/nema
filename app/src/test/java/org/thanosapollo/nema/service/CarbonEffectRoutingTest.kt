@@ -36,10 +36,10 @@ class CarbonEffectRoutingTest {
             .toIncomingChatState(ATTEMPT, OWN)
 
         hub.apply(requireNotNull(sentGone))
-        assertEquals(emptyList<String>(), hub.observe(PEER).first())
-        assertEquals(listOf(OTHER), hub.observe(OTHER).first())
+        assertEquals(emptyList<String>(), hub.observe(ATTEMPT.accountId.value, PEER).first())
+        assertEquals(listOf(OTHER), hub.observe(ATTEMPT.accountId.value, OTHER).first())
         hub.apply(requireNotNull(receivedGone))
-        assertEquals(emptyList<String>(), hub.observe(PEER).first())
+        assertEquals(emptyList<String>(), hub.observe(ATTEMPT.accountId.value, PEER).first())
     }
 
     @Test

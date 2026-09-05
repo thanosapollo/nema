@@ -21,7 +21,11 @@ class RoomStateStore {
 
     fun clearAccount(accountId: String) {
         val prefix = "$accountId\u0000"
-        views.keys.filter { it.startsWith(prefix) }.forEach { views.remove(it) }
+        views.filterKeys { it.startsWith(prefix) }.values.forEach { it.value = null }
+    }
+
+    internal fun clear() {
+        views.values.forEach { it.value = null }
     }
 
     private fun flowFor(accountId: String, roomJid: String): MutableStateFlow<RoomView?> =
