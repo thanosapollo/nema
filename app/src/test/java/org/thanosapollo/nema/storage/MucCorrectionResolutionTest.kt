@@ -375,6 +375,29 @@ internal class MucCorrectionResolutionTest : ReactionStoreTestFixture() {
         }
     }
 
+    @Test fun prefixOnlyRootIsReconciledWhenPageContainsOnlyDifferentRoot() = runBlocking {
+        installFacts(event("root"), event("first", "root"), event("last", "root"), event("other-root"))
+        assertEquals(ArchivePageStatus.APPLIED, page(event("tail")).status)
+        val dao = database.messageDao()
+        dao.insertArchivePosition(ArchiveMessagePositionEntity(ACCOUNT, ROOM, ROOM, -2, "last"))
+        dao.insertArchivePosition(ArchiveMessagePositionEntity(ACCOUNT, ROOM, ROOM, -1, "first"))
+        store.ingest(event("first", "root"))
+        rootBody("body-first")
+        val sql = database.openHelper.writableDatabase
+        sql.execSQL("CREATE TABLE prefix_selections (id TEXT)")
+        sql.execSQL("CREATE TRIGGER prefix_selection AFTER UPDATE ON messages WHEN NEW.mucCorrectionSelected = 1 BEGIN INSERT INTO prefix_selections VALUES (NEW.localMessageId); END")
+        val incoming = event("other-edit", "other-root")
+        assertEquals(ArchivePageStatus.APPLIED, store.applyArchivePage(ArchivePage(key,
+            ArchiveDirection.BEFORE, "tail", true, false, true, "other-edit", "other-edit",
+            listOf(ArchivedIncomingMessage("other-edit", incoming)))).status)
+        assertEquals(listOf("last" to -3L, "first" to -2L, "other-edit" to -1L, "tail" to 0L),
+            dao.archivePositions(ACCOUNT).sortedBy { it.archiveOrdinal }.map { it.messageId to it.archiveOrdinal })
+        sql.query("SELECT id FROM prefix_selections WHERE id = 'first'").use { assertEquals(1, it.count) }
+        rootBody("body-first")
+        reopen()
+        rootBody("body-first")
+    }
+
     @Test fun candidateAndLinkQueriesUseExistingIndexes() {
         val sql = database.openHelper.writableDatabase
         listOf(

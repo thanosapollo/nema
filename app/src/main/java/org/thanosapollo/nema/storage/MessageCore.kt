@@ -3206,6 +3206,7 @@ class MessageStore private constructor(
             }
         }
 
+        val previouslyArchivedIndices = mapped.mapTo(mutableSetOf()) { it.index }
         val ingestedContent = mutableListOf<Pair<ArchivedIncomingMessage, IngestionResult>>()
         page.messages.forEachIndexed { index, archived ->
             archived.signal?.let { signal ->
@@ -3229,7 +3230,7 @@ class MessageStore private constructor(
                 message.withoutArchivePosition().copy(
                     aliases = (message.aliases + archiveAlias).distinct(),
                     unreadEligible = page.direction == ArchiveDirection.AFTER &&
-                        archived.resultId != page.boundaryId,
+                        archived.resultId != page.boundaryId && index !in previouslyArchivedIndices,
                 ),
                 muc = muc,
                 preserveStoredThreadLineage = true,

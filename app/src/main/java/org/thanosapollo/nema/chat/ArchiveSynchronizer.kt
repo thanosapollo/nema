@@ -168,26 +168,28 @@ class ArchiveSynchronizer(
     suspend fun backfillOnePage(
         identity: SessionIdentity,
         archiveAuthority: String,
+        scope: String = ACCOUNT_ARCHIVE_SCOPE,
         isAuthoritative: () -> Boolean,
     ): Boolean = operationMutex.withLock {
-        backfillOnePageLocked(identity, archiveAuthority, isAuthoritative)
+        backfillOnePageLocked(identity, archiveAuthority, scope, isAuthoritative)
     }
 
     private suspend fun backfillOnePageLocked(
         identity: SessionIdentity,
         archiveAuthority: String,
+        scope: String,
         isAuthoritative: () -> Boolean,
     ): Boolean {
         val ready = mutableState.value as? ArchiveSyncState.Ready ?: return false
         if (ready.identity != identity) return false
-        val key = ArchiveCursorKey(identity.accountId.value, archiveAuthority, ACCOUNT_ARCHIVE_SCOPE)
+        val key = ArchiveCursorKey(identity.accountId.value, archiveAuthority, scope)
         val cursor = storage(identity) { store.archiveCursor(key) } ?: return false
         if (!cursor.hasEarlier || cursor.oldestId == null || !isAuthoritative()) return false
         val request = ArchivePageRequest(
             accountId = identity.accountId,
             generation = identity.generation,
             archiveAuthority = archiveAuthority,
-            scope = ACCOUNT_ARCHIVE_SCOPE,
+            scope = scope,
             direction = ArchivePageDirection.BEFORE,
             boundaryId = cursor.oldestId,
             pageSize = PAGE_SIZE,
