@@ -196,7 +196,7 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
-    fun cachedTimelineKeepsLatestSentAmongLaterIngestedHistory() = runBlocking {
+    fun firstReadyKeepsEntireChronologicalTimelineAmongLaterIngestedHistory() = runBlocking {
         val store = MessageStore(database)
         store.ingest(
             incoming(ACCOUNT, "latest-live", "latest body").copy(
@@ -213,9 +213,74 @@ class ChatRepositoryPresenterTest {
             )
         }
 
-        val cached = ChatRepository(database).cachedTimeline(DirectConversationKey(ACCOUNT, PEER))
-        assertEquals("latest-live", cached.last().id)
-        assertTrue(cached.none { it.id.startsWith("old-") && it.id.removePrefix("old-").toInt() < 10 })
+        val presenter = DirectChatPresenter(
+            accountConfiguration(ACCOUNT, SELF), ChatRepository(database), scope,
+            enqueue = { _, _ -> true },
+        )
+        val firstReady = async(start = CoroutineStart.UNDISPATCHED) {
+            presenter.state.first { it.selectedPeer == PEER && it.contentStatus == ChatContentStatus.Ready }
+        }
+        presenter.selectPeer(PEER)
+        val messages = withTimeout(5_000) { firstReady.await() }.messages
+        assertEquals((0..89).map { "old-$it" } + "latest-live", messages.map { it.id })
+        presenter.close()
+    }
+
+    @Test
+    fun firstReadySettlesEmptyConversationAndEmptySelectedThread() = runBlocking {
+        val presenter = DirectChatPresenter(accountConfiguration(ACCOUNT, SELF), ChatRepository(database), scope,
+            enqueue = { _, _ -> true })
+        presenter.selectPeer(PEER)
+        withTimeout(5_000) {
+            assertTrue(presenter.state.first { it.selectedPeer == PEER && it.contentStatus == ChatContentStatus.Ready }.messages.isEmpty())
+        }
+        MessageStore(database).ingest(incoming(ACCOUNT, "outside-thread", "outside"))
+        val thread = ThreadRef(ThreadId.require("empty-thread"))
+        presenter.continueThread(thread)
+        withTimeout(5_000) {
+            assertTrue(presenter.state.first { it.selectedThread == thread && it.contentStatus == ChatContentStatus.Ready }.messages.isEmpty())
+        }
+        presenter.close()
+    }
+
+    @Test
+    fun firstReadyIncludesCorrectionTrustedReplyReactionAndThreadSummary() = runBlocking {
+        val store = MessageStore(database)
+        val repository = ChatRepository(database)
+        store.ingest(incoming(ACCOUNT, "root", "original").copy(
+            aliases = listOf(TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "root-wire")),
+        ))
+        val session = requireNotNull(repository.observeCurrentSession(ACCOUNT, PEER).first())
+        store.ingest(incoming(ACCOUNT, "edit", "corrected").copy(replaceId = "root-wire"))
+        store.ingest(incoming(ACCOUNT, "reply", "reply body", threadId = session.id.value).copy(
+            replyToId = "root-wire", replyToJid = PEER,
+        ))
+        val child = ThreadRef(ThreadId.require("child"), session.id)
+        store.ingest(incoming(ACCOUNT, "child-reply", "child body", threadId = child.id.value,
+            parentThreadId = session.id.value).copy(replyToId = "root-wire", replyToJid = PEER))
+        // Install one durable reaction fact before any projection subscribes.
+        database.openHelper.writableDatabase.execSQL(
+            "INSERT INTO message_reactions (accountId, peerJid, senderBareJid, targetKey, localMessageId, wireTargetId, emojis, updatedAtMs, revision) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            arrayOf<Any>(ACCOUNT, PEER, PEER, "local:root", "root", "root-wire", "👍", 1L, 1L),
+        )
+        val presenter = DirectChatPresenter(accountConfiguration(ACCOUNT, SELF), repository, scope,
+            enqueue = { _, _ -> true })
+        val firstReady = async(start = CoroutineStart.UNDISPATCHED) {
+            presenter.state.first { it.selectedPeer == PEER && it.contentStatus == ChatContentStatus.Ready }
+        }
+        presenter.selectPeer(PEER)
+        val ready = withTimeout(5_000) { firstReady.await() }
+        assertEquals(listOf("root", "reply"), ready.messages.map { it.id })
+        val root = ready.messages.first()
+        assertEquals("corrected", root.body)
+        assertTrue(root.edited)
+        assertTrue("root-wire" in root.replyReferenceIds)
+        assertEquals("corrected", ready.messages.last().reply?.body)
+        assertEquals(1, root.reactions.size)
+        assertEquals(child, root.threadSummaries.single().thread)
+        assertEquals(1, root.threadSummaries.single().replyCount)
+        assertTrue(ready.recentThreads.any { it.thread == child })
+        presenter.close()
     }
 
     @Test
@@ -2483,7 +2548,7 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
-    fun cachedDraftReadyThenLiveFailureCanRetrySameOccurrenceRoute() = runBlocking {
+    fun authoritativeDraftReadyThenLiveFailureCanRetrySameOccurrenceRoute() = runBlocking {
         val repository = ChatRepository(database)
         val draft = snapshot(ACCOUNT, PEER, "stored before opening")
         repository.saveDraft(draft.key, draft.body)
@@ -2494,12 +2559,12 @@ class ChatRepositoryPresenterTest {
             accountConfiguration(ACCOUNT, SELF), repository, scope, { _, _ -> true },
             observeRtt = {
                 kotlinx.coroutines.flow.flow {
+                    emit(null)
                     if (shouldFail) {
                         entered.complete(Unit)
                         fail.await()
                         throw IllegalStateException("controlled live failure")
                     }
-                    emit(null)
                 }
             },
         )

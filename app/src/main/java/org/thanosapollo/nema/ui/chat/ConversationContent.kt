@@ -1936,17 +1936,20 @@ internal fun MessageTimeline(
         }
     }
     LaunchedEffect(initialViewport, viewportRestored, messages.isNotEmpty()) {
-        if (!viewportRestored && currentMessages.value.isNotEmpty()) {
+        if (!viewportRestored) {
             val anchor = requireNotNull(initialViewport)
-            val index = timelineListIndex(
-                restoredTimelineIndex(currentMessages.value, anchor),
-                typingLabel != null,
-            )
-            listState.scrollToItem(index, anchor.offset)
+            // This composition exists only for Ready, including an authoritative empty result.
+            if (currentMessages.value.isNotEmpty()) {
+                val index = timelineListIndex(
+                    restoredTimelineIndex(currentMessages.value, anchor),
+                    typingLabel != null,
+                )
+                listState.scrollToItem(index, anchor.offset)
+            }
             viewportRestored = true
         }
     }
-    LaunchedEffect(listState, viewportRestored) {
+    LaunchedEffect(listState, viewportRestored, messages.isEmpty()) {
         if (!viewportRestored) return@LaunchedEffect
         snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
             .distinctUntilChanged()

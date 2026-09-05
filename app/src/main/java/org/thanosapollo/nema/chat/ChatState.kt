@@ -425,13 +425,6 @@ class ChatRepository(database: NemaDatabase) {
         presentTimeline(rows, aliases, key, peer, reactionRows)
     }.flowOn(Dispatchers.Default)
 
-    suspend fun cachedTimeline(key: DirectConversationKey): List<TimelineMessage> = presentTimeline(
-        rows = dao.cachedDirectTimeline(key.accountId, key.canonicalBarePeer),
-        aliases = emptyList(),
-        key = key,
-        peer = dao.peer(key.accountId, key.canonicalBarePeer)?.toIdentityFacts(),
-    )
-
     private fun presentTimeline(
         rows: List<TimelineRow>,
         aliases: List<TrustedIdentityAliasEntity>,
@@ -671,19 +664,6 @@ class DirectChatPresenter(
             val key = DirectConversationKey(account.id.value, route.peerJid, route.thread)
             flow {
                 emit(emptySelection(occurrence, ChatContentStatus.Loading))
-                emit(
-                    withContext(Dispatchers.Default) {
-                        SelectedConversation(
-                            occurrence,
-                            repository.cachedTimeline(key),
-                            repository.observeStoredDraft(key).first(),
-                            repository.observePeer(account.id.value, route.peerJid).first(),
-                            null,
-                            repository.observeCurrentSession(account.id.value, route.peerJid).first(),
-                            emptyList(),
-                        )
-                    },
-                )
                 emitAll(
                     combine(
                         repository.observeTimeline(key),

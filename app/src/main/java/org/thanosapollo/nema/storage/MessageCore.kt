@@ -1122,42 +1122,6 @@ abstract class MessageDao {
     )
     abstract fun observeDirectTimeline(accountId: String, peerJid: String): Flow<List<TimelineRow>>
 
-    @RewriteQueriesToDropUnusedColumns
-    @Query(
-        """
-        SELECT messages.*, message_outbox.operationId AS operationId,
-          message_outbox.status AS outboxStatus,
-          message_outbox.receiptStage AS receiptStage,
-          message_outbox.generation AS outboxGeneration,
-          message_outbox.attempt AS outboxAttempt,
-          NULL AS correctedBody,
-          0 AS edited,
-          NULL AS replyReferenceId,
-          NULL AS conversationArchiveOrdinal,
-          CASE
-            WHEN messages.messageKind = 'GROUPCHAT' THEN messages.peerJid
-            ELSE COALESCE((SELECT bareJid FROM accounts WHERE accounts.id = messages.accountId), '')
-          END AS conversationArchiveAuthority,
-          CASE
-            WHEN messages.messageKind = 'GROUPCHAT' THEN messages.peerJid
-            ELSE 'ACCOUNT'
-          END AS conversationArchiveScope
-        FROM messages
-        LEFT JOIN message_outbox
-          ON message_outbox.accountId = messages.accountId
-         AND message_outbox.messageId = messages.localMessageId
-        WHERE messages.accountId = :accountId AND messages.peerJid = :peerJid
-          AND messages.messageKind IN ('CHAT', 'GROUPCHAT')
-          AND messages.replaceId IS NULL
-        ORDER BY messages.sentAtEpochMs IS NULL,
-          messages.sentAtEpochMs DESC,
-          messages.localSequence DESC,
-          messages.localMessageId DESC
-        LIMIT 80
-        """,
-    )
-    abstract suspend fun cachedDirectTimeline(accountId: String, peerJid: String): List<TimelineRow>
-
     @Query(
         """
         SELECT alias.*
