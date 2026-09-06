@@ -835,6 +835,18 @@ abstract class MessageDao {
     )
     abstract suspend fun archivePositions(accountId: String): List<ArchiveMessagePositionEntity>
 
+    @Query("SELECT * FROM archive_record_positions WHERE accountId = :accountId AND archiveAuthority = :authority AND archiveScope = :scope AND resultId = :resultId")
+    abstract suspend fun archiveRecord(accountId: String, authority: String, scope: String, resultId: String): ArchiveRecordPositionEntity?
+
+    @Query("SELECT * FROM archive_record_positions WHERE accountId = :accountId AND archiveAuthority = :authority AND archiveScope = :scope AND archiveOrdinal BETWEEN :first AND :last ORDER BY archiveOrdinal")
+    abstract suspend fun archiveRecords(accountId: String, authority: String, scope: String, first: Long, last: Long): List<ArchiveRecordPositionEntity>
+
+    @Query("SELECT value FROM trusted_identity_aliases WHERE accountId = :accountId AND kind = 'MAM_RESULT' AND authority = :authority AND messageId = :messageId AND status = 'TRUSTED' ORDER BY value LIMIT 2")
+    abstract suspend fun trustedArchiveResultIds(accountId: String, authority: String, messageId: String): List<String>
+
+    @Insert(onConflict = OnConflictStrategy.ABORT)
+    abstract suspend fun insertArchiveRecord(record: ArchiveRecordPositionEntity)
+
     @Query(
         """
         SELECT * FROM archive_message_positions
@@ -2465,6 +2477,7 @@ class MessageStore private constructor(
         allowDirectSessionTransition: Boolean = true,
         allowSentCarbonRead: Boolean = false,
         allowLiveReconciliation: Boolean = true,
+        archiveComponentOwner: String? = null,
     ): IngestionResult {
         val dao = database.messageDao()
         val timed = received.withStoredTime(clock)
@@ -2526,7 +2539,14 @@ class MessageStore private constructor(
         muc.capture(pinned)
         val enriched = pinned?.enrichMuc(incoming.mucFacts)
         if (enriched != null && enriched != pinned) dao.updateMessage(enriched)
-        val matched = enriched ?: existingLocal ?: mappedMessages
+        val selectedArchiveOwner = archiveComponentOwner?.let { dao.message(incoming.accountId, it) }
+        require(selectedArchiveOwner == null || selectedArchiveOwner.isCompatibleWith(incoming)) {
+            "Archive component owner has incompatible content"
+        }
+        require(archiveComponentOwner == null || existingLocal == null || existingLocal.localMessageId == archiveComponentOwner) {
+            "Local ID disagrees with archive component owner"
+        }
+        val matched = selectedArchiveOwner ?: enriched ?: existingLocal ?: mappedMessages
             .filter { it.isCompatibleWith(incoming) }
             .minWithOrNull(compareBy(MessageEntity::localSequence, MessageEntity::localMessageId))
         val inserted = matched == null
@@ -2931,6 +2951,9 @@ class MessageStore private constructor(
         }
 
         val aliasAuthority = page.key.aliasAuthority()
+        val accountRecords = if (page.key.scope == "ACCOUNT") AccountArchiveRecords.load(dao, page, current) else null
+        val componentOwners = mutableMapOf<Int, String>()
+        val normalizedMessages = mutableMapOf<Int, IncomingMessage>()
         suspend fun preserveStoredThreadLineage(message: IncomingMessage): IncomingMessage {
             val threadId = message.threadId ?: return message.copy(parentThreadId = null)
             val existing = dao.thread(
@@ -2974,6 +2997,7 @@ class MessageStore private constructor(
             )
             val aliases = message.copy(aliases = (message.aliases + archiveAlias).distinct()).eventAliases()
             val normalizedMessage = preserveStoredThreadLineage(message)
+            normalizedMessages[index] = normalizedMessage
             val keys = mutableSetOf(
                 PageIdentityKey(null, "", message.localMessageId),
             )
@@ -3027,8 +3051,18 @@ class MessageStore private constructor(
             } while (expanded)
             components += component
         }
-        if (components.any { it.size > 1 }) {
-            return@withTransaction retryable("Archive page repeats one logical message")
+        for (component in components.filter { it.size > 1 }) {
+            val members = component.map { requireNotNull(normalizedMessages[it.index]) }
+            val ownerIds = component.flatMap { it.seededMessageIds }.distinct()
+            val owners = ownerIds.map { requireNotNull(dao.message(page.key.accountId, it)) }
+            if (accountRecords == null || members.any { it.messageKind != MessageKind.CHAT } ||
+                owners.size > 1 || members.any { first ->
+                    members.any { second -> !first.toEntity(0, null).isCompatibleWith(second) } ||
+                        owners.any { !it.isCompatibleWith(first) }
+                }
+            ) return@withTransaction retryable("Archive page repeats one logical message")
+            val owner = ownerIds.singleOrNull() ?: requireNotNull(normalizedMessages[component.minOf { it.index }]).localMessageId
+            component.forEach { componentOwners[it.index] = owner }
         }
 
         val mappedCandidates = mutableListOf<MappedArchivePosition>()
@@ -3056,6 +3090,10 @@ class MessageStore private constructor(
             }
         }
         var mapped = mappedCandidates.sortedBy(MappedArchivePosition::index)
+        // mappedCandidates already propagates the stored position to every component member,
+        // including an early member whose stored owner is discovered only by a late bridge.
+        val canonicallyArchivedIndices = mapped.mapTo(mutableSetOf()) { it.index }
+        if (accountRecords != null) mapped = mapped.distinctBy { it.messageId }
         val migrationResetBootstrap = page.direction == ArchiveDirection.BOOTSTRAP &&
             current?.let { cursor ->
                 cursor.oldestId == null && cursor.newestId == null &&
@@ -3076,6 +3114,9 @@ class MessageStore private constructor(
                 scopePositions.any { it.archiveOrdinal < oldest }
             } == true
         val migrationReconciliationPage = migrationResetBootstrap || migrationBeforeReconciliation
+        if (accountRecords != null && migrationBeforeReconciliation) {
+            mapped = mapped.filter { it.ordinal < requireNotNull(current?.oldestOrdinal) }
+        }
         if (migrationReconciliationPage) {
             val mappedIds = mapped.map(MappedArchivePosition::messageId)
             if (mappedIds.distinct().size != mappedIds.size) {
@@ -3093,7 +3134,7 @@ class MessageStore private constructor(
         if (page.direction != ArchiveDirection.BOOTSTRAP &&
             !migrationBeforeReconciliation &&
             page.messages.isNotEmpty() &&
-            mapped.size == page.messages.size
+            (accountRecords?.anchors?.size ?: mapped.size) == page.messages.size
         ) {
             return@withTransaction retryable("Archive page repeated without progress")
         }
@@ -3114,7 +3155,8 @@ class MessageStore private constructor(
                     if (page.lastId == page.boundaryId) 1L else 0L
                 Math.subtractExact(boundaryOrdinal, returnedBeforeBoundary)
             }
-            mapped.isNotEmpty() -> {
+            accountRecords?.startOrdinal != null -> requireNotNull(accountRecords.startOrdinal)
+            accountRecords == null && mapped.isNotEmpty() -> {
                 val first = mapped.first()
                 Math.subtractExact(first.ordinal, first.index.toLong())
             }
@@ -3137,6 +3179,9 @@ class MessageStore private constructor(
             }
             else -> 0L
         }
+        accountRecords?.validate(dao, startOrdinal,
+            if (migrationReconciliationPage) mapped.mapTo(mutableSetOf()) { it.messageId } else emptySet(),
+        )?.let { return@withTransaction retryable(it) }
         if (migrationReconciliationPage) {
             val mappedIdSet = mapped.map(MappedArchivePosition::messageId).toSet()
             val prefixPositions = if (migrationBeforeReconciliation) {
@@ -3159,6 +3204,20 @@ class MessageStore private constructor(
             }
             val rebasedMapped = mapped.map { position ->
                 position.copy(ordinal = Math.addExact(startOrdinal, position.index.toLong()))
+            }
+            if (accountRecords != null) {
+                val movedIds = mappedIdSet + prefixPositions.map { it.messageId }
+                val proposedOrdinals = rebasedPrefix.map { it.archiveOrdinal } + rebasedMapped.map { it.ordinal }
+                val retainedOrdinals = scopePositions.filter { it.messageId !in movedIds }.mapTo(mutableSetOf()) { it.archiveOrdinal }
+                if (proposedOrdinals.distinct().size != proposedOrdinals.size || proposedOrdinals.any(retainedOrdinals::contains)) {
+                    return@withTransaction retryable("Migrated canonical positions collide with retained history")
+                }
+                // A reset/tentative canonical prefix can move, but observed raw evidence cannot.
+                for (ordinal in prefixPositions.map { it.archiveOrdinal } + mapped.map { it.ordinal }) {
+                    if (dao.archiveRecords(page.key.accountId, page.key.archiveAuthority, page.key.scope, ordinal, ordinal).isNotEmpty()) {
+                        return@withTransaction retryable("Cannot rebase an established archive position")
+                    }
+                }
             }
             prefixPositions.forEach { position ->
                 muc.capture(page.key.accountId, position.messageId)
@@ -3200,13 +3259,15 @@ class MessageStore private constructor(
             }
             mapped = rebasedMapped
         }
-        mapped.forEach { position ->
+        (if (accountRecords == null) mapped else emptyList()).forEach { position ->
             require(position.ordinal == Math.addExact(startOrdinal, position.index.toLong())) {
                 "Archive overlap has incompatible ordering"
             }
         }
 
-        val previouslyArchivedIndices = mapped.mapTo(mutableSetOf()) { it.index }
+        val previouslyArchivedIndices = if (accountRecords != null) canonicallyArchivedIndices
+            else mapped.mapTo(mutableSetOf()) { it.index }
+        accountRecords?.persist(dao, startOrdinal)
         val ingestedContent = mutableListOf<Pair<ArchivedIncomingMessage, IngestionResult>>()
         page.messages.forEachIndexed { index, archived ->
             archived.signal?.let { signal ->
@@ -3237,8 +3298,15 @@ class MessageStore private constructor(
                 allowDirectSessionTransition = false,
                 allowSentCarbonRead = false,
                 allowLiveReconciliation = false,
+                archiveComponentOwner = componentOwners[index],
             )
-            attachArchivePosition(
+            componentOwners[index]?.let { owner ->
+                check(result.messageId == owner && !result.identityConflict) { "Archive component identity changed" }
+                check(dao.trustedAlias(page.key.accountId, IdentityAliasKind.MAM_RESULT, aliasAuthority, archived.resultId)?.messageId == owner) {
+                    "Archive result alias was not admitted"
+                }
+            }
+            if (accountRecords == null || dao.archivePosition(page.key.accountId, page.key.archiveAuthority, page.key.scope, result.messageId) == null) attachArchivePosition(
                 result.messageId,
                 page.key.accountId,
                 ArchivePosition(

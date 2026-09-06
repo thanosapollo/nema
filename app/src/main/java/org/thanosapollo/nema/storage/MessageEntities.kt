@@ -238,6 +238,25 @@ data class MessageEntity(
     val mucCorrectionSelected: Boolean = false,
 )
 
+// Raw traversal evidence deliberately has no logical-message owner.
+@Entity(
+    tableName = "archive_record_positions",
+    primaryKeys = ["accountId", "archiveAuthority", "archiveScope", "resultId"],
+    foreignKeys = [ForeignKey(
+        entity = AccountEntity::class,
+        parentColumns = ["id"], childColumns = ["accountId"],
+        onDelete = ForeignKey.CASCADE,
+    )],
+    indices = [Index(value = ["accountId", "archiveAuthority", "archiveScope", "archiveOrdinal"], unique = true)],
+)
+data class ArchiveRecordPositionEntity(
+    val accountId: String,
+    val archiveAuthority: String,
+    val archiveScope: String,
+    val resultId: String,
+    val archiveOrdinal: Long,
+)
+
 @Entity(
     tableName = "archive_message_positions",
     primaryKeys = ["accountId", "archiveAuthority", "archiveScope", "archiveOrdinal"],

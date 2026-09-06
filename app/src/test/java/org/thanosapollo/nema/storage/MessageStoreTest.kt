@@ -50,6 +50,48 @@ class MessageStoreTest {
     }
 
     @Test
+    fun distinctAccountArchiveRecordsOfOneSentMessageDoNotBlockLaterHistory() = runBlocking {
+        var store = MessageStore(database)
+        val key = archiveKey(ACCOUNT)
+        val sentId = TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, SELF, "sent-wire")
+        fun record(result: String, local: String) = archived(
+            result, local, "sent body", sentId,
+            direction = MessageDirection.OUTBOUND, sender = SELF,
+        )
+        assertEquals(ArchivePageStatus.APPLIED, store.applyArchivePage(archivePage(
+            key, ArchiveDirection.BOOTSTRAP, complete = true, hasEarlier = false,
+            messages = listOf(record("r0", "sent")),
+        )).status)
+
+        // Archive UIDs identify stored transmissions, not unique logical message rows.
+        val repeated = store.applyArchivePage(archivePage(
+            key, ArchiveDirection.AFTER, boundaryId = "r0", complete = false, hasEarlier = false,
+            messages = listOf(record("r1", "copy-one"), record("r2", "copy-two")),
+        ))
+        assertEquals(ArchivePageStatus.APPLIED, repeated.status)
+        assertEquals("r2", repeated.cursor.newestId)
+        assertEquals(2L, repeated.cursor.newestOrdinal)
+        assertEquals(listOf("sent"), store.messages(ACCOUNT).map { it.localMessageId })
+        assertEquals(setOf("r0", "r1", "r2"), store.aliases(ACCOUNT)
+            .filter { it.kind == IdentityAliasKind.MAM_RESULT }.map { it.value }.toSet())
+        assertEquals(listOf("r0" to 0L, "r1" to 1L, "r2" to 2L), database.messageDao().archiveRecords(
+            ACCOUNT, key.archiveAuthority, key.scope, Long.MIN_VALUE, Long.MAX_VALUE,
+        ).map { it.resultId to it.archiveOrdinal })
+        assertEquals(0L, store.archivePositions(ACCOUNT, "sent").single().archiveOrdinal)
+        assertEquals(0, repeated.inserted)
+        assertTrue(repeated.insertedInbound.isEmpty())
+
+        store = reopenStore()
+        val next = store.applyArchivePage(archivePage(
+            key, ArchiveDirection.AFTER, boundaryId = "r2", complete = true, hasEarlier = false,
+            messages = listOf(archived("r3", "later", "later reply")),
+        ))
+        assertEquals(ArchivePageStatus.APPLIED, next.status)
+        assertEquals("r3", next.cursor.newestId)
+        assertEquals(setOf("sent", "later"), store.messages(ACCOUNT).map { it.localMessageId }.toSet())
+    }
+
+    @Test
     fun exactReadIdsKeepHolesAcrossScopesReopenAndStaleMetadata() = runBlocking {
         var store = MessageStore(database)
         addAccount(OTHER_ACCOUNT)
@@ -2578,12 +2620,7 @@ class MessageStoreTest {
             messages = listOf(archived("migrated-r1", "migrated-message", "history")),
         )
         assertEquals(ArchivePageStatus.APPLIED, store.applyArchivePage(page).status)
-        database.messageDao().upsertArchiveCursor(
-            key.emptyCursor().copy(
-                hasEarlier = true,
-                retryableError = "Archive cursor reset during migration",
-            ),
-        )
+        resetPreLedgerFixture(key)
 
         store = reopenStore()
         val result = store.applyArchivePage(page)
@@ -2618,12 +2655,7 @@ class MessageStoreTest {
                 ),
             ).status,
         )
-        database.messageDao().upsertArchiveCursor(
-            key.emptyCursor().copy(
-                hasEarlier = true,
-                retryableError = "Archive cursor reset during migration",
-            ),
-        )
+        resetPreLedgerFixture(key)
 
         store = reopenStore()
         val result = store.applyArchivePage(
@@ -2674,12 +2706,7 @@ class MessageStoreTest {
                 ),
             ).status,
         )
-        database.messageDao().upsertArchiveCursor(
-            key.emptyCursor().copy(
-                hasEarlier = true,
-                retryableError = "Archive cursor reset during migration",
-            ),
-        )
+        resetPreLedgerFixture(key)
 
         store = reopenStore()
         val bootstrap = store.applyArchivePage(
@@ -2755,12 +2782,7 @@ class MessageStoreTest {
                 ),
             ).status,
         )
-        database.messageDao().upsertArchiveCursor(
-            key.emptyCursor().copy(
-                hasEarlier = true,
-                retryableError = "Archive cursor reset during migration",
-            ),
-        )
+        resetPreLedgerFixture(key)
         store = reopenStore()
         val bootstrap = store.applyArchivePage(
             archivePage(
@@ -2809,7 +2831,7 @@ class MessageStoreTest {
     }
 
     @Test
-    fun migratedBeforeRejectsPageInternalIdentityRepeatBeforePrefixRebase() = runBlocking {
+    fun migratedBeforeAcceptsPageInternalIdentityRepeatBeforePrefixRebase() = runBlocking {
         var store = MessageStore(database)
         val key = archiveKey(ACCOUNT)
         val bridge = stanzaAlias("page-internal-bridge")
@@ -2827,12 +2849,7 @@ class MessageStoreTest {
                 ),
             ).status,
         )
-        database.messageDao().upsertArchiveCursor(
-            key.emptyCursor().copy(
-                hasEarlier = true,
-                retryableError = "Archive cursor reset during migration",
-            ),
-        )
+        resetPreLedgerFixture(key)
         store = reopenStore()
         assertEquals(
             ArchivePageStatus.APPLIED,
@@ -2846,7 +2863,6 @@ class MessageStoreTest {
                 ),
             ).status,
         )
-        val positionsBefore = store.archivePositions(ACCOUNT, "internal-target")
         val messagesBefore = store.messages(ACCOUNT)
 
         store = reopenStore()
@@ -2878,17 +2894,19 @@ class MessageStoreTest {
             ),
         )
 
-        assertEquals(ArchivePageStatus.RETRYABLE_ERROR, before.status)
-        assertEquals("Archive page repeats one logical message", before.cursor.retryableError)
-        assertEquals(positionsBefore, store.archivePositions(ACCOUNT, "internal-target"))
-        assertEquals(messagesBefore, store.messages(ACCOUNT))
+        assertEquals(ArchivePageStatus.APPLIED, before.status)
+        assertEquals(-1L, store.archivePositions(ACCOUNT, "internal-target").single().archiveOrdinal)
+        assertEquals(messagesBefore.map { it.localMessageId }, store.messages(ACCOUNT).map { it.localMessageId })
+        assertEquals(listOf(-1L, 0L, 1L), database.messageDao().archiveRecords(
+            ACCOUNT, key.archiveAuthority, key.scope, Long.MIN_VALUE, Long.MAX_VALUE,
+        ).map { it.archiveOrdinal })
         store = reopenStore()
-        assertEquals(positionsBefore, store.archivePositions(ACCOUNT, "internal-target"))
-        assertEquals(messagesBefore, store.messages(ACCOUNT))
+        assertEquals(-1L, store.archivePositions(ACCOUNT, "internal-target").single().archiveOrdinal)
+        assertEquals(before.cursor, store.archiveCursor(key))
     }
 
     @Test
-    fun migratedBeforeRejectsUnseededPageInternalIdentityRepeat() = runBlocking {
+    fun migratedBeforeAcceptsUnseededPageInternalIdentityRepeat() = runBlocking {
         var store = MessageStore(database)
         val key = archiveKey(ACCOUNT)
         val tail = archived("unseeded-tail-result", "unseeded-tail-message", "tail")
@@ -2904,12 +2922,7 @@ class MessageStoreTest {
                 ),
             ).status,
         )
-        database.messageDao().upsertArchiveCursor(
-            key.emptyCursor().copy(
-                hasEarlier = true,
-                retryableError = "Archive cursor reset during migration",
-            ),
-        )
+        resetPreLedgerFixture(key)
         store = reopenStore()
         assertEquals(
             ArchivePageStatus.APPLIED,
@@ -2943,14 +2956,14 @@ class MessageStoreTest {
             ),
         )
 
-        assertEquals(ArchivePageStatus.RETRYABLE_ERROR, before.status)
-        assertEquals("Archive page repeats one logical message", before.cursor.retryableError)
-        assertEquals(messagesBefore, store.messages(ACCOUNT))
-        assertEquals(aliasesBefore, store.aliases(ACCOUNT))
+        assertEquals(ArchivePageStatus.APPLIED, before.status)
+        assertEquals(1, before.inserted)
+        assertEquals(messagesBefore.size + 1, store.messages(ACCOUNT).size)
+        assertEquals(aliasesBefore.size + 3, store.aliases(ACCOUNT).size)
+        assertEquals(-2L, store.archivePositions(ACCOUNT, "unseeded-first").single().archiveOrdinal)
         assertEquals(tailPositionsBefore, store.archivePositions(ACCOUNT, "unseeded-tail-message"))
         store = reopenStore()
-        assertEquals(messagesBefore, store.messages(ACCOUNT))
-        assertEquals(aliasesBefore, store.aliases(ACCOUNT))
+        assertEquals(before.cursor, store.archiveCursor(key))
         assertEquals(tailPositionsBefore, store.archivePositions(ACCOUNT, "unseeded-tail-message"))
     }
 
@@ -2987,12 +3000,7 @@ class MessageStoreTest {
                 aliases = listOf(firstUnpositionedAlias, secondUnpositionedAlias),
             ),
         )
-        database.messageDao().upsertArchiveCursor(
-            key.emptyCursor().copy(
-                hasEarlier = true,
-                retryableError = "Archive cursor reset during migration",
-            ),
-        )
+        resetPreLedgerFixture(key)
         store = reopenStore()
         assertEquals(
             ArchivePageStatus.APPLIED,
@@ -3080,12 +3088,7 @@ class MessageStoreTest {
                 ),
             ).status,
         )
-        database.messageDao().upsertArchiveCursor(
-            key.emptyCursor().copy(
-                hasEarlier = true,
-                retryableError = "Archive cursor reset during migration",
-            ),
-        )
+        resetPreLedgerFixture(key)
         store = reopenStore()
         assertEquals(
             ArchivePageStatus.APPLIED,
@@ -3155,12 +3158,7 @@ class MessageStoreTest {
                 ),
             ).status,
         )
-        database.messageDao().upsertArchiveCursor(
-            key.emptyCursor().copy(
-                hasEarlier = true,
-                retryableError = "Archive cursor reset during migration",
-            ),
-        )
+        resetPreLedgerFixture(key)
         store = reopenStore()
         val bootstrap = store.applyArchivePage(
             archivePage(
@@ -3234,12 +3232,7 @@ class MessageStoreTest {
                 ),
             ).status,
         )
-        database.messageDao().upsertArchiveCursor(
-            key.emptyCursor().copy(
-                hasEarlier = true,
-                retryableError = "Archive cursor reset during migration",
-            ),
-        )
+        resetPreLedgerFixture(key)
         store = reopenStore()
         val bootstrap = store.applyArchivePage(
             archivePage(
@@ -3307,12 +3300,7 @@ class MessageStoreTest {
                 ),
             ).status,
         )
-        database.messageDao().upsertArchiveCursor(
-            key.emptyCursor().copy(
-                hasEarlier = true,
-                retryableError = "Archive cursor reset during migration",
-            ),
-        )
+        resetPreLedgerFixture(key)
 
         store = reopenStore()
         val result = store.applyArchivePage(
@@ -3354,12 +3342,7 @@ class MessageStoreTest {
                 ),
             ).status,
         )
-        database.messageDao().upsertArchiveCursor(
-            key.emptyCursor().copy(
-                hasEarlier = true,
-                retryableError = "Archive cursor reset during migration",
-            ),
-        )
+        resetPreLedgerFixture(key)
 
         store = reopenStore()
         val malformed = store.applyArchivePage(
@@ -3417,7 +3400,7 @@ class MessageStoreTest {
             hasEarlier = true,
             retryableError = "Archive cursor reset during migration",
         )
-        database.messageDao().upsertArchiveCursor(reset)
+        resetPreLedgerFixture(key)
         val faulting = MessageStore.observingWrites(database) {
             if (it == MessageWriteBoundary.BEFORE_ARCHIVE_CURSOR) error("rebase fault")
         }
@@ -4641,6 +4624,18 @@ class MessageStoreTest {
         assertEquals("archive-first", reconciled.localMessageId)
         assertEquals(2_000L, reconciled.sentAtEpochMs)
         assertEquals(MessageTimeSource.LOCAL, reconciled.sentTimeSource)
+    }
+
+    // These policy fixtures predate the raw ledger. Remove only evidence created by test
+    // bootstrap; genuine exported-27 migration/preservation is tested separately.
+    private suspend fun resetPreLedgerFixture(key: ArchiveCursorKey) {
+        database.openHelper.writableDatabase.execSQL(
+            "DELETE FROM archive_record_positions WHERE accountId = ? AND archiveAuthority = ? AND archiveScope = ?",
+            arrayOf(key.accountId, key.archiveAuthority, key.scope),
+        )
+        database.messageDao().upsertArchiveCursor(key.emptyCursor().copy(
+            hasEarlier = true, retryableError = "Archive cursor reset during migration",
+        ))
     }
 
     private suspend fun addAccount(id: String) {

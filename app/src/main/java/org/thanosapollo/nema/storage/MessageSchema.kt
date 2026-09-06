@@ -5,6 +5,25 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 internal object MessageSchema {
+    val MIGRATION_27_28: Migration = object : Migration(27, 28) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("""CREATE TABLE archive_record_positions (
+                accountId TEXT NOT NULL, archiveAuthority TEXT NOT NULL, archiveScope TEXT NOT NULL,
+                resultId TEXT NOT NULL, archiveOrdinal INTEGER NOT NULL,
+                PRIMARY KEY(accountId, archiveAuthority, archiveScope, resultId),
+                FOREIGN KEY(accountId) REFERENCES accounts(id) ON UPDATE NO ACTION ON DELETE CASCADE)""")
+            db.execSQL("""CREATE UNIQUE INDEX index_archive_record_positions_accountId_archiveAuthority_archiveScope_archiveOrdinal
+                ON archive_record_positions(accountId, archiveAuthority, archiveScope, archiveOrdinal)""")
+            // UNION removes identical endpoints only. Contradictory UID/ordinal evidence must fail.
+            db.execSQL("""INSERT INTO archive_record_positions
+                SELECT accountId, archiveAuthority, scope, oldestId, oldestOrdinal FROM archive_cursors
+                WHERE scope = 'ACCOUNT' AND oldestId IS NOT NULL AND oldestOrdinal IS NOT NULL
+                UNION
+                SELECT accountId, archiveAuthority, scope, newestId, newestOrdinal FROM archive_cursors
+                WHERE scope = 'ACCOUNT' AND newestId IS NOT NULL AND newestOrdinal IS NOT NULL""")
+        }
+    }
+
     val MIGRATION_26_27: Migration = object : Migration(26, 27) {
         override fun migrate(db: SupportSQLiteDatabase) {
             db.execSQL("CREATE INDEX index_identity_conflicts_accountId_firstMessageId_kind " +
