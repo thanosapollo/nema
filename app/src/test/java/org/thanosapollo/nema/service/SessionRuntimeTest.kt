@@ -2038,6 +2038,75 @@ class SessionRuntimeTest {
         } finally { runtime.stop() }
     }
 
+    @Test
+    fun `healthy session retries MAM timeout from committed cursor without reconnect or resend`() = runTest {
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val store = MessageStore(database)
+        val owner = account("mam-recovery")
+        accounts.save(owner)
+        accounts.activate(owner.id)
+        credentials.store(owner.id, "secret".toCharArray())
+        val requests = mutableListOf<org.thanosapollo.nema.xmpp.transport.ArchivePageRequest>()
+        var connects = 0
+        var reconnects = 0
+        var sends = 0
+        val factory = SessionConnectionFactory { configuration, _, event ->
+            val connection = RecordingConnection(configuration.id, null, null, event)
+            connection.archiveSupported = true
+            object : SessionConnection by connection {
+                override suspend fun connect(credential: CharArray, attempt: SessionAttemptIdentity) {
+                    connects++
+                    connection.connect(credential, attempt)
+                }
+                override suspend fun reconnect(attempt: SessionAttemptIdentity) { reconnects++ }
+                override suspend fun send(message: OutgoingMessageEnvelope, entered: () -> Unit) { sends++ }
+                override suspend fun queryArchive(request: org.thanosapollo.nema.xmpp.transport.ArchivePageRequest):
+                    org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope {
+                    requests += request
+                    if (requests.size == 2) org.thanosapollo.nema.xmpp.smack.archiveNetworkCall {
+                        throw org.jivesoftware.smack.SmackException.NoResponseException.newWith(
+                            5_000L, org.jivesoftware.smack.filter.StanzaFilter { true }, false,
+                        )
+                    }
+                    val ids = if (requests.size == 1) listOf("r1") else listOf("r1", "r2")
+                    return org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope(
+                        request, stable = true, complete = requests.size > 1, hasEarlier = false,
+                        firstId = ids.first(), lastId = ids.last(),
+                        messages = ids.map { id -> org.thanosapollo.nema.xmpp.transport.ArchiveMessageEnvelope(
+                            id, IncomingMessageEnvelope(
+                                accountId = request.accountId, generation = request.generation,
+                                peer = "peer@example.org", sender = "peer@example.org", outbound = false,
+                                originId = null, body = id, thread = null, messageId = id,
+                                sentAtEpochMs = 2_000, sentTimeSource = MessageTimeSource.MAM,
+                            ),
+                        ) },
+                    )
+                }
+            }
+        }
+        val runtime = SessionRuntime(accounts, credentials, store, PeerIdentityStore(database.messageDao()), backgroundScope, factory)
+        try {
+            assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
+            val connected = runtime.state.value
+            runtime.archiveState.first { it is org.thanosapollo.nema.chat.ArchiveSyncState.WaitingToRetry }
+            assertEquals("r1", store.archiveCursor(ArchiveCursorKey(owner.id.value, owner.bareJid.value, "ACCOUNT"))?.newestId)
+            runCurrent()
+            advanceTimeBy(2_000)
+            runCurrent()
+            // The retry rereads Room's committed cursor on its executor. Draining the test
+            // scheduler alone does not fence that continuation or the successor page commit.
+            runtime.archiveState.first { it is org.thanosapollo.nema.chat.ArchiveSyncState.Ready }
+            assertEquals("A healthy lifecycle must run the next MAM query", 3, requests.size)
+            assertEquals(listOf(null, "r1", "r1"), requests.map { it.boundaryId })
+            assertEquals(listOf("r1", "r2"), store.messages(owner.id.value).map { it.body }.sorted())
+            assertEquals(connected, runtime.state.value)
+            assertEquals(1, connects)
+            assertEquals(0, reconnects)
+            assertEquals(0, sends)
+        } finally { runtime.stop() }
+    }
+
     private suspend fun connectedRuntime(
         scope: CoroutineScope, id: String, clock: () -> Long = { REACTION_NOW },
     ): RuntimeFixture {

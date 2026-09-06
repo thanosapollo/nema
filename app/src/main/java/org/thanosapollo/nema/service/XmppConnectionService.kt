@@ -191,6 +191,16 @@ class SessionRuntime(
     val configuredAccounts: Flow<List<AccountConfiguration>> = accounts.configuredAccounts
     val activeAccount: Flow<AccountConfiguration?> = accounts.activeAccount
 
+    fun retryArchive(expected: ArchiveSyncState): Boolean {
+        val identity = when (expected) {
+            is ArchiveSyncState.Incomplete -> expected.error.identity
+            is ArchiveSyncState.ContinuationRequired -> expected.identity
+            else -> return false
+        }
+        if (controller.lifecycle.value.dispatchLease()?.identity != identity || archive.state.value !== expected) return false
+        return (expected as ArchiveSyncState.ManualRecovery).requestRetry()
+    }
+
     private fun reactionCommandLock(key: ReactionCommandKey) = synchronized(reactionMutexes) {
         reactionMutexes.getOrPut(key) { Mutex() }
     }
@@ -323,7 +333,7 @@ class SessionRuntime(
                 ) ?: return@collect
                 archiveJob = scope.launch {
                     try {
-                        archive.synchronize(
+                        archive.synchronizeWithRecovery(
                             identity = lease.identity,
                             archiveAuthority = authority,
                             isAuthoritative = { controller.lifecycle.value == observation },

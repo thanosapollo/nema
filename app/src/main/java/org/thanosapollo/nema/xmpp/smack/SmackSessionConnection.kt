@@ -426,17 +426,19 @@ internal class SmackSessionConnection(
             carbonCapability?.takeIf { it.first == attempt }?.second
         } ?: throw SendNotAttemptedException()
         resolveStableIdGateOnCapabilityFailure(stableIdGate, attempt, ::deliver) {
-            val mam = MamManager.getInstanceFor(connection).isSupported
-            val stableIds = ServiceDiscoveryManager.getInstanceFor(connection).supportsFeature(
-                JidCreate.entityBareFrom(expectedBareJid),
-                StableUniqueStanzaIdManager.NAMESPACE,
-            )
+            val mam = archiveNetworkCall { MamManager.getInstanceFor(connection).isSupported }
+            val stableIds = archiveNetworkCall {
+                ServiceDiscoveryManager.getInstanceFor(connection).supportsFeature(
+                    JidCreate.entityBareFrom(expectedBareJid),
+                    StableUniqueStanzaIdManager.NAMESPACE,
+                )
+            }
             requireExactAttempt(accountId, generation)
             drainStableIdGate(stableIdGate, attempt, stableIds, ::deliver)
             SessionCapabilities(
                 mamV2 = mam,
                 carbons = carbons,
-                stableIds = stableIds,
+                stableIds = stableIdGate.support(attempt) == true,
             )
         }
     }
@@ -470,10 +472,12 @@ internal class SmackSessionConnection(
                 ArchivePageDirection.BEFORE -> builder.beforeUid(requireNotNull(request.boundaryId))
                 ArchivePageDirection.AFTER -> builder.afterUid(requireNotNull(request.boundaryId))
             }
-            val queryPage = MamManager.getInstanceFor(
-                connection,
-                JidCreate.entityBareFrom(archiveJid),
-            ).queryArchive(builder.build()).page
+            val queryPage = archiveNetworkCall {
+                MamManager.getInstanceFor(
+                    connection,
+                    JidCreate.entityBareFrom(archiveJid),
+                ).queryArchive(builder.build()).page
+            }
             requireExactAttempt(request.accountId, request.generation)
             if (connectionListener.currentAttempt() != attempt) throw SendNotAttemptedException()
             val trustStableIds = trustStableIdsAtStart && if (request.scope == ACCOUNT_ARCHIVE_SCOPE) {
@@ -1919,19 +1923,14 @@ internal class StableIdDiscoveryGate {
     @Synchronized
     fun complete(attempt: SessionAttemptIdentity, supported: Boolean): List<StableIdMessageDecision> {
         if (this.attempt != attempt) return emptyList()
-        return when (val current = state) {
+        return when (state) {
             State.Unknown -> {
                 state = State.Draining(supported)
                 takePending(attempt, supported)
             }
-            is State.Draining -> {
-                require(current.supported == supported) { "Stable ID discovery decision changed" }
-                emptyList()
-            }
-            is State.Open -> {
-                require(current.supported == supported) { "Stable ID discovery decision changed" }
-                emptyList()
-            }
+            // Capability retries must not retire live delivery or change identities already
+            // accepted under this attempt. The first decision (including fallback) is final.
+            is State.Draining, is State.Open -> emptyList()
         }
     }
 

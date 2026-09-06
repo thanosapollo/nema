@@ -31,7 +31,10 @@ class MainActivityInsetContractTest {
         val activity = java.io.File("src/main/java/org/thanosapollo/nema/MainActivity.kt").readText()
         val home = java.io.File("src/main/java/org/thanosapollo/nema/ui/HomeContent.kt").readText()
 
-        assertTrue(activity.contains("bottomBar = { SessionBottomBar("))
+        val bottomBar = activity.substringAfter("bottomBar = {").substringBefore(") { contentPadding ->")
+        assertTrue(bottomBar.contains("ArchiveStatusBanner("))
+        assertTrue(bottomBar.contains("SessionBottomBar("))
+        assertEquals(1, Regex("SessionBottomBar\\(").findAll(activity).count())
         assertTrue(activity.contains("onAccepted = { destination = PrimaryDestination.HOME }"))
         assertFalse(activity.contains("onAccepted = { selectDestination(PrimaryDestination.HOME) }"))
         assertFalse(home.contains("SessionBottomBar("))

@@ -2,6 +2,8 @@ package org.thanosapollo.nema.chat
 
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.sync.Mutex
@@ -21,6 +23,9 @@ import org.thanosapollo.nema.xmpp.transport.ArchivePageDirection
 import org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope
 import org.thanosapollo.nema.xmpp.transport.ArchivePageRequest
 import org.thanosapollo.nema.xmpp.transport.SessionCapabilities
+import org.thanosapollo.nema.xmpp.transport.TransientArchiveException
+
+enum class ArchiveFailureKind { TRANSIENT, PROTOCOL }
 
 sealed interface ArchiveSyncState {
     data object Idle : ArchiveSyncState
@@ -42,7 +47,21 @@ sealed interface ArchiveSyncState {
         val identity: SessionIdentity,
         val capabilities: SessionCapabilities?,
         val reason: String,
+        val kind: ArchiveFailureKind = ArchiveFailureKind.PROTOCOL,
     ) : ArchiveSyncState
+    data class WaitingToRetry(
+        val identity: SessionIdentity,
+        val attempt: Int,
+        val delayMs: Long,
+    ) : ArchiveSyncState
+    // Each publication owns an already-armed one-shot signal. Identical later failures are new tokens.
+    sealed class ManualRecovery : ArchiveSyncState {
+        private val retry = CompletableDeferred<Unit>()
+        internal fun requestRetry(): Boolean = retry.complete(Unit)
+        internal suspend fun awaitRetry() = retry.await()
+    }
+    class Incomplete(val error: RetryableError) : ManualRecovery()
+    class ContinuationRequired(val identity: SessionIdentity) : ManualRecovery()
 }
 
 class ArchiveStorageFailure(
@@ -67,6 +86,38 @@ class ArchiveSynchronizer(
     private val operationMutex = Mutex()
     val state: StateFlow<ArchiveSyncState> = mutableState
 
+    /** One lifecycle owner; only committed cursors survive each bounded run. */
+    suspend fun synchronizeWithRecovery(
+        identity: SessionIdentity,
+        archiveAuthority: String,
+        isAuthoritative: () -> Boolean,
+    ) {
+        var retries = 0
+        while (isAuthoritative()) {
+            synchronize(identity, archiveAuthority, isAuthoritative = isAuthoritative)
+            if (!isAuthoritative()) return
+            when (val result = state.value) {
+                is ArchiveSyncState.RetryableError -> {
+                    if (result.kind == ArchiveFailureKind.TRANSIENT && retries < RETRY_DELAYS_MS.size) {
+                        val delayMs = RETRY_DELAYS_MS[retries++]
+                        mutableState.value = ArchiveSyncState.WaitingToRetry(identity, retries, delayMs)
+                        delay(delayMs)
+                    } else {
+                        val incomplete = ArchiveSyncState.Incomplete(result)
+                        mutableState.value = incomplete
+                        incomplete.awaitRetry()
+                        retries = 0
+                    }
+                }
+                is ArchiveSyncState.ContinuationRequired -> {
+                    result.awaitRetry()
+                    retries = 0
+                }
+                else -> return
+            }
+        }
+    }
+
     suspend fun synchronize(
         identity: SessionIdentity,
         archiveAuthority: String,
@@ -82,6 +133,7 @@ class ArchiveSynchronizer(
         isAuthoritative: () -> Boolean,
         scope: String,
     ) {
+        if (!isAuthoritative()) return
         mutableState.value = ArchiveSyncState.Discovering(identity)
         val capabilities = try {
             discover(identity)
@@ -93,6 +145,7 @@ class ArchiveSynchronizer(
                     identity,
                     null,
                     failure.javaClass.simpleName,
+                    if (failure is TransientArchiveException) ArchiveFailureKind.TRANSIENT else ArchiveFailureKind.PROTOCOL,
                 )
             }
             return
@@ -105,6 +158,7 @@ class ArchiveSynchronizer(
 
         val key = ArchiveCursorKey(identity.accountId.value, archiveAuthority, scope)
         var cursor = storage(identity) { store.archiveCursor(key) }
+        if (!isAuthoritative()) return
         var direction = if (cursor?.newestId == null) {
             ArchivePageDirection.BOOTSTRAP
         } else {
@@ -127,6 +181,7 @@ class ArchiveSynchronizer(
             val page = queryPage(identity, capabilities, request, isAuthoritative) ?: return
             if (!isAuthoritative()) return
             val result = commitPage(identity, capabilities, page, isAuthoritative) ?: return
+            if (!isAuthoritative()) return
             if (result.status == ArchivePageStatus.RETRYABLE_ERROR) {
                 mutableState.value = ArchiveSyncState.RetryableError(
                     identity,
@@ -158,11 +213,7 @@ class ArchiveSynchronizer(
                 }
             }
         }
-        mutableState.value = ArchiveSyncState.RetryableError(
-            identity,
-            capabilities,
-            "Archive page limit reached",
-        )
+        mutableState.value = ArchiveSyncState.ContinuationRequired(identity)
     }
 
     suspend fun backfillOnePage(
@@ -198,6 +249,7 @@ class ArchiveSynchronizer(
         val page = queryPage(identity, ready.capabilities, request, isAuthoritative) ?: return false
         if (!isAuthoritative()) return false
         val result = commitPage(identity, ready.capabilities, page, isAuthoritative) ?: return false
+        if (!isAuthoritative()) return false
         mutableState.value = if (result.status == ArchivePageStatus.APPLIED) {
             ArchiveSyncState.Ready(identity, ready.capabilities)
         } else {
@@ -240,6 +292,7 @@ class ArchiveSynchronizer(
                 identity,
                 capabilities,
                 failure.javaClass.simpleName,
+                if (failure is TransientArchiveException) ArchiveFailureKind.TRANSIENT else ArchiveFailureKind.PROTOCOL,
             )
         }
         null
@@ -278,6 +331,7 @@ class ArchiveSynchronizer(
     companion object {
         const val PAGE_SIZE = 50
         const val MAX_PAGES_PER_RUN = 100
+        private val RETRY_DELAYS_MS = listOf(2_000L, 5_000L, 15_000L)
     }
 }
 

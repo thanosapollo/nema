@@ -362,6 +362,7 @@ private fun AccountConnectionScreen(
     val application = context.applicationContext as NemaApplication
     val scope = rememberCoroutineScope()
     val connectionState by application.sessionRuntime.state.collectAsState()
+    val archiveState by application.sessionRuntime.archiveState.collectAsState()
     // Distinguish the first Room emission (including no account) from loading.
     val resolvedAccount by remember(application) {
         application.sessionRuntime.activeAccount.map { ResolvedNotificationAccount(it) }
@@ -496,7 +497,17 @@ private fun AccountConnectionScreen(
         val shellAppearance = AppearanceSpec(themeMode = themeAuthority.palette.mode)
         Scaffold(
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
-            bottomBar = { SessionBottomBar(selected = destination, onSelect = ::selectDestination) },
+            bottomBar = {
+                androidx.compose.foundation.layout.Column {
+                    org.thanosapollo.nema.ui.ArchiveStatusBanner(
+                        state = archiveState,
+                        accountId = account.id,
+                        connection = connectionState,
+                        onRetry = { application.sessionRuntime.retryArchive(it) },
+                    )
+                    SessionBottomBar(selected = destination, onSelect = ::selectDestination)
+                }
+            },
         ) { contentPadding ->
                 when (destination) {
                     PrimaryDestination.ROSTER -> {
