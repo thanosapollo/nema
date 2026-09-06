@@ -153,7 +153,7 @@ class SessionRuntime(
         commit = { identity, page, isAuthoritative ->
             controller.commitIfConnected(identity, isAuthoritative) {
                 messages.applyArchivePage(page).also { applied ->
-                    emitInsertedArchive(applied.insertedInbound, page.direction)
+                    emitInsertedArchive(identity.accountId, applied.insertedInbound, page.direction)
                 }
             }
         },
@@ -165,7 +165,7 @@ class SessionRuntime(
         commit = { identity, page, isAuthoritative ->
             controller.commitIfConnected(identity, isAuthoritative) {
                 messages.applyArchivePage(page).also { applied ->
-                    emitInsertedArchive(applied.insertedInbound, page.direction)
+                    emitInsertedArchive(identity.accountId, applied.insertedInbound, page.direction)
                 }
             }
         },
@@ -178,7 +178,7 @@ class SessionRuntime(
     )
     private val pendingPeerIdentities = AtomicReference<Map<String, Set<String>>>(emptyMap())
     val visiblePeer = AtomicReference<String?>(null)
-    @Volatile var onInsertedInbound: ((String, String) -> Unit)? = null
+    @Volatile var onInsertedInbound: ((AccountId, String, String) -> Unit)? = null
     val rooms = RoomStateStore()
     val chatStates = ChatStateHub()
     val realTimeText = RealTimeTextHub()
@@ -410,11 +410,11 @@ class SessionRuntime(
                 peerJid = envelope.peer,
             )
         ) {
-            onInsertedInbound?.invoke(envelope.peer, envelope.body)
+            onInsertedInbound?.invoke(envelope.accountId, envelope.peer, envelope.body)
         }
     }
 
-    private fun emitInsertedArchive(inserted: List<InsertedInbound>, direction: ArchiveDirection) {
+    private fun emitInsertedArchive(accountId: AccountId, inserted: List<InsertedInbound>, direction: ArchiveDirection) {
         val visible = visiblePeer.get()
         inserted.forEach { inbound ->
             if (
@@ -427,7 +427,7 @@ class SessionRuntime(
                     direction = direction,
                 )
             ) {
-                onInsertedInbound?.invoke(inbound.peerJid, inbound.preview)
+                onInsertedInbound?.invoke(accountId, inbound.peerJid, inbound.preview)
             }
         }
     }
@@ -1154,7 +1154,7 @@ class XmppConnectionService : Service() {
     override fun onCreate() {
         super.onCreate()
         runtime = (application as NemaApplication).sessionRuntime
-        runtime.onInsertedInbound = { peer, preview -> notifyInbound(peer, preview) }
+        runtime.onInsertedInbound = { accountId, peer, preview -> notifyInbound(accountId, peer, preview) }
         notifications = getSystemService(NotificationManager::class.java)
         commands = SerializedServiceCommandRunner(serviceScope)
         try {
@@ -1372,17 +1372,14 @@ class XmppConnectionService : Service() {
             .build()
     }
 
-    private fun notifyInbound(peer: String, preview: String) {
+    private fun notifyInbound(accountId: AccountId, peer: String, preview: String) {
         if (!canShowNotifications()) return
-        val openIntent = PendingIntent.getActivity(
-            this,
-            peer.hashCode(),
-            Intent(this, MainActivity::class.java).putExtra(EXTRA_PEER_JID, peer),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
+        val target = org.thanosapollo.nema.MessageNotificationTarget(accountId.value, peer)
+        val openIntent = target.pendingIntent(this)
         try {
             notifications.notify(
-                MESSAGE_NOTIFICATION_BASE + peer.hashCode(),
+                target.notificationTag,
+                MESSAGE_NOTIFICATION_BASE,
                 incomingMessageNotification(
                     context = this,
                     peer = peer,

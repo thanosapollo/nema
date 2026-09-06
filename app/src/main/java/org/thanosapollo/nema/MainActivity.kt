@@ -17,6 +17,9 @@ import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -40,6 +43,7 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import org.thanosapollo.nema.account.AccountConfiguration
 import org.thanosapollo.nema.account.LoginFormInput
@@ -76,10 +80,22 @@ import org.thanosapollo.nema.xmpp.transport.AccountId
 
 class MainActivity : ComponentActivity() {
     private val activityResumed = mutableStateOf(false)
+    private var notificationTarget by mutableStateOf<MessageNotificationTarget?>(
+        null, androidx.compose.runtime.referentialEqualityPolicy(),
+    )
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        notificationTarget = MessageNotificationTarget.fromIntent(
+            if (savedInstanceState?.containsKey(STATE_NOTIFICATION_SAVED) == true) {
+                @Suppress("DEPRECATION")
+                savedInstanceState.getParcelable<Intent>(STATE_PENDING_NOTIFICATION)
+            } else intent,
+        )
+        if (notificationTarget == null && savedInstanceState?.containsKey(STATE_NOTIFICATION_SAVED) == true) {
+            setIntent(Intent(this, MainActivity::class.java))
+        }
         if (shouldStartAutomaticUpdateCheck(savedInstanceState)) {
             lifecycleScope.launch { (application as NemaApplication).updates.checkAutomatic() }
         }
@@ -97,9 +113,22 @@ class MainActivity : ComponentActivity() {
                     restoreChatRouteOnStart = restoreChatRoute,
                     activityResumed = activityResumed.value,
                     themeAuthority = themeAuthority,
+                    notificationTarget = notificationTarget,
+                    onNotificationConsumed = { target ->
+                        if (notificationTarget === target) {
+                            notificationTarget = null
+                            setIntent(Intent(this, MainActivity::class.java))
+                        }
+                    },
                 )
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        notificationTarget = MessageNotificationTarget.fromIntent(intent)
     }
 
     override fun onResume() {
@@ -115,6 +144,8 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
+        outState.putBoolean(STATE_NOTIFICATION_SAVED, true)
+        notificationTarget?.let { outState.putParcelable(STATE_PENDING_NOTIFICATION, it.intent(this)) }
         outState.putString(STATE_PROCESS_TOKEN, (application as NemaApplication).processToken)
         super.onSaveInstanceState(outState)
     }
@@ -196,6 +227,8 @@ internal class InstallResumeController(
 }
 
 private const val STATE_PROCESS_TOKEN = "nema.process-token"
+private const val STATE_NOTIFICATION_SAVED = "nema.notification-saved"
+private const val STATE_PENDING_NOTIFICATION = "nema.pending-notification"
 
 internal fun shouldStartAutomaticUpdateCheck(savedInstanceState: Bundle?): Boolean =
     savedInstanceState == null
@@ -315,21 +348,51 @@ internal fun rememberPrimaryDestination(processToken: String): MutableState<Prim
     mutableStateOf(PrimaryDestination.HOME)
 }
 
+private data class ResolvedNotificationAccount(val account: AccountConfiguration?)
+
 @Composable
 private fun AccountConnectionScreen(
     restoreChatRouteOnStart: Boolean,
     activityResumed: Boolean,
     themeAuthority: AppPaletteAuthority,
+    notificationTarget: MessageNotificationTarget?,
+    onNotificationConsumed: (MessageNotificationTarget) -> Unit,
 ) {
     val context = LocalContext.current
     val application = context.applicationContext as NemaApplication
     val scope = rememberCoroutineScope()
     val connectionState by application.sessionRuntime.state.collectAsState()
-    val activeAccount by application.sessionRuntime.activeAccount.collectAsState(initial = null)
+    // Distinguish the first Room emission (including no account) from loading.
+    val resolvedAccount by remember(application) {
+        application.sessionRuntime.activeAccount.map { ResolvedNotificationAccount(it) }
+    }.collectAsState(initial = null)
+    val activeAccount = resolvedAccount?.account
     val configuredAccounts by application.sessionRuntime.configuredAccounts.collectAsState(initial = emptyList())
     val updateState by application.updates.state.collectAsState()
     var destination by rememberPrimaryDestination(application.processToken)
     var addingAccount by remember { mutableStateOf(false) }
+    var notificationMessage by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(notificationTarget, resolvedAccount, connectionState, addingAccount) {
+        val target = notificationTarget ?: return@LaunchedEffect
+        if (resolvedAccount == null) return@LaunchedEffect
+        val unavailable = activeAccount?.id?.value != target.accountId || addingAccount ||
+            connectionState is ConnectionState.NeedsCredentials || connectionState is ConnectionState.Switching
+        if (unavailable) {
+            notificationMessage = "This message belongs to an account that is not currently open. " +
+                "Open its account in Settings to view the conversation."
+            onNotificationConsumed(target)
+        }
+    }
+    if (notificationMessage != null) {
+        AlertDialog(
+            onDismissRequest = { notificationMessage = null },
+            title = { Text("Message not opened") },
+            text = { Text(notificationMessage.orEmpty()) },
+            confirmButton = {
+                TextButton(onClick = { notificationMessage = null }) { Text("OK") }
+            },
+        )
+    }
     val backgroundTarget = rememberPendingBackgroundScope()
     var appearanceMessage by remember { mutableStateOf<String?>(null) }
     val backgroundPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -368,6 +431,19 @@ private fun AccountConnectionScreen(
         }
         DisposableEffect(presenter) {
             onDispose(presenter::close)
+        }
+        LaunchedEffect(presenter, notificationTarget, connectionState) {
+            val target = notificationTarget ?: return@LaunchedEffect
+            if (target.accountId != account.id.value || connectionState is ConnectionState.Switching) {
+                return@LaunchedEffect
+            }
+            // selectPeer publishes synchronously before any storage work. Presenter
+            // generations protect this route from late initialization/restore.
+            if (presenter.selectPeer(target.peerJid)) {
+                destination = PrimaryDestination.HOME
+                notificationMessage = null
+            }
+            onNotificationConsumed(target)
         }
         val chatState by presenter.state.collectAsState()
         val composerOwner = org.thanosapollo.nema.ui.chat.rememberComposerOwner(account.id.value)

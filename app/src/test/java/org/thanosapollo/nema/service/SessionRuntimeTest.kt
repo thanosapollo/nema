@@ -253,7 +253,7 @@ class SessionRuntimeTest {
         val first = connectedRuntime(backgroundScope, "first")
         val entered = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
-        first.runtime.onInsertedInbound = { _, _ ->
+        first.runtime.onInsertedInbound = { _, _, _ ->
             entered.complete(Unit)
             runBlocking { release.await() }
         }
@@ -1927,7 +1927,10 @@ class SessionRuntimeTest {
         })
         val runtime = SessionRuntime(accounts, credentials, store, PeerIdentityStore(database.messageDao()), scope, factory)
         var deliveries = 0
-        runtime.onInsertedInbound = { _, _ -> deliveries++ }
+        runtime.onInsertedInbound = { owner, _, _ ->
+            assertEquals(active.id, owner)
+            deliveries++
+        }
         try {
             accounts.save(active)
             accounts.activate(active.id)
@@ -1973,6 +1976,66 @@ class SessionRuntimeTest {
             runtime.stop()
             scope.coroutineContext[Job]?.cancelAndJoin()
         }
+    }
+
+    @Test
+    fun `live and catchup notifications retain exact account for same peer across switch`() = runTest {
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val store = MessageStore(database)
+        val owners = listOf(account("notify-a"), account("notify-b"))
+        for (owner in owners) {
+            accounts.save(owner)
+            credentials.store(owner.id, "secret".toCharArray())
+            prepareDuplicate(store, owner.id) // Bootstrap cursor makes the next page AFTER.
+        }
+        val connections = mutableListOf<RecordingConnection>()
+        val factory = SessionConnectionFactory { configuration, _, event ->
+            val connection = RecordingConnection(configuration.id, null, null, event)
+            connections += connection
+            connection.archiveSupported = true
+            object : SessionConnection by connection {
+                override suspend fun queryArchive(request: org.thanosapollo.nema.xmpp.transport.ArchivePageRequest):
+                    org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope {
+                    assertEquals(org.thanosapollo.nema.xmpp.transport.ArchivePageDirection.AFTER, request.direction)
+                    val message = IncomingMessageEnvelope(
+                        accountId = request.accountId, generation = request.generation,
+                        peer = "peer@example.org", sender = "peer@example.org", outbound = false,
+                        originId = null, body = "catchup body", thread = null, messageId = "catchup-wire",
+                        sentAtEpochMs = 2_000, sentTimeSource = MessageTimeSource.MAM,
+                    )
+                    return org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope(
+                        request, stable = true, complete = true, hasEarlier = false,
+                        firstId = "catchup", lastId = "catchup",
+                        messages = listOf(org.thanosapollo.nema.xmpp.transport.ArchiveMessageEnvelope("catchup", message)),
+                    )
+                }
+            }
+        }
+        val runtime = SessionRuntime(accounts, credentials, store, PeerIdentityStore(database.messageDao()), backgroundScope, factory)
+        val notifications = kotlinx.coroutines.channels.Channel<Triple<AccountId, String, String>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        runtime.onInsertedInbound = { owner, peer, body -> notifications.trySend(Triple(owner, peer, body)).getOrThrow() }
+        try {
+            for (owner in owners) {
+                if (owner == owners.first()) {
+                    accounts.activate(owner.id)
+                    assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
+                } else {
+                    assertEquals(ConnectionCommandOutcome.RUNNING, runtime.activate(owner.id))
+                }
+                assertEquals(Triple(owner.id, "peer@example.org", "catchup body"), notifications.receive())
+                val current = connections.last()
+                withContext(Dispatchers.IO) {
+                    current.emitIncoming(IncomingMessageEnvelope(
+                        accountId = owner.id, generation = current.attemptIdentity.generation,
+                        peer = "peer@example.org", sender = "peer@example.org", outbound = false,
+                        originId = null, body = "live body", thread = null, messageId = "live-wire",
+                    ))
+                }
+                assertEquals(Triple(owner.id, "peer@example.org", "live body"), notifications.receive())
+            }
+            assertTrue(notifications.tryReceive().isFailure)
+        } finally { runtime.stop() }
     }
 
     private suspend fun connectedRuntime(
