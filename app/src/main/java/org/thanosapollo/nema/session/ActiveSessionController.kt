@@ -1,5 +1,11 @@
 package org.thanosapollo.nema.session
 
+import org.thanosapollo.nema.xmpp.threads.DirectoryAction
+import org.thanosapollo.nema.xmpp.threads.ThreadDirectoryScope
+import org.thanosapollo.nema.xmpp.threads.ThreadDirectorySnapshot
+import org.thanosapollo.nema.xmpp.threads.ThreadDirectoryMutationResult
+import org.thanosapollo.nema.xmpp.threads.ThreadDirectoryException
+
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -143,6 +149,11 @@ class RoomRepairAuthorization internal constructor(
 )
 
 interface SessionConnection {
+    suspend fun listThreadDirectory(accountId: AccountId, generation: ConnectionGeneration, directory: ThreadDirectoryScope): ThreadDirectorySnapshot =
+        throw ThreadDirectoryException.Unsupported()
+    suspend fun mutateThreadDirectory(accountId: AccountId, generation: ConnectionGeneration, action: DirectoryAction): ThreadDirectoryMutationResult =
+        throw ThreadDirectoryException.Unsupported()
+
     val isUsable: Boolean
     fun revoke()
     suspend fun connect(credential: CharArray, attempt: SessionAttemptIdentity)
@@ -568,6 +579,12 @@ internal class ActiveSessionController(
             apply()
         }
     }
+
+    suspend fun listThreadDirectory(accountId: AccountId, generation: ConnectionGeneration, directory: ThreadDirectoryScope): ThreadDirectorySnapshot =
+        exactConnection(accountId, generation).listThreadDirectory(accountId, generation, directory)
+
+    suspend fun mutateThreadDirectory(accountId: AccountId, generation: ConnectionGeneration, action: DirectoryAction): ThreadDirectoryMutationResult =
+        exactConnection(accountId, generation).mutateThreadDirectory(accountId, generation, action)
 
     private suspend fun exactConnection(
         accountId: AccountId,

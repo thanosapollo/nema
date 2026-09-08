@@ -20,7 +20,10 @@ android {
         versionCode = 3
         versionName = "0.2.0"
 
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // The opt-in network journey must never start NemaApplication against installed data.
+        testInstrumentationRunner = if (providers.gradleProperty("nemaSharedThreadNetworkProof").orNull == "true")
+            "org.thanosapollo.nema.service.SharedThreadNetworkProofRunner"
+        else "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
@@ -50,6 +53,10 @@ android {
     }
 
     sourceSets["debug"].assets.srcDir("$projectDir/schemas")
+    sourceSets["test"].java.srcDir("src/sharedTest/java")
+    if (providers.gradleProperty("nemaSharedThreadNetworkProof").orNull == "true") {
+        sourceSets["androidTest"].java.srcDirs("src/sharedTest/java", "src/networkAndroidTest/java")
+    }
 }
 
 kotlin {

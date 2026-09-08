@@ -245,6 +245,15 @@ fun ConversationContent(
     onStartThreadFrom: suspend (TimelineMessage) -> Boolean = { false },
     onCloseThread: () -> Unit = {},
     onRenameThread: suspend (RecentThread, String) -> Boolean = { _, _ -> false },
+    onSelectThreadDestination: (ChatRouteOccurrence, ThreadRef?) -> Unit = { _, _ -> },
+    directoryView: org.thanosapollo.nema.xmpp.threads.DirectoryView = org.thanosapollo.nema.xmpp.threads.DirectoryView(),
+    onRefreshNamedThreads: suspend (ChatRouteOccurrence) -> Unit = {},
+    onArchiveNamedThread: suspend (ChatRouteOccurrence, RecentThread) -> Boolean = { _, _ -> false },
+    onRetryDirectoryChange: suspend (ChatRouteOccurrence) -> Boolean = { false },
+    onKeepCurrentDirectory: suspend (ChatRouteOccurrence) -> Boolean = { false },
+    onCreateNamedThread: suspend (ChatRouteOccurrence, String) -> Boolean = { _, _ -> false },
+    onCreateSharedNamedThread: suspend (ChatRouteOccurrence, String, org.thanosapollo.nema.xmpp.threads.DirectoryContext) -> Boolean = { _, _, _ -> false },
+    onRenameNamedThread: suspend (ChatRouteOccurrence, RecentThread, String, org.thanosapollo.nema.xmpp.threads.DirectoryContext?) -> Boolean = { _, _, _, _ -> false },
     blockingSession: SessionIdentity? = null,
     onSavePeerNickname: suspend (DirectConversationKey, String) -> Boolean = { _, _ -> false },
     onLoadPeerBlocking: suspend (SessionIdentity, DirectConversationKey) -> PeerBlockingState = { _, _ ->
@@ -574,20 +583,6 @@ fun ConversationContent(
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
-                                    if (state.selectedThread != null) {
-                                        Text(
-                                            state.recentThreads
-                                                .firstOrNull {
-                                                    it.thread == state.selectedThread &&
-                                                        it.messageKind == venue.messageKind
-                                                }
-                                                ?.title
-                                                ?: "Thread",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                    }
                                     when {
                                         status != null -> Text(
                                             requireNotNull(status),
@@ -650,29 +645,27 @@ fun ConversationContent(
                                         showPeerProfile = true
                                     },
                                 )
-                                if (state.selectedThread == null) {
-                                    DropdownMenuItem(
-                                        text = { Text("New thread") },
-                                        onClick = {
-                                            actionsOpen = false
-                                            scope.launch { onStartNewThread() }
-                                        },
-                                    )
-                                } else {
-                                    DropdownMenuItem(
-                                        text = { Text("Child thread") },
-                                        onClick = {
-                                            actionsOpen = false
-                                            scope.launch { onStartChildThread() }
-                                        },
-                                    )
-                                }
                             }
                         },
                         colors = TopAppBarDefaults.topAppBarColors(
                             containerColor = MaterialTheme.colorScheme.surface,
                         ),
                         windowInsets = WindowInsets(0, 0, 0, 0),
+                    )
+                    ThreadSwitcher(
+                        occurrence = state.routeOccurrence,
+                        selected = state.selectedThread,
+                        threads = state.recentThreads,
+                        mainUnreadCount = state.mainUnreadCount,
+                        onSelect = onSelectThreadDestination,
+                        onCreate = onCreateNamedThread,
+                        onCreateShared = onCreateSharedNamedThread,
+                        onRename = onRenameNamedThread,
+                        directory = directoryView,
+                        onRefresh = onRefreshNamedThreads,
+                        onArchive = onArchiveNamedThread,
+                        onRetry = onRetryDirectoryChange,
+                        onKeepCurrent = onKeepCurrentDirectory,
                     )
                     key(conversationKey, state.routeOccurrence) {
                         val editActionsEnabled = !composer.ordinarySaveUnconfirmed &&
@@ -947,7 +940,7 @@ fun ConversationContent(
                                         ) {
                                             if (composer.body.isEmpty()) {
                                                 Text(
-                                                    "Message",
+                                                    "Message ${destinationTitle(state.selectedThread, state.recentThreads)}",
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                                     style = MaterialTheme.typography.bodyLarge,
                                                 )
@@ -1344,7 +1337,7 @@ private fun ConversationInfoContent(
                         },
                         modifier = Modifier.testTag("thread-name-input"),
                         label = { Text("Name") },
-                        supportingText = { Text("Leave blank to restore the default name") },
+                        supportingText = { Text("Use a non-empty name. Names are saved on this device only.") },
                         singleLine = true,
                         isError = threadNameError != null,
                     )

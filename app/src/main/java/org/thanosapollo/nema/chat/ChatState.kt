@@ -1,5 +1,11 @@
 package org.thanosapollo.nema.chat
 
+import org.thanosapollo.nema.xmpp.threads.*
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.collectLatest
+import java.util.UUID
+
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -41,6 +47,9 @@ import org.thanosapollo.nema.storage.MessageDraftEntity
 import org.thanosapollo.nema.storage.MessageReactionEntity
 import org.thanosapollo.nema.storage.MessageStore
 import org.thanosapollo.nema.storage.MessageThreadTitleEntity
+import org.thanosapollo.nema.storage.MessageThreadEntity
+import org.thanosapollo.nema.storage.NamedThreadRow
+import org.thanosapollo.nema.thread.threadNameError
 import org.thanosapollo.nema.storage.OutboxStatus
 import org.thanosapollo.nema.storage.PeerEntity
 import org.thanosapollo.nema.storage.PeerIdentityStore
@@ -147,6 +156,10 @@ data class RecentThread(
     val title: String,
     val replyCount: Int,
     val messageKind: MessageKind,
+    val locallyNamed: Boolean = false,
+    val unreadCount: Int = 0,
+    val shared: org.thanosapollo.nema.storage.NamedThreadRow? = null,
+
 )
 
 data class DraftReply(
@@ -230,6 +243,7 @@ data class DirectChatState(
     val selectedThread: ThreadRef? = null,
     val currentSession: ThreadRef? = null,
     val recentThreads: List<RecentThread> = emptyList(),
+    val mainUnreadCount: Int = 0,
     val messages: List<TimelineMessage> = emptyList(),
     val draft: String = "",
     val draftReply: DraftReply? = null,
@@ -262,6 +276,7 @@ data class DirectChatState(
             selectedThread == other.selectedThread &&
             currentSession == other.currentSession &&
             recentThreads == other.recentThreads &&
+            mainUnreadCount == other.mainUnreadCount &&
             messages === other.messages &&
             draft == other.draft &&
             draftReply == other.draftReply &&
@@ -292,6 +307,7 @@ data class DirectChatState(
         result = 31 * result + (selectedThread?.hashCode() ?: 0)
         result = 31 * result + (currentSession?.hashCode() ?: 0)
         result = 31 * result + recentThreads.hashCode()
+        result = 31 * result + mainUnreadCount
         result = 31 * result + System.identityHashCode(messages)
         result = 31 * result + draft.hashCode()
         result = 31 * result + (draftReply?.hashCode() ?: 0)
@@ -359,6 +375,11 @@ data class DraftSnapshot(
         }
     }
 }
+
+internal data class ConversationTimeline(
+    val messages: List<TimelineMessage>,
+    val mainUnreadCount: Int,
+)
 
 class ChatRepository(database: NemaDatabase) {
     private val dao = database.messageDao()
@@ -432,13 +453,17 @@ class ChatRepository(database: NemaDatabase) {
     fun observeTimeline(accountId: String, peerJid: String): Flow<List<TimelineMessage>> =
         observeTimeline(DirectConversationKey(accountId, peerJid))
 
-    fun observeTimeline(key: DirectConversationKey): Flow<List<TimelineMessage>> = combine(
+    fun observeTimeline(key: DirectConversationKey): Flow<List<TimelineMessage>> =
+        observeConversationTimeline(key).map { it.messages }
+
+    internal fun observeConversationTimeline(key: DirectConversationKey): Flow<ConversationTimeline> = combine(
         dao.observeDirectTimeline(key.accountId, key.canonicalBarePeer),
         dao.observeDirectReplyAliases(key.accountId, key.canonicalBarePeer),
         dao.observePeer(key.accountId, key.canonicalBarePeer).map { it?.toIdentityFacts() },
         dao.observeMessageReactions(key.accountId, key.canonicalBarePeer),
-    ) { rows, aliases, peer, reactionRows ->
-        presentTimeline(rows, aliases, key, peer, reactionRows)
+        dao.observeNamedThreads(key.accountId, key.canonicalBarePeer),
+    ) { rows, aliases, peer, reactionRows, named ->
+        presentTimeline(rows, aliases, key, peer, reactionRows, named)
     }.flowOn(Dispatchers.Default)
 
     private fun presentTimeline(
@@ -447,7 +472,8 @@ class ChatRepository(database: NemaDatabase) {
         key: DirectConversationKey,
         peer: PeerIdentityFacts?,
         reactionRows: List<MessageReactionEntity> = emptyList(),
-    ): List<TimelineMessage> {
+        named: List<NamedThreadRow> = emptyList(),
+    ): ConversationTimeline {
         val aliasesByMessage = aliases
             .filter { it.messageId != null }
             .groupBy(TrustedIdentityAliasEntity::messageId, TrustedIdentityAliasEntity::value)
@@ -470,16 +496,34 @@ class ChatRepository(database: NemaDatabase) {
                     ),
                 )
             }
-        return if (peer?.room == true) {
-            timeline.filterByThread(key.thread)
-        } else {
-            timeline.projectThreads(key.thread)
+        val kind = if (peer?.room == true) MessageKind.GROUPCHAT else MessageKind.CHAT
+        val namedIds = named.filter { it.messageKind == kind }.mapTo(hashSetOf()) { it.threadId }
+        // Main activity uses exactly the same visible membership as Main read admission,
+        // not a peer-wide total minus named counts (which would include hidden children).
+        val main = (if (peer?.room == true) timeline else timeline.projectThreads(null)).filterNot {
+            (if (it.groupChat) MessageKind.GROUPCHAT else MessageKind.CHAT) == kind &&
+                it.thread?.id?.value in namedIds
         }
+        val mainIds = main.mapTo(hashSetOf(), TimelineMessage::id)
+        val unread = rows.count {
+            it.messageKind == kind && it.localMessageId in mainIds &&
+                it.direction == MessageDirection.INBOUND && it.unreadEligible && !it.locallyRead
+        }
+        val selected = when {
+            key.thread == null -> main
+            peer?.room == true -> timeline.filterByThread(key.thread)
+            // Naming keeps exact bodies, but must not remove links to existing child history.
+            key.thread.id.value in namedIds -> timeline.projectThreads(key.thread).filterByThread(key.thread)
+            else -> timeline.projectThreads(key.thread)
+        }
+        return ConversationTimeline(selected, unread)
     }
 
     fun observeCurrentSession(accountId: String, peerJid: String): Flow<ThreadRef?> =
-        dao.observeDirectThreadSession(accountId, peerJid).map { session ->
-            session?.let { ThreadRef(ThreadId.require(it.threadId)) }
+        combine(dao.observeDirectThreadSession(accountId, peerJid), dao.observeNamedThreads(accountId, peerJid)) { session, named ->
+            session?.takeUnless { current -> named.any {
+                it.messageKind == MessageKind.CHAT && it.threadId == current.threadId
+            } }?.let { ThreadRef(ThreadId.require(it.threadId)) }
         }
 
     suspend fun ensureCurrentSession(accountId: String, peerJid: String): ThreadRef =
@@ -488,7 +532,7 @@ class ChatRepository(database: NemaDatabase) {
     fun observeRecentThreads(accountId: String, peerJid: String): Flow<List<RecentThread>> = combine(
         dao.observeDirectTimeline(accountId, peerJid),
         dao.observeDirectReplyAliases(accountId, peerJid),
-        dao.observeThreadTitles(accountId, peerJid),
+        dao.observeNamedThreads(accountId, peerJid),
     ) { rows, aliases, titles ->
         val aliasesByMessage = aliases
             .filter { it.messageId != null }
@@ -510,15 +554,26 @@ class ChatRepository(database: NemaDatabase) {
         val target = dao.thread(accountId, peerJid, messageKind, thread.id.value)
             ?.takeIf { it.parentThreadId == thread.parentId?.value }
             ?: return false
-        val normalized = title.trim()
-        if (normalized.isEmpty()) {
-            dao.deleteThreadTitle(accountId, peerJid, target.messageKind, target.threadId)
-        } else {
-            dao.saveThreadTitle(
-                MessageThreadTitleEntity(accountId, peerJid, target.messageKind, target.threadId, normalized),
+        if (threadNameError(title) != null) return false
+        dao.saveThreadTitle(
+            MessageThreadTitleEntity(accountId, peerJid, target.messageKind, target.threadId, title.trim()),
+        )
+        return true
+    }
+
+    suspend fun createNamedThread(
+        accountId: String,
+        peerJid: String,
+        messageKind: MessageKind,
+        title: String,
+    ): ThreadRef? {
+        if (canonicalDirectPeer(peerJid) != peerJid || threadNameError(title) != null) return null
+        val thread = ThreadingPolicy().newTopic()
+        return thread.takeIf {
+            dao.createNamedThread(
+                MessageThreadEntity(accountId, peerJid, messageKind, thread.id.value, null), title.trim(),
             )
         }
-        return true
     }
 
     fun observeDraft(accountId: String, peerJid: String): Flow<String> =
@@ -627,6 +682,11 @@ class DirectChatPresenter(
     private val notifyComposer: (String, Boolean) -> Unit = { _, _ -> },
     private val threadingPolicy: ThreadingPolicy = ThreadingPolicy(),
     private val restoreRouteOnStart: Boolean = false,
+    private val directoryConnection: Flow<Any?> = flowOf(Unit),
+    private val keepDirectory: suspend (AccountConfiguration, String, MessageKind, String) -> Boolean = { _, _, _, _ -> false },
+    private val refreshDirectory: suspend (AccountConfiguration, String, MessageKind) -> DirectoryView = { _, _, _ -> DirectoryView() },
+    private val changeDirectory: suspend (AccountConfiguration, String, MessageKind, DirectoryAction?) -> DirectoryChange = { _, _, _, _ -> DirectoryChange(DirectoryView()) },
+
 ) {
     private data class PendingDraft(
         var snapshot: DraftSnapshot,
@@ -641,6 +701,7 @@ class DirectChatPresenter(
         val room: RoomView?,
         val currentSession: ThreadRef?,
         val recentThreads: List<RecentThread>,
+        val mainUnreadCount: Int = 0,
         val composers: List<String> = emptyList(),
         val rttText: String? = null,
         val status: ChatContentStatus = ChatContentStatus.Ready,
@@ -664,6 +725,63 @@ class DirectChatPresenter(
     private val routeGeneration = AtomicInteger(0)
     private val joinedRooms = mutableSetOf<String>()
     private val selectedRoute = MutableStateFlow(ChatRouteOccurrence(null, 0))
+    private val directory = MutableStateFlow(DirectoryView(DirectoryMode.CHECKING))
+    val directoryState: StateFlow<DirectoryView> get() = directory
+
+    suspend fun refreshNamedThreads(origin: ChatRouteOccurrence) {
+        if (selectedRoute.value != origin || state.value.routeOccurrence != origin || state.value.contentStatus != ChatContentStatus.Ready) return
+        val route = origin.route ?: return
+        val kind = if (state.value.selectedPeerGroupChat) MessageKind.GROUPCHAT else MessageKind.CHAT
+        val result = try { refreshDirectory(account, route.peerJid, kind) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { DirectoryView(DirectoryMode.ERROR) }
+        if (selectedRoute.value == origin) directory.value = result
+    }
+
+    suspend fun retryDirectoryChange(origin: ChatRouteOccurrence): Boolean = changeShared(origin, null)
+
+    suspend fun keepCurrentDirectory(origin: ChatRouteOccurrence): Boolean {
+        if (selectedRoute.value != origin || state.value.routeOccurrence != origin) return false
+        val route = origin.route ?: return false
+        val operation = directory.value.pendingOperation ?: return false
+        val kind = if (state.value.selectedPeerGroupChat) MessageKind.GROUPCHAT else MessageKind.CHAT
+        val result = try { keepDirectory(account, route.peerJid, kind, operation) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { false }
+        if (result) refreshNamedThreads(origin)
+        return result
+    }
+
+    private suspend fun changeShared(origin: ChatRouteOccurrence, action: DirectoryAction?): Boolean {
+        if (selectedRoute.value != origin || state.value.routeOccurrence != origin) return false
+        val route = origin.route ?: return false
+        val kind = if (state.value.selectedPeerGroupChat) MessageKind.GROUPCHAT else MessageKind.CHAT
+        val result = try { changeDirectory(account, route.peerJid, kind, action) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (_: Exception) { DirectoryChange(DirectoryView(DirectoryMode.UNCERTAIN)) }
+        if (selectedRoute.value == origin) {
+            directory.value = result.view
+            if (result.confirmed) refreshNamedThreads(origin)
+        }
+        return result.confirmed
+    }
+
+    suspend fun archiveNamedThread(origin: ChatRouteOccurrence, recent: RecentThread): Boolean {
+        val action = sharedAction(recent, directory.value.context ?: return false,
+            archived = !(recent.shared?.archived ?: return false)) ?: return false
+        return changeShared(origin, action)
+    }
+
+    private fun sharedAction(recent: RecentThread, context: DirectoryContext, title: String? = null, archived: Boolean? = null): DirectoryAction? {
+        if (directory.value.context != context || !directory.value.writable || state.value.recentThreads.none {
+            it.thread == recent.thread && it.messageKind == recent.messageKind
+        }) return null
+        val row = recent.shared ?: return null
+        if (!row.canModify || row.retired || row.authority != context.authority ||
+            row.incarnation.orEmpty() != (context.scope as? ThreadDirectoryScope.Muc)?.incarnation.orEmpty()) return null
+        return DirectoryAction(context, UUID.fromString(recent.thread.id.value), revision = row.revision, title = title, archived = archived)
+    }
+
     private val sendGuard = MutableStateFlow(SendGuard())
     private data class SendGuard(
         val pending: Set<PendingSendIdentity> = emptySet(),
@@ -681,6 +799,7 @@ class DirectChatPresenter(
         val peer: PeerIdentityFacts? = null,
         val currentSession: ThreadRef? = null,
         val recentThreads: List<RecentThread> = emptyList(),
+        val mainUnreadCount: Int = 0,
         val status: ChatContentStatus = ChatContentStatus.Loading,
     )
 
@@ -693,12 +812,12 @@ class DirectChatPresenter(
             flow {
                 emit(LocalConversation(subscription))
                 emitAll(combine(
-                    repository.observeTimeline(DirectConversationKey(account.id.value, route.peerJid, route.thread)),
+                    repository.observeConversationTimeline(DirectConversationKey(account.id.value, route.peerJid, route.thread)),
                     repository.observePeer(account.id.value, route.peerJid),
                     repository.observeCurrentSession(account.id.value, route.peerJid),
                     repository.observeRecentThreads(account.id.value, route.peerJid),
-                ) { messages, peer, session, recent ->
-                    LocalConversation(subscription, messages, peer, session, recent, ChatContentStatus.Ready)
+                ) { timeline, peer, session, recent ->
+                    LocalConversation(subscription, timeline.messages, peer, session, recent, timeline.mainUnreadCount, ChatContentStatus.Ready)
                 })
             }.retryWhen { failure, _ ->
                 if (failure is CancellationException) throw failure
@@ -732,7 +851,7 @@ class DirectChatPresenter(
                         } else {
                             SelectedConversation(
                                 occurrence, local.messages, draft, local.peer, room,
-                                local.currentSession, local.recentThreads, composers, rttText,
+                                local.currentSession, local.recentThreads, local.mainUnreadCount, composers, rttText,
                             )
                         }
                     },
@@ -778,6 +897,7 @@ class DirectChatPresenter(
             selectedThread = selected.route?.thread,
             currentSession = selected.currentSession.takeUnless { groupChat },
             recentThreads = selected.recentThreads.filter { it.messageKind == selectedKind },
+            mainUnreadCount = selected.mainUnreadCount,
             messages = selected.messages,
             draft = selected.draft.body,
             draftReply = selected.draft.reply,
@@ -800,6 +920,12 @@ class DirectChatPresenter(
     )
 
     init {
+        presenterScope.launch {
+            combine(state.map { Triple(it.routeOccurrence, it.contentStatus, it.selectedPeerGroupChat) }.distinctUntilChanged(), directoryConnection) { route, connection -> route to connection }
+                .collectLatest { (route, _) ->
+                    if (route.second == ChatContentStatus.Ready && route.first.route != null) refreshNamedThreads(route.first)
+                }
+        }
         presenterScope.launch {
             if (restoreRouteOnStart) {
                 val restored = repository.observeRoute(account.id.value).first()
@@ -838,9 +964,11 @@ class DirectChatPresenter(
         }
     }
 
-    suspend fun selectPeer(value: String): Boolean {
+    suspend fun selectPeer(value: String): Boolean = selectNotificationDestination(value, null)
+
+    fun selectNotificationDestination(value: String, thread: ThreadRef?): Boolean {
         val canonical = canonicalDirectPeer(value) ?: return false
-        selectRoute(ChatRoute(canonical))
+        selectRoute(ChatRoute(canonical, thread))
         return true
     }
 
@@ -1075,7 +1203,53 @@ class DirectChatPresenter(
         }
     }
 
+    fun selectThreadDestination(origin: ChatRouteOccurrence, thread: ThreadRef?) {
+        if (selectedRoute.value != origin || state.value.routeOccurrence != origin) return
+        val route = origin.route ?: return
+        if (thread != null && state.value.recentThreads.none { it.thread == thread && it.locallyNamed }) return
+        selectRouteIfCurrent(RouteOccurrence(route, origin.generation), route.copy(thread = thread))
+    }
+
+    suspend fun createNamedThread(origin: ChatRouteOccurrence, title: String): Boolean {
+        if (selectedRoute.value != origin || state.value.routeOccurrence != origin ||
+            state.value.contentStatus != ChatContentStatus.Ready || threadNameError(title) != null
+        ) return false
+        val route = origin.route ?: return false
+        val kind = if (state.value.selectedPeerGroupChat) MessageKind.GROUPCHAT else MessageKind.CHAT
+        if (directory.value.mode == DirectoryMode.CHECKING) refreshNamedThreads(origin)
+        if (selectedRoute.value != origin) return false
+        if (directory.value.mode != DirectoryMode.LOCAL_ONLY) return false
+        val thread = repository.createNamedThread(account.id.value, route.peerJid, kind, title) ?: return false
+        // Persistence may finish after switching away. Keep the created directory row, but
+        // never redirect a successor route or its composer to the old operation's result.
+        selectRouteIfCurrent(RouteOccurrence(route, origin.generation), route.copy(thread = thread))
+        return true
+    }
+
+    /** The form captures this capability before accepting a shared name, not at submission. */
+    suspend fun createSharedNamedThread(origin: ChatRouteOccurrence, title: String, authored: DirectoryContext): Boolean {
+        if (selectedRoute.value != origin || state.value.routeOccurrence != origin ||
+            state.value.contentStatus != ChatContentStatus.Ready || threadNameError(title) != null ||
+            !directory.value.writable || directory.value.context != authored) return false
+        val route = origin.route ?: return false
+        val action = DirectoryAction(authored, title = title.trim())
+        if (!changeShared(origin, action)) return false
+        selectRouteIfCurrent(RouteOccurrence(route, origin.generation), route.copy(thread = ThreadRef(ThreadId.require(action.threadId.toString()))))
+        return true
+    }
+
+    /** Shared forms retain their authored context; null authorizes only a private local rename. */
+    suspend fun renameNamedThread(origin: ChatRouteOccurrence, recent: RecentThread, title: String, authored: DirectoryContext?): Boolean {
+        if (selectedRoute.value != origin || state.value.routeOccurrence != origin) return false
+        if (recent.shared != null) {
+            if (threadNameError(title) != null) return false
+            return changeShared(origin, sharedAction(recent, authored ?: return false, title = title.trim()) ?: return false)
+        }
+        return renameThread(recent, title)
+    }
+
     suspend fun renameThread(recent: RecentThread, title: String): Boolean {
+        if (recent.shared != null) return false
         val route = selectedRoute.value.route ?: return false
         val current = state.value
         val stillPresent = current.recentThreads.any {
@@ -1188,6 +1362,7 @@ class DirectChatPresenter(
     // Called under selectedRoute's lock: invalidate before publishing navigation, not
     // after flatMapLatest finishes cancelling. Home retains the uninterrupted lifetime.
     private fun publishRoute(route: ChatRoute?, generation: Int) {
+        directory.value = DirectoryView(DirectoryMode.CHECKING)
         if (route != null && localSubscription.value?.route != route) {
             localSubscription.value = LocalSubscription(route, generation)
         }
@@ -1298,10 +1473,10 @@ private fun List<TimelineMessage>.resolveThread(
 }
 
 private fun List<TimelineMessage>.recentThreads(
-    titles: List<MessageThreadTitleEntity>,
+    titles: List<NamedThreadRow>,
 ): List<RecentThread> {
     val customTitles = titles.associateBy { it.messageKind to it.threadId }
-    return withIndex()
+    val history = withIndex()
         .filter { it.value.thread != null }
         .groupBy {
             val kind = if (it.value.groupChat) MessageKind.GROUPCHAT else MessageKind.CHAT
@@ -1318,13 +1493,29 @@ private fun List<TimelineMessage>.recentThreads(
             val replies = resolved?.members?.size ?: (members.size - 1).coerceAtLeast(0)
             val defaultTitle = (resolved?.root ?: members.first()).body.threadTitlePreview()
             val title = customTitles[kind to thread.id.value]?.title ?: defaultTitle
-            indexed.maxOf { it.index } to RecentThread(thread, title, replies, kind)
+            val local = customTitles[kind to thread.id.value]
+            indexed.maxOf { it.index } to RecentThread(
+                thread, title, replies, kind, locallyNamed = local != null, unreadCount = local?.unreadCount ?: 0,
+                shared = local?.takeIf { it.authority != null },
+            )
         }
         .groupBy { it.second.messageKind }
         .values
         .flatMap { kind -> kind.sortedByDescending { it.first }.take(10) }
         .sortedByDescending { it.first }
         .map { it.second }
+    val named = titles.map { row ->
+        history.firstOrNull { it.messageKind == row.messageKind && it.thread.id.value == row.threadId }
+            ?: RecentThread(
+                ThreadRef(ThreadId.require(row.threadId), row.parentThreadId?.let(ThreadId::require)),
+                row.title, 0, row.messageKind, locallyNamed = true, unreadCount = row.unreadCount,
+                shared = row.takeIf { it.authority != null },
+            )
+    }
+    // No empty or older named row disappears merely because other messages arrived.
+    return history + named.filterNot { entry -> history.any {
+        it.messageKind == entry.messageKind && it.thread == entry.thread
+    } }
 }
 
 private fun String.threadTitlePreview(): String {

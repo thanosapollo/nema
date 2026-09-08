@@ -2982,7 +2982,7 @@ class ConversationContentTest {
             }
         }
 
-        composeRule.onNodeWithText("Message").performTextInput("visible")
+        composeRule.onNodeWithTag("message-composer").performTextInput("visible")
         draftResult.complete(false)
         composeRule.waitForIdle()
 
@@ -3099,7 +3099,7 @@ class ConversationContentTest {
             }
         }
 
-        composeRule.onNodeWithText("Message").performTextInput("N")
+        composeRule.onNodeWithTag("message-composer").performTextInput("N")
         composeRule.waitUntil { results.size == 1 }
         composeRule.onNodeWithText("N").performTextReplacement("N+1")
         composeRule.waitUntil { results.size == 2 }
@@ -3138,7 +3138,7 @@ class ConversationContentTest {
             }
         }
 
-        composeRule.onNodeWithText("Message").performTextInput("N")
+        composeRule.onNodeWithTag("message-composer").performTextInput("N")
         composeRule.waitUntil { results.size == 1 }
         composeRule.onNodeWithText("N").performTextReplacement("N+1")
         composeRule.waitUntil { results.size == 2 }
@@ -3169,7 +3169,7 @@ class ConversationContentTest {
             }
         }
 
-        composeRule.onNodeWithText("Message").performTextInput("visible")
+        composeRule.onNodeWithTag("message-composer").performTextInput("visible")
         draftResult.cancel()
         composeRule.waitForIdle()
 
@@ -3206,7 +3206,7 @@ class ConversationContentTest {
             }
         }
 
-        composeRule.onNodeWithText("Message").performTextInput("draft A")
+        composeRule.onNodeWithTag("message-composer").performTextInput("draft A")
         composeRule.waitUntil { draftStarted.isCompleted }
         composeRule.onNodeWithContentDescription("Send").performClick()
         composeRule.waitUntil { sendStarted.isCompleted }
@@ -3737,7 +3737,7 @@ class ConversationContentTest {
                     onCloseConversation = {},
                     onDraftChange = { CompletableDeferred(true) },
                     onSend = { CompletableDeferred(true) },
-                    onStartNewThread = { newThreads++; true },
+                    onCreateNamedThread = { _, _ -> newThreads++; true },
                     onContinueThread = { opened = it; true },
                     onStartChildThread = { true },
                     onStartThreadFrom = { threadSource = it; true },
@@ -3756,16 +3756,18 @@ class ConversationContentTest {
         composeRule.waitForIdle()
         assertEquals("message-identity", threadSource?.id)
         assertEquals(null, threadSource?.thread)
-        composeRule.onNodeWithContentDescription("Conversation actions").performClick()
+        composeRule.onNodeWithTag("thread-switcher").performClick()
         composeRule.onNodeWithText("New thread").performClick()
+        composeRule.onNodeWithTag("thread-name-input").performTextInput("Project")
+        composeRule.onNodeWithText("Create thread").performClick()
         composeRule.waitForIdle()
         assertEquals(1, newThreads)
 
         composeRule.runOnIdle {
             show(state(ACCOUNT_A, PEER_A).copy(selectedThread = thread))
         }
-        composeRule.onNodeWithContentDescription("Conversation actions").performClick()
-        composeRule.onNodeWithText("Child thread").assertIsDisplayed()
+        composeRule.onNodeWithTag("thread-switcher").assertIsDisplayed()
+        composeRule.onNodeWithText("Child thread").assertDoesNotExist()
         composeRule.onNodeWithContentDescription("Back to conversation").assertIsDisplayed()
     }
 

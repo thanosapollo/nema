@@ -74,7 +74,7 @@ class ArchiveRecordMigrationTest {
             repeat(2) {
                 NemaDatabase.create(context, name).use { db ->
                     val sql = db.openHelper.writableDatabase
-                    assertEquals(28, sql.version)
+                    assertEquals(29, sql.version)
                     assertEquals(before, snapshot(sql))
                     assertEquals(listOf("control-first" to 0L, "control-last" to 3L), raw(db))
                     assertTrue(raw(db, key.copy(accountId = "b")).isEmpty())
@@ -83,7 +83,7 @@ class ArchiveRecordMigrationTest {
                     sql.query("PRAGMA integrity_check").use { assertTrue(it.moveToFirst()); assertEquals("ok", it.getString(0)) }
                 }
             }
-            migrations.runMigrationsAndValidate(name, 28, true, MessageSchema.MIGRATION_27_28).close()
+            migrations.runMigrationsAndValidate(name, 29, true, MessageSchema.MIGRATION_27_28).close()
             NemaDatabase.create(context, name).use { db ->
                 val store = MessageStore(db)
                 val after = store.applyArchivePage(page(ArchiveDirection.AFTER, "control-last",
@@ -190,7 +190,7 @@ class ArchiveRecordMigrationTest {
             }
             NemaDatabase.create(context, name).use { db ->
                 val store = MessageStore(db)
-                assertEquals(28, db.openHelper.writableDatabase.version)
+                assertEquals(29, db.openHelper.writableDatabase.version)
                 assertTrue(raw(db, oldKey).isEmpty())
                 assertNull(store.archiveCursor(oldKey)?.oldestId)
                 val result = store.applyArchivePage(page(ArchiveDirection.BOOTSTRAP, null,
@@ -218,7 +218,7 @@ class ArchiveRecordMigrationTest {
     }
 
     private fun snapshot(sql: SupportSQLiteDatabase): Map<String, List<List<String?>>> {
-        val tables = sql.query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('room_master_table', 'android_metadata', 'archive_record_positions') ORDER BY name").use { c ->
+        val tables = sql.query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('room_master_table', 'android_metadata', 'archive_record_positions', 'shared_threads', 'thread_directory_intents') ORDER BY name").use { c ->
             buildList { while (c.moveToNext()) add(c.getString(0)) }
         }
         return tables.associateWith { table -> sql.query("SELECT * FROM `$table` ORDER BY rowid").use { c ->

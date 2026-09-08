@@ -51,19 +51,19 @@ class ConflictIndexMigrationTest {
                 val db = NemaDatabase.create(context, name)
                 try {
                     val sql = db.openHelper.writableDatabase
-                    assertEquals(28, sql.version)
+                    assertEquals(29, sql.version)
                     assertEquals(before, snapshot(sql))
                     assertEquals(listOf("root"), db.messageDao().mucConflictedEvents("a", listOf("root")))
                     sql.query("PRAGMA foreign_key_check").use { assertFalse(it.moveToFirst()) }
                     sql.query("PRAGMA integrity_check").use { assertTrue(it.moveToFirst()); assertEquals("ok", it.getString(0)) }
                 } finally { db.close() }
             }
-            migrations.runMigrationsAndValidate(name, 28, true, MessageSchema.MIGRATION_26_27, MessageSchema.MIGRATION_27_28).close()
+            migrations.runMigrationsAndValidate(name, 29, true, MessageSchema.MIGRATION_26_27, MessageSchema.MIGRATION_27_28).close()
         } finally { context.deleteDatabase(name) }
     }
 
     private fun snapshot(sql: SupportSQLiteDatabase): Map<String, List<List<String?>>> {
-        val tables = sql.query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('room_master_table', 'android_metadata', 'archive_record_positions') ORDER BY name").use { c ->
+        val tables = sql.query("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN ('room_master_table', 'android_metadata', 'archive_record_positions', 'shared_threads', 'thread_directory_intents') ORDER BY name").use { c ->
             buildList { while (c.moveToNext()) add(c.getString(0)) }
         }
         return tables.associateWith { table ->

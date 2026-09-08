@@ -425,8 +425,13 @@ private fun AccountConnectionScreen(
                     application.sessionRuntime.reportComposer(account.id.value, peer, composing)
                 },
                 restoreRouteOnStart = restoreChatRouteOnStart,
+                directoryConnection = application.sessionRuntime.state,
+                refreshDirectory = application.sessionRuntime::refreshThreadDirectory,
+                changeDirectory = application.sessionRuntime::changeThreadDirectory,
+                keepDirectory = application.sessionRuntime::keepCurrentThreadDirectory,
             )
         }
+        val directoryView by presenter.directoryState.collectAsState()
         fun selectDestination(next: PrimaryDestination) {
             destination = selectSessionDestination(next, presenter::closeConversation)
         }
@@ -440,7 +445,7 @@ private fun AccountConnectionScreen(
             }
             // selectPeer publishes synchronously before any storage work. Presenter
             // generations protect this route from late initialization/restore.
-            if (presenter.selectPeer(target.peerJid)) {
+            if (presenter.selectNotificationDestination(target.peerJid, target.thread)) {
                 destination = PrimaryDestination.HOME
                 notificationMessage = null
             }
@@ -544,6 +549,15 @@ private fun AccountConnectionScreen(
                             onStartThreadFrom = presenter::startThreadFrom,
                             onCloseThread = presenter::closeThread,
                             onRenameThread = presenter::renameThread,
+                            onSelectThreadDestination = presenter::selectThreadDestination,
+                            onCreateNamedThread = presenter::createNamedThread,
+                            onCreateSharedNamedThread = presenter::createSharedNamedThread,
+                            onRenameNamedThread = presenter::renameNamedThread,
+                            directoryView = directoryView,
+                            onRefreshNamedThreads = presenter::refreshNamedThreads,
+                            onArchiveNamedThread = presenter::archiveNamedThread,
+                            onRetryDirectoryChange = presenter::retryDirectoryChange,
+                            onKeepCurrentDirectory = presenter::keepCurrentDirectory,
                             blockingSession = blockingSession,
                             onSavePeerNickname = { key, nickname ->
                                 if (key.accountId != account.id.value) {

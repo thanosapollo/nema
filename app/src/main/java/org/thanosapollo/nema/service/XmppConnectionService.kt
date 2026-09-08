@@ -1,5 +1,8 @@
 package org.thanosapollo.nema.service
 
+import org.thanosapollo.nema.xmpp.threads.*
+import kotlinx.coroutines.async
+
 import android.Manifest
 import android.app.Notification
 import android.app.NotificationChannel
@@ -139,6 +142,7 @@ class SessionRuntime(
     private val scope = runtimeScope
     private val accountCommands = Mutex()
     private val bookmarkMutations = Mutex()
+    private val directoryMutations = Mutex()
     private val reactionMutexes = mutableMapOf<ReactionCommandKey, Mutex>()
     private val automaticConnectionClaimed = AtomicBoolean(false)
     private val pendingActivation = PendingActivationAuthority()
@@ -178,7 +182,7 @@ class SessionRuntime(
     )
     private val pendingPeerIdentities = AtomicReference<Map<String, Set<String>>>(emptyMap())
     val visiblePeer = AtomicReference<String?>(null)
-    @Volatile var onInsertedInbound: ((AccountId, String, String) -> Unit)? = null
+    @Volatile var onInsertedInbound: ((AccountId, String, String, org.thanosapollo.nema.thread.ThreadRef?) -> Unit)? = null
     val rooms = RoomStateStore()
     val chatStates = ChatStateHub()
     val realTimeText = RealTimeTextHub()
@@ -410,7 +414,7 @@ class SessionRuntime(
         return controller.uploadHttpFile(lease.identity.accountId, lease.identity.generation, request)
     }
 
-    private fun emitInsertedLive(envelope: IncomingMessageEnvelope, result: IngestionResult) {
+    private suspend fun emitInsertedLive(envelope: IncomingMessageEnvelope, result: IngestionResult) {
         if (
             shouldNotifyInsertedInbound(
                 result = result,
@@ -420,11 +424,14 @@ class SessionRuntime(
                 peerJid = envelope.peer,
             )
         ) {
-            onInsertedInbound?.invoke(envelope.accountId, envelope.peer, envelope.body)
+            val destination = messages.notificationThread(
+                envelope.accountId.value, envelope.peer, envelope.kind, result.storedThread,
+            )
+            onInsertedInbound?.invoke(envelope.accountId, envelope.peer, envelope.body, destination)
         }
     }
 
-    private fun emitInsertedArchive(accountId: AccountId, inserted: List<InsertedInbound>, direction: ArchiveDirection) {
+    private suspend fun emitInsertedArchive(accountId: AccountId, inserted: List<InsertedInbound>, direction: ArchiveDirection) {
         val visible = visiblePeer.get()
         inserted.forEach { inbound ->
             if (
@@ -437,7 +444,11 @@ class SessionRuntime(
                     direction = direction,
                 )
             ) {
-                onInsertedInbound?.invoke(accountId, inbound.peerJid, inbound.preview)
+                val destination = messages.notificationThread(
+                    accountId.value, inbound.peerJid,
+                    if (inbound.groupChat) MessageKind.GROUPCHAT else MessageKind.CHAT, inbound.thread,
+                )
+                onInsertedInbound?.invoke(accountId, inbound.peerJid, inbound.preview, destination)
             }
         }
     }
@@ -811,6 +822,92 @@ class SessionRuntime(
 
     suspend fun stop() = accountCommands.withLock { controller.stop() }
 
+    suspend fun refreshThreadDirectory(account: AccountConfiguration, peer: String, kind: MessageKind): DirectoryView {
+        val lease = controller.lifecycle.value.dispatchLease()
+        return directoryMutations.withLock {
+            val pending = messages.sharedThreads.intent(account.id.value, peer, kind)
+            if (lease == null || lease.identity.accountId != account.id || controller.lifecycle.value.dispatchLease() != lease) {
+                return@withLock DirectoryView(if (pending != null) DirectoryMode.UNCERTAIN else DirectoryMode.OFFLINE, pendingOperation = pending?.operationId)
+            }
+            try {
+                val directory = try { directoryScope(account.bareJid.value, peer, kind) }
+                    catch (_: IllegalArgumentException) { return@withLock DirectoryView(DirectoryMode.LOCAL_ONLY) }
+                val result = controller.listThreadDirectory(account.id, lease.identity.generation, directory)
+                val committed = controller.commitIfConnected(lease.identity, { controller.lifecycle.value.dispatchLease() == lease }) {
+                    messages.sharedThreads.snapshot(account.id.value, account.bareJid.value, peer, kind, result)
+                    true
+                } == true
+                if (!committed) DirectoryView(if (pending != null) DirectoryMode.UNCERTAIN else DirectoryMode.OFFLINE, pendingOperation = pending?.operationId)
+                else DirectoryView(if (pending != null) DirectoryMode.UNCERTAIN else DirectoryMode.SHARED,
+                    DirectoryContext(result.authority, result.scope, lease.identity.generation.value), pendingOperation = pending?.operationId)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: ThreadDirectoryException.Unsupported) {
+                DirectoryView(if (pending != null) DirectoryMode.UNCERTAIN else DirectoryMode.LOCAL_ONLY, pendingOperation = pending?.operationId)
+            } catch (_: Exception) {
+                DirectoryView(if (pending != null) DirectoryMode.UNCERTAIN else DirectoryMode.ERROR, pendingOperation = pending?.operationId)
+            }
+        }
+    }
+
+    /** Explicit user settlement after readback. Does not undo an already applied change. */
+    suspend fun keepCurrentThreadDirectory(account: AccountConfiguration, peer: String, kind: MessageKind, operation: String): Boolean =
+        directoryMutations.withLock {
+            val intent = messages.sharedThreads.intent(account.id.value, peer, kind) ?: return@withLock false
+            if (intent.operationId != operation) return@withLock false
+            val lease = controller.lifecycle.value.dispatchLease() ?: return@withLock false
+            if (lease.identity.accountId != account.id) return@withLock false
+            val snapshot = try { controller.listThreadDirectory(account.id, lease.identity.generation, directoryScope(account.bareJid.value, peer, kind)) }
+                catch (cancelled: CancellationException) { throw cancelled } catch (_: Exception) { return@withLock false }
+            controller.commitIfConnected(lease.identity, { controller.lifecycle.value.dispatchLease() == lease }) {
+                messages.sharedThreads.snapshot(account.id.value, account.bareJid.value, peer, kind, snapshot)
+                messages.sharedThreads.reject(intent)
+                true
+            } == true
+        }
+
+    /** Runtime, not the composable, owns an admitted intent through cancellation/navigation. */
+    suspend fun changeThreadDirectory(account: AccountConfiguration, peer: String, kind: MessageKind, action: DirectoryAction?): DirectoryChange {
+        val lease = controller.lifecycle.value.dispatchLease() ?: return DirectoryChange(DirectoryView(DirectoryMode.OFFLINE))
+        if (lease.identity.accountId != account.id || (action != null && action.context.generation != lease.identity.generation.value))
+            return DirectoryChange(DirectoryView(DirectoryMode.OFFLINE))
+        return scope.async {
+            directoryMutations.withLock {
+                if (controller.lifecycle.value.dispatchLease() != lease) return@withLock DirectoryChange(DirectoryView(DirectoryMode.OFFLINE))
+                val intent = try {
+                    if (action == null) messages.sharedThreads.intent(account.id.value, peer, kind)
+                    else controller.commitIfConnected(lease.identity, { controller.lifecycle.value.dispatchLease() == lease }) {
+                        messages.sharedThreads.prepare(account.id.value, account.bareJid.value, peer, kind, action)
+                    }
+                } catch (cancelled: CancellationException) { throw cancelled } catch (_: Exception) { null }
+                if (intent == null) return@withLock DirectoryChange(DirectoryView(DirectoryMode.ERROR))
+                try {
+                    val result = controller.mutateThreadDirectory(account.id, lease.identity.generation, intent.action(account.bareJid.value))
+                    val committed = controller.commitIfConnected(lease.identity, { controller.lifecycle.value.dispatchLease() == lease }) {
+                        messages.sharedThreads.confirmed(intent, account.bareJid.value, result)
+                        true
+                    } == true
+                    DirectoryChange(DirectoryView(if (committed) DirectoryMode.SHARED else DirectoryMode.UNCERTAIN,
+                        action?.context ?: intent.action(account.bareJid.value).context,
+                        pendingOperation = if (committed) null else intent.operationId), committed)
+                } catch (cancelled: CancellationException) {
+                    // Durable intent already exists. Reopening offers exact-ID retry, never silent success.
+                    throw cancelled
+                } catch (failure: Exception) {
+                    // A retry conflict can mean the original succeeded and was superseded. It is not a rejection receipt.
+                    val definitive = action != null && (failure is ThreadDirectoryException.Conflict || failure is ThreadDirectoryException.Rejected || failure is ThreadDirectoryException.Unsupported)
+                    if (definitive) controller.commitIfConnected(lease.identity, { controller.lifecycle.value.dispatchLease() == lease }) {
+                        messages.sharedThreads.reject(intent)
+                    }
+                    DirectoryChange(DirectoryView(if (definitive) DirectoryMode.ERROR else DirectoryMode.UNCERTAIN,
+                        detail = if (definitive) "Shared change rejected. Refresh before trying a new change." else null,
+                        pendingOperation = if (definitive) null else intent.operationId))
+                }
+            }
+        }.await()
+    }
+
+
     suspend fun reactTo(peerJid: String, localMessageId: String, emoji: String): Boolean {
         val lease = controller.lifecycle.value.dispatchLease() ?: return false
         val account = accounts.activeAccount.first() ?: return false
@@ -1164,7 +1261,7 @@ class XmppConnectionService : Service() {
     override fun onCreate() {
         super.onCreate()
         runtime = (application as NemaApplication).sessionRuntime
-        runtime.onInsertedInbound = { accountId, peer, preview -> notifyInbound(accountId, peer, preview) }
+        runtime.onInsertedInbound = { accountId, peer, preview, thread -> notifyInbound(accountId, peer, preview, thread) }
         notifications = getSystemService(NotificationManager::class.java)
         commands = SerializedServiceCommandRunner(serviceScope)
         try {
@@ -1382,9 +1479,9 @@ class XmppConnectionService : Service() {
             .build()
     }
 
-    private fun notifyInbound(accountId: AccountId, peer: String, preview: String) {
+    private fun notifyInbound(accountId: AccountId, peer: String, preview: String, thread: org.thanosapollo.nema.thread.ThreadRef?) {
         if (!canShowNotifications()) return
-        val target = org.thanosapollo.nema.MessageNotificationTarget(accountId.value, peer)
+        val target = org.thanosapollo.nema.MessageNotificationTarget(accountId.value, peer, thread)
         val openIntent = target.pendingIntent(this)
         try {
             notifications.notify(

@@ -65,7 +65,7 @@ class MucCorrectionMigrationTest {
             var db = NemaDatabase.create(context, name)
             try {
                 val sql = db.openHelper.writableDatabase
-                assertEquals(28, sql.version)
+                assertEquals(29, sql.version)
                 assertEquals(before, snapshot(sql))
                 assertUnknown(sql)
                 var store = MessageStore(db)

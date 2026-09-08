@@ -131,6 +131,22 @@ abstract class MessageDao {
         """
         UPDATE messages SET locallyRead = 1
         WHERE accountId = :accountId AND peerJid = :peerJid AND localSequence <= :localSequence
+          AND locallyRead = 0
+          AND EXISTS (
+            SELECT 1 FROM messages AS boundary
+            WHERE boundary.accountId = :accountId AND boundary.peerJid = :peerJid
+              AND boundary.localSequence = :localSequence AND boundary.messageKind = messages.messageKind
+              AND CASE WHEN EXISTS (
+                SELECT 1 FROM thread_destinations AS named
+                WHERE named.accountId = boundary.accountId AND named.peerJid = boundary.peerJid
+                  AND named.messageKind = boundary.messageKind AND named.threadId = boundary.threadId
+              ) THEN messages.threadId = boundary.threadId
+              ELSE NOT EXISTS (
+                SELECT 1 FROM thread_destinations AS named
+                WHERE named.accountId = messages.accountId AND named.peerJid = messages.peerJid
+                  AND named.messageKind = messages.messageKind AND named.threadId = messages.threadId
+              ) END
+          )
         """,
     )
     abstract suspend fun markMessagesReadThrough(accountId: String, peerJid: String, localSequence: Long): Int
@@ -633,6 +649,42 @@ abstract class MessageDao {
     @Query("DELETE FROM direct_thread_sessions WHERE accountId = :accountId AND peerJid = :peerJid")
     abstract suspend fun deleteDirectThreadSession(accountId: String, peerJid: String): Int
 
+    @Transaction
+    open suspend fun createNamedThread(thread: MessageThreadEntity, title: String): Boolean {
+        insertPeer(PeerEntity(thread.accountId, thread.peerJid, room = thread.messageKind == MessageKind.GROUPCHAT))
+        if (insertThread(thread) == -1L) return false
+        saveThreadTitle(MessageThreadTitleEntity(
+            thread.accountId, thread.peerJid, thread.messageKind, thread.threadId, title,
+        ))
+        return true
+    }
+
+    @Query(
+        """
+        SELECT thread.messageKind, thread.threadId, thread.parentThreadId, title.title,
+          title.authority, title.incarnation, title.revision, title.archived, title.canModify, title.retired, title.localAlias,
+          (SELECT COUNT(*) FROM messages AS message
+           WHERE message.accountId = thread.accountId AND message.peerJid = thread.peerJid
+             AND message.messageKind = thread.messageKind AND message.threadId = thread.threadId
+             AND message.direction = 'INBOUND' AND message.replaceId IS NULL
+             AND message.unreadEligible = 1 AND message.locallyRead = 0) AS unreadCount
+        FROM message_threads AS thread
+        JOIN thread_destinations AS title ON title.accountId = thread.accountId
+          AND title.peerJid = thread.peerJid AND title.messageKind = thread.messageKind
+          AND title.threadId = thread.threadId
+        WHERE thread.accountId = :accountId AND thread.peerJid = :peerJid
+        ORDER BY title.title COLLATE NOCASE, thread.threadId
+        """,
+    )
+    abstract fun observeNamedThreads(accountId: String, peerJid: String): Flow<List<NamedThreadRow>>
+
+    @Query("""
+        SELECT EXISTS(SELECT 1 FROM thread_destinations
+        WHERE accountId = :accountId AND peerJid = :peerJid
+          AND messageKind = :messageKind AND threadId = :threadId)
+    """)
+    abstract suspend fun isNamedThread(accountId: String, peerJid: String, messageKind: MessageKind, threadId: String): Boolean
+
     @Upsert
     abstract suspend fun saveThreadTitle(title: MessageThreadTitleEntity)
 
@@ -685,6 +737,11 @@ abstract class MessageDao {
           )
           AND NOT EXISTS (
             SELECT 1 FROM direct_thread_sessions
+            WHERE accountId = :accountId AND peerJid = :peerJid
+              AND messageKind = :messageKind AND threadId = :threadId
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM thread_destinations
             WHERE accountId = :accountId AND peerJid = :peerJid
               AND messageKind = :messageKind AND threadId = :threadId
           )
@@ -1746,6 +1803,8 @@ data class TimelineRow(
     val conversationArchiveOrdinal: Long? = null,
     val conversationArchiveAuthority: String,
     val conversationArchiveScope: String,
+    val unreadEligible: Boolean = true,
+    val locallyRead: Boolean = false,
 )
 
 data class RetryUncertainKey(
@@ -1975,6 +2034,8 @@ data class IngestionResult(
     val identityConflict: Boolean,
     val inserted: Boolean,
     val firstLiveDelivery: Boolean = false,
+    /** Canonical lineage after reconciliation, never the untrusted incoming claim. */
+    val storedThread: ThreadRef? = null,
 )
 
 class OutboxClaim internal constructor(
@@ -2006,6 +2067,7 @@ class MessageStore private constructor(
     private val threadIds: ThreadIdFactory,
 ) {
     internal val rosterStore = RosterStore(database)
+    internal val sharedThreads = SharedThreadStore(database)
 
     constructor(database: NemaDatabase) : this(database, {}, System::currentTimeMillis, UuidThreadIdFactory)
 
@@ -2014,6 +2076,23 @@ class MessageStore private constructor(
 
     internal constructor(database: NemaDatabase, clock: () -> Long, threadIds: ThreadIdFactory) :
         this(database, {}, clock, threadIds)
+
+    /** Project canonical stored lineage to the destination used by notification entry. */
+    internal suspend fun notificationThread(
+        accountId: String,
+        peerJid: String,
+        messageKind: MessageKind,
+        storedThread: ThreadRef?,
+    ): ThreadRef? {
+        if (storedThread == null || storedThread.parentId != null || messageKind != MessageKind.CHAT) {
+            return storedThread
+        }
+        // Unnamed top-level direct sessions share Main history and its draft. The union
+        // includes shared, private and archived names; wire identity stays in storage.
+        return storedThread.takeIf {
+            database.messageDao().isNamedThread(accountId, peerJid, messageKind, it.id.value)
+        }
+    }
 
     suspend fun ensureDirectThreadSession(accountId: String, peerJid: String): ThreadRef =
         database.withTransaction {
@@ -2491,7 +2570,10 @@ class MessageStore private constructor(
                 messageKind = timed.messageKind,
                 threadId = timed.threadId,
                 parentThreadId = timed.parentThreadId ?: inheritedParent,
-                preserveStoredThreadLineage = preserveStoredThreadLineage,
+                // A named destination establishes lineage even before the first body arrives.
+                // Keep ordinary unnamed live-ingest validation strict.
+                preserveStoredThreadLineage = preserveStoredThreadLineage ||
+                    (timed.threadId != null && dao.isNamedThread(timed.accountId, timed.peerJid, timed.messageKind, timed.threadId)),
                 write = false,
             ),
         )
@@ -2655,6 +2737,7 @@ class MessageStore private constructor(
             identityConflict = identityConflict,
             inserted = inserted,
             firstLiveDelivery = firstLiveDelivery,
+            storedThread = winner.threadRef(),
         )
     }
 
@@ -3355,15 +3438,15 @@ class MessageStore private constructor(
         val insertedInbound = mutableListOf<InsertedInbound>()
         ingestedContent.forEach { (archived, result) ->
             val message = requireNotNull(archived.message)
-            if (result.inserted && !result.identityConflict &&
-                dao.message(page.key.accountId, result.messageId) != null
-            ) {
+            val stored = if (result.inserted && !result.identityConflict) dao.message(page.key.accountId, result.messageId) else null
+            if (stored != null) {
                 inserted++
                 insertedInbound += InsertedInbound(
                     peerJid = message.peerJid,
                     preview = message.body,
                     inbound = message.direction == MessageDirection.INBOUND,
                     groupChat = message.messageKind == MessageKind.GROUPCHAT,
+                    thread = stored.threadRef(),
                 )
             }
         }
@@ -3965,7 +4048,9 @@ class MessageStore private constructor(
     ): ThreadRef? {
         val session = dao.directThreadSession(accountId, peerJid) ?: return null
         val thread = dao.thread(accountId, peerJid, MessageKind.CHAT, session.threadId)
-        if (session.messageKind == MessageKind.CHAT && thread?.parentThreadId == null) {
+        if (session.messageKind == MessageKind.CHAT && thread?.parentThreadId == null &&
+            !dao.isNamedThread(accountId, peerJid, MessageKind.CHAT, session.threadId)
+        ) {
             return ThreadRef(ThreadId.require(session.threadId))
         }
         dao.deleteDirectThreadSession(accountId, peerJid)
@@ -3994,6 +4079,8 @@ class MessageStore private constructor(
     ) {
         val thread = requireNotNull(dao.thread(accountId, peerJid, MessageKind.CHAT, threadId))
         require(thread.parentThreadId == null) { "Direct session must be top-level" }
+        // A named destination must never replace Main's implicit interoperability session.
+        if (dao.isNamedThread(accountId, peerJid, MessageKind.CHAT, threadId)) return
         dao.saveDirectThreadSession(DirectThreadSessionEntity(accountId, peerJid, threadId = threadId))
     }
 
@@ -4023,6 +4110,9 @@ class MessageStore private constructor(
             return parentThreadId
         }
         if (existing.parentThreadId == parentThreadId) return parentThreadId
+        if (preserveStoredThreadLineage && dao.isNamedThread(accountId, peerJid, messageKind, threadId)) {
+            return existing.parentThreadId
+        }
         if (parentThreadId == null) {
             if (preserveStoredThreadLineage) return existing.parentThreadId
             throw IllegalArgumentException("Thread lineage conflict")

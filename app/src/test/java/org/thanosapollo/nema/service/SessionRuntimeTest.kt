@@ -1,5 +1,9 @@
 package org.thanosapollo.nema.service
 
+import org.thanosapollo.nema.xmpp.threads.*
+import org.thanosapollo.nema.chat.ChatRepository
+import org.thanosapollo.nema.chat.DirectChatPresenter
+import org.thanosapollo.nema.chat.ChatContentStatus
 import android.app.Application
 import android.content.Context
 import androidx.room.withTransaction
@@ -28,6 +32,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -72,6 +77,8 @@ import org.thanosapollo.nema.storage.ReconciliationRepairStatus
 import org.thanosapollo.nema.storage.RosterMember
 import org.thanosapollo.nema.storage.RosterStore
 import org.thanosapollo.nema.storage.TrustedIdentityAlias
+import org.thanosapollo.nema.thread.ThreadId
+import org.thanosapollo.nema.thread.ThreadRef
 import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmark
 import org.thanosapollo.nema.xmpp.bookmarks.RoomBookmarkSnapshot
@@ -253,7 +260,7 @@ class SessionRuntimeTest {
         val first = connectedRuntime(backgroundScope, "first")
         val entered = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
-        first.runtime.onInsertedInbound = { _, _, _ ->
+        first.runtime.onInsertedInbound = { _, _, _, _ ->
             entered.complete(Unit)
             runBlocking { release.await() }
         }
@@ -1927,7 +1934,7 @@ class SessionRuntimeTest {
         })
         val runtime = SessionRuntime(accounts, credentials, store, PeerIdentityStore(database.messageDao()), scope, factory)
         var deliveries = 0
-        runtime.onInsertedInbound = { owner, _, _ ->
+        runtime.onInsertedInbound = { owner, _, _, _ ->
             assertEquals(active.id, owner)
             deliveries++
         }
@@ -1988,6 +1995,11 @@ class SessionRuntimeTest {
             accounts.save(owner)
             credentials.store(owner.id, "secret".toCharArray())
             prepareDuplicate(store, owner.id) // Bootstrap cursor makes the next page AFTER.
+            for (id in listOf("catchup-root", "live-root")) {
+                assertTrue(database.messageDao().createNamedThread(
+                    org.thanosapollo.nema.storage.MessageThreadEntity(owner.id.value, "peer@example.org", MessageKind.CHAT, id, null), id,
+                ))
+            }
         }
         val connections = mutableListOf<RecordingConnection>()
         val factory = SessionConnectionFactory { configuration, _, event ->
@@ -2001,7 +2013,7 @@ class SessionRuntimeTest {
                     val message = IncomingMessageEnvelope(
                         accountId = request.accountId, generation = request.generation,
                         peer = "peer@example.org", sender = "peer@example.org", outbound = false,
-                        originId = null, body = "catchup body", thread = null, messageId = "catchup-wire",
+                        originId = null, body = "catchup body", thread = ThreadRef(ThreadId.require("catchup-root"), ThreadId.require("false-parent")), messageId = "catchup-wire",
                         sentAtEpochMs = 2_000, sentTimeSource = MessageTimeSource.MAM,
                     )
                     return org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope(
@@ -2013,8 +2025,10 @@ class SessionRuntimeTest {
             }
         }
         val runtime = SessionRuntime(accounts, credentials, store, PeerIdentityStore(database.messageDao()), backgroundScope, factory)
-        val notifications = kotlinx.coroutines.channels.Channel<Triple<AccountId, String, String>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
-        runtime.onInsertedInbound = { owner, peer, body -> notifications.trySend(Triple(owner, peer, body)).getOrThrow() }
+        val notifications = kotlinx.coroutines.channels.Channel<Pair<Triple<AccountId, String, String>, ThreadRef?>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        runtime.onInsertedInbound = { owner, peer, body, thread ->
+            notifications.trySend(Triple(owner, peer, body) to thread).getOrThrow()
+        }
         try {
             for (owner in owners) {
                 if (owner == owners.first()) {
@@ -2023,18 +2037,38 @@ class SessionRuntimeTest {
                 } else {
                     assertEquals(ConnectionCommandOutcome.RUNNING, runtime.activate(owner.id))
                 }
-                assertEquals(Triple(owner.id, "peer@example.org", "catchup body"), notifications.receive())
+                assertEquals(Triple(owner.id, "peer@example.org", "catchup body") to ThreadRef(ThreadId.require("catchup-root")), notifications.receive())
                 val current = connections.last()
                 withContext(Dispatchers.IO) {
                     current.emitIncoming(IncomingMessageEnvelope(
                         accountId = owner.id, generation = current.attemptIdentity.generation,
                         peer = "peer@example.org", sender = "peer@example.org", outbound = false,
-                        originId = null, body = "live body", thread = null, messageId = "live-wire",
+                        originId = null, body = "live body", thread = ThreadRef(ThreadId.require("live-root"), ThreadId.require("false-parent")), messageId = "live-wire",
                     ))
                 }
-                assertEquals(Triple(owner.id, "peer@example.org", "live body"), notifications.receive())
+                assertEquals(Triple(owner.id, "peer@example.org", "live body") to ThreadRef(ThreadId.require("live-root")), notifications.receive())
+                val child = ThreadRef(ThreadId.require("live-child"), ThreadId.require("live-root"))
+                withContext(Dispatchers.IO) {
+                    current.emitIncoming(IncomingMessageEnvelope(
+                        accountId = owner.id, generation = current.attemptIdentity.generation,
+                        peer = "peer@example.org", sender = "peer@example.org", outbound = false,
+                        originId = null, body = "child body", thread = child, messageId = "child-wire",
+                    ))
+                }
+                assertEquals(Triple(owner.id, "peer@example.org", "child body") to child, notifications.receive())
+            }
+            // A retired producer cannot classify or notify into the replacement account.
+            val retired = connections.first()
+            withContext(Dispatchers.IO) {
+                retired.emitIncoming(IncomingMessageEnvelope(
+                    accountId = owners.first().id, generation = retired.attemptIdentity.generation,
+                    peer = "peer@example.org", sender = "peer@example.org", outbound = false,
+                    originId = null, body = "retired body", thread = ThreadRef(ThreadId.require("retired-root")),
+                    messageId = "retired-wire",
+                ))
             }
             assertTrue(notifications.tryReceive().isFailure)
+            assertFalse(store.messages(owners.first().id.value).any { it.body == "retired body" })
         } finally { runtime.stop() }
     }
 
@@ -2105,6 +2139,159 @@ class SessionRuntimeTest {
             assertEquals(0, reconnects)
             assertEquals(0, sends)
         } finally { runtime.stop() }
+    }
+
+    @Test fun sharedDirectoryPresenterRuntimeRoomDirectAndMucJourney() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "local-account")
+        val repository = ChatRepository(database)
+        val presenter = DirectChatPresenter(fixture.account, repository, backgroundScope, { _, _ -> true },
+            directoryConnection = fixture.runtime.state,
+            refreshDirectory = fixture.runtime::refreshThreadDirectory,
+            changeDirectory = fixture.runtime::changeThreadDirectory)
+        try {
+            for (kind in listOf(MessageKind.CHAT, MessageKind.GROUPCHAT)) {
+                val peer = if (kind == MessageKind.CHAT) REACTION_PEER else REACTION_ROOM
+                if (kind == MessageKind.GROUPCHAT) repository.markRoom(fixture.account.id.value, peer)
+                val directory = if (kind == MessageKind.CHAT) ThreadDirectoryScope.Direct(fixture.account.bareJid.value, peer)
+                    else ThreadDirectoryScope.Muc(peer, "a".repeat(64))
+                val rows = linkedMapOf<UUID, ThreadDirectoryItem>()
+                val calls = mutableListOf<DirectoryAction>()
+                fixture.connection.directoryRead = { requested ->
+                    assertEquals(peer, when (requested) { is ThreadDirectoryScope.Direct -> requested.b; is ThreadDirectoryScope.Muc -> requested.room })
+                    ThreadDirectorySnapshot(fixture.account.bareJid.value, "example.org", directory, "snapshot", rows.values.toList())
+                }
+                fixture.connection.directoryWrite = { action ->
+                    assertEquals(directory, action.context.scope)
+                    // Real Room intent is committed before the authenticated command boundary.
+                    assertEquals(action.operationId.toString(), fixture.store.sharedThreads.intent(fixture.account.id.value, peer, kind)?.operationId)
+                    calls += action
+                    val previous = rows[action.threadId]
+                    assertEquals(previous?.revision ?: 0, action.revision)
+                    val row = ThreadDirectoryItem(action.threadId, action.title ?: previous!!.title,
+                        action.revision + 1, action.archived ?: previous?.archived ?: false, true)
+                    rows[row.id] = row
+                    ThreadDirectoryMutationResult(fixture.account.bareJid.value, "example.org", directory, "snapshot", rows.size,
+                        action.operationId, false, row)
+                }
+                presenter.selectPeer(peer)
+                val main = presenter.state.first { it.selectedPeer == peer && it.contentStatus == ChatContentStatus.Ready }
+                presenter.directoryState.first { it.mode == DirectoryMode.SHARED }
+                assertFalse(presenter.createSharedNamedThread(main.routeOccurrence, "Stale form",
+                    presenter.directoryState.value.context!!.copy(generation = -1)))
+                assertTrue(presenter.createSharedNamedThread(main.routeOccurrence, "Shared project", presenter.directoryState.value.context!!))
+                val selected = presenter.state.first { it.selectedPeer == peer && it.selectedThread != null && it.recentThreads.any { row -> row.shared != null } && it.contentStatus == ChatContentStatus.Ready }
+                presenter.directoryState.first { it.mode == DirectoryMode.SHARED }
+                assertTrue(database.messageDao().observeThreadTitles(fixture.account.id.value, peer).first().isEmpty())
+                val named = selected.recentThreads.single { it.shared != null }
+                val authored = presenter.directoryState.value.context
+                fixture.store.ingest(IncomingMessage(fixture.account.id.value, "shared-$kind", peer,
+                    if (kind == MessageKind.CHAT) peer else "$peer/member", MessageDirection.INBOUND, kind,
+                    named.thread.id.value, null, "Activity while naming", null, emptyList()))
+                presenter.state.first { it.recentThreads.any { row -> row.thread == named.thread && row.unreadCount == 1 } }
+                // The form's old unread/reply projection must not invalidate its still-current name CAS.
+                assertTrue(presenter.renameNamedThread(selected.routeOccurrence, named, "Renamed", authored))
+                val renamed = presenter.state.first { it.recentThreads.any { row -> row.title == "Renamed" } }
+                assertEquals(named.thread, renamed.recentThreads.single().thread)
+                assertTrue(presenter.archiveNamedThread(renamed.routeOccurrence, renamed.recentThreads.single()))
+                val archived = presenter.state.first { it.recentThreads.singleOrNull()?.shared?.archived == true }
+                assertEquals(named.thread, archived.selectedThread)
+                assertEquals(listOf(0L, 1L, 2L), calls.map { it.revision })
+                assertEquals(3, calls.map { it.operationId }.distinct().size)
+                assertFalse(presenter.createNamedThread(main.routeOccurrence, "Stale"))
+                presenter.closeConversation()
+            }
+        } finally { presenter.close(); fixture.runtime.stop() }
+    }
+
+    @Test fun sharedDirectoryUncertainIntentSurvivesCallerCancellationAndRetriesExactPayload() = runTest {
+        val f = connectedRuntime(backgroundScope, "local-account")
+        try {
+            val directory = ThreadDirectoryScope.Muc(REACTION_ROOM, "a".repeat(64))
+            val action = DirectoryAction(DirectoryContext("example.org", directory, f.connection.attemptIdentity.generation.value), title = "Owned")
+            val entered = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val actions = mutableListOf<DirectoryAction>()
+            f.connection.directoryWrite = { command ->
+                actions += command; entered.complete(Unit); release.await()
+                throw ThreadDirectoryException.Transport()
+            }
+            val caller = launch { f.runtime.changeThreadDirectory(f.account, REACTION_ROOM, MessageKind.GROUPCHAT, action) }
+            entered.await()
+            caller.cancelAndJoin()
+            assertEquals(action.copy(context = action.context.copy(generation = null)), f.store.sharedThreads.intent(f.account.id.value, REACTION_ROOM, MessageKind.GROUPCHAT)?.action(f.account.bareJid.value))
+            release.complete(Unit)
+            f.connection.directoryRead = { ThreadDirectorySnapshot(f.account.bareJid.value, "example.org", directory, "snapshot", emptyList()) }
+            val uncertain = f.runtime.refreshThreadDirectory(f.account, REACTION_ROOM, MessageKind.GROUPCHAT)
+            assertEquals(DirectoryMode.UNCERTAIN, uncertain.mode)
+            f.connection.directoryWrite = { command ->
+                actions += command
+                ThreadDirectoryMutationResult(f.account.bareJid.value, "example.org", directory, "snapshot", 1,
+                    command.operationId, true, ThreadDirectoryItem(command.threadId, command.title!!, 1, false, true))
+            }
+            assertTrue(f.runtime.changeThreadDirectory(f.account, REACTION_ROOM, MessageKind.GROUPCHAT, null).confirmed)
+            assertEquals(listOf(action, action).map { it.copy(context = it.context.copy(generation = null)) }, actions)
+            assertNull(f.store.sharedThreads.intent(f.account.id.value, REACTION_ROOM, MessageKind.GROUPCHAT))
+        } finally { f.runtime.stop() }
+    }
+
+    @Test fun sharedDirectoryOldSessionSnapshotCannotPublishAfterAccountSwitch() = runTest {
+        val f = connectedRuntime(backgroundScope, "old-account")
+        try {
+            val entered = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val row = ThreadDirectoryItem(UUID.randomUUID(), "Old", 1, false, true)
+            f.connection.directoryRead = { directory ->
+                entered.complete(Unit); release.await()
+                ThreadDirectorySnapshot(f.account.bareJid.value, "example.org", directory, "snapshot", listOf(row))
+            }
+            val read = async { f.runtime.refreshThreadDirectory(f.account, REACTION_PEER, MessageKind.CHAT) }
+            entered.await()
+            switchAccount(f, "replacement")
+            release.complete(Unit)
+            assertEquals(DirectoryMode.OFFLINE, read.await().mode)
+            assertTrue(database.sharedThreadDao().rows(f.account.id.value, REACTION_PEER, MessageKind.CHAT).isEmpty())
+            assertTrue(database.sharedThreadDao().rows("replacement", REACTION_PEER, MessageKind.CHAT).isEmpty())
+        } finally { f.runtime.stop() }
+    }
+
+    @Test fun sharedDirectoryStaleGenerationCannotAuthorNewIntentAndRetryConflictRequiresExplicitReadbackSettlement() = runTest {
+        val f = connectedRuntime(backgroundScope, "local-account")
+        try {
+            val directory = ThreadDirectoryScope.Direct(f.account.bareJid.value, REACTION_PEER)
+            val context = DirectoryContext("example.org", directory, f.connection.attemptIdentity.generation.value)
+            val action = DirectoryAction(context, title = "Uncertain")
+            var writes = 0
+            f.connection.directoryWrite = { writes++; throw ThreadDirectoryException.Transport() }
+            assertFalse(f.runtime.changeThreadDirectory(f.account, REACTION_PEER, MessageKind.CHAT,
+                action.copy(context = context.copy(generation = context.generation!! + 1))).confirmed)
+            assertEquals(0, writes)
+            assertNull(f.store.sharedThreads.intent(f.account.id.value, REACTION_PEER, MessageKind.CHAT))
+            assertEquals(DirectoryMode.UNCERTAIN, f.runtime.changeThreadDirectory(f.account, REACTION_PEER, MessageKind.CHAT, action).view.mode)
+            f.connection.directoryWrite = { throw ThreadDirectoryException.Conflict() }
+            assertEquals(DirectoryMode.UNCERTAIN, f.runtime.changeThreadDirectory(f.account, REACTION_PEER, MessageKind.CHAT, null).view.mode)
+            assertNotNull(f.store.sharedThreads.intent(f.account.id.value, REACTION_PEER, MessageKind.CHAT))
+            f.connection.directoryRead = { ThreadDirectorySnapshot(f.account.bareJid.value, "example.org", directory, "snapshot", emptyList()) }
+            assertFalse(f.runtime.keepCurrentThreadDirectory(f.account, REACTION_PEER, MessageKind.CHAT, UUID.randomUUID().toString()))
+            assertTrue(f.runtime.keepCurrentThreadDirectory(f.account, REACTION_PEER, MessageKind.CHAT, action.operationId.toString()))
+            assertNull(f.store.sharedThreads.intent(f.account.id.value, REACTION_PEER, MessageKind.CHAT))
+        } finally { f.runtime.stop() }
+    }
+
+    @Test fun sharedDirectoryFailuresKeepCachedNamesAndOfflineRejectsWrites() = runTest {
+        val f = connectedRuntime(backgroundScope, "local-account")
+        val directory = ThreadDirectoryScope.Direct(f.account.bareJid.value, REACTION_PEER)
+        val row = ThreadDirectoryItem(UUID.randomUUID(), "Shared cached", 1, false, true)
+        f.connection.directoryRead = { ThreadDirectorySnapshot(f.account.bareJid.value, "example.org", directory, "snapshot", listOf(row)) }
+        assertEquals(DirectoryMode.SHARED, f.runtime.refreshThreadDirectory(f.account, REACTION_PEER, MessageKind.CHAT).mode)
+        f.connection.directoryRead = { throw ThreadDirectoryException.Malformed("incomplete") }
+        assertEquals(DirectoryMode.ERROR, f.runtime.refreshThreadDirectory(f.account, REACTION_PEER, MessageKind.CHAT).mode)
+        f.connection.directoryRead = { throw ThreadDirectoryException.Unsupported() }
+        assertEquals(DirectoryMode.LOCAL_ONLY, f.runtime.refreshThreadDirectory(f.account, REACTION_PEER, MessageKind.CHAT).mode)
+        f.runtime.stop()
+        assertEquals(DirectoryMode.OFFLINE, f.runtime.refreshThreadDirectory(f.account, REACTION_PEER, MessageKind.CHAT).mode)
+        assertFalse(f.runtime.changeThreadDirectory(f.account, REACTION_PEER, MessageKind.CHAT,
+            DirectoryAction(DirectoryContext("example.org", directory), title = "Offline")).confirmed)
+        assertEquals("Shared cached", database.sharedThreadDao().rows(f.account.id.value, REACTION_PEER, MessageKind.CHAT).single().title)
     }
 
     private suspend fun connectedRuntime(
@@ -2400,6 +2587,18 @@ class SessionRuntimeTest {
         private val releaseConnection: CompletableDeferred<Unit>?,
         private val event: (SessionEvent) -> Unit,
     ) : SessionConnection {
+        var directoryRead: suspend (ThreadDirectoryScope) -> ThreadDirectorySnapshot = { throw ThreadDirectoryException.Unsupported() }
+        var directoryWrite: suspend (DirectoryAction) -> ThreadDirectoryMutationResult = { throw ThreadDirectoryException.Unsupported() }
+        override suspend fun listThreadDirectory(accountId: AccountId, generation: ConnectionGeneration, directory: ThreadDirectoryScope): ThreadDirectorySnapshot {
+            assertEquals(this.accountId, accountId)
+            assertEquals(attemptIdentity.generation, generation)
+            return directoryRead(directory)
+        }
+        override suspend fun mutateThreadDirectory(accountId: AccountId, generation: ConnectionGeneration, action: DirectoryAction): ThreadDirectoryMutationResult {
+            assertEquals(this.accountId, accountId)
+            assertEquals(attemptIdentity.generation, generation)
+            return directoryWrite(action)
+        }
         override var isUsable = true
         var disconnectCalls = 0
         lateinit var attemptIdentity: SessionAttemptIdentity

@@ -1,5 +1,11 @@
 package org.thanosapollo.nema.xmpp.smack
 
+import org.thanosapollo.nema.xmpp.threads.DirectoryAction
+import org.thanosapollo.nema.xmpp.threads.ThreadDirectoryScope
+import org.thanosapollo.nema.xmpp.threads.ThreadDirectorySnapshot
+import org.thanosapollo.nema.xmpp.threads.ThreadDirectoryMutationResult
+import org.thanosapollo.nema.xmpp.threads.SmackThreadDirectoryClient
+
 import java.io.IOException
 import java.security.cert.CertificateException
 import java.util.concurrent.ConcurrentHashMap
@@ -340,7 +346,7 @@ internal class SmackSessionConnection(
         )
 
     override fun revoke() {
-        if (!revoked.compareAndSet(false, true)) return
+        synchronized(entryGate) { if (!revoked.compareAndSet(false, true)) return }
         rosterLifecycle.retireCurrent()
         roomViewHandoff.retireAllIf {
             stableIdGate.retireAll()
@@ -890,6 +896,37 @@ internal class SmackSessionConnection(
         accountId: AccountId,
         generation: ConnectionGeneration,
     ): List<Jid> = sendExactIq<BlockListIQ>(accountId, generation, BlockListIQ()).blockedJidsCopy
+
+    override suspend fun listThreadDirectory(accountId: AccountId, generation: ConnectionGeneration, directory: ThreadDirectoryScope): ThreadDirectorySnapshot {
+        requireExactAttempt(accountId, generation)
+        return directoryClient(accountId, generation).list(directory).also { requireExactAttempt(accountId, generation) }
+    }
+
+    override suspend fun mutateThreadDirectory(accountId: AccountId, generation: ConnectionGeneration, action: DirectoryAction): ThreadDirectoryMutationResult {
+        requireExactAttempt(accountId, generation)
+        val client = directoryClient(accountId, generation)
+        val result = when {
+            action.revision == 0L -> client.create(action.context.scope, action.threadId, requireNotNull(action.title), action.operationId)
+            action.title != null -> client.rename(action.context.scope, action.threadId, action.revision, action.title, action.operationId)
+            else -> client.archive(action.context.scope, action.threadId, action.revision, requireNotNull(action.archived), action.operationId)
+        }
+        requireExactAttempt(accountId, generation)
+        return result
+    }
+
+    private fun directoryClient(accountId: AccountId, generation: ConnectionGeneration) = SmackThreadDirectoryClient(connection) { request ->
+        val collector = connection.createStanzaCollector(IQReplyFilter(request, connection))
+        try {
+            synchronized(entryGate) {
+                requireExactAttemptLocked(accountId, generation)
+                connection.sendStanza(request)
+            }
+            collector
+        } catch (failure: Exception) {
+            collector.cancel()
+            throw failure
+        }
+    }
 
     private fun <T : IQ> sendExactIq(
         accountId: AccountId,

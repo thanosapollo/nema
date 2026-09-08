@@ -264,8 +264,11 @@ abstract class AccountDao {
         AccountMessageSequenceEntity::class,
         ChatNavigationEntity::class,
         MessageReactionEntity::class,
+        SharedThreadEntity::class,
+        DirectoryIntentEntity::class,
     ],
-    version = 28,
+    views = [ThreadDestination::class],
+    version = 29,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -274,6 +277,7 @@ abstract class AccountDao {
         AutoMigration(from = 5, to = 6),
         AutoMigration(from = 6, to = 7),
         AutoMigration(from = 7, to = 8),
+        AutoMigration(from = 28, to = 29),
     ],
     exportSchema = true,
 )
@@ -282,6 +286,7 @@ abstract class NemaDatabase : RoomDatabase() {
     abstract fun accountDao(): AccountDao
 
     internal abstract fun messageDao(): MessageDao
+    internal abstract fun sharedThreadDao(): SharedThreadDao
 
     companion object {
         fun create(

@@ -1139,6 +1139,192 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
+    fun namedCreationAndRenamePreserveIdentityDraftsAndScopeAfterReopen() = runBlocking {
+        var repository = ChatRepository(database)
+        val direct = requireNotNull(repository.createNamedThread(ACCOUNT, PEER, MessageKind.CHAT, "  Project  "))
+        val duplicate = requireNotNull(repository.createNamedThread(ACCOUNT, PEER, MessageKind.CHAT, "Project"))
+        val room = requireNotNull(repository.createNamedThread(ACCOUNT, OTHER_PEER, MessageKind.GROUPCHAT, "Project"))
+        val otherAccount = requireNotNull(repository.createNamedThread(OTHER_ACCOUNT, PEER, MessageKind.CHAT, "Project"))
+        assertTrue(direct != duplicate && direct != room && direct != otherAccount)
+        assertEquals(null, direct.parentId)
+        val key = DirectConversationKey(ACCOUNT, PEER, direct)
+        repository.saveDraft(key, "  exact draft\n", attachmentUrl = "https://example.org/file", attachmentName = "notes.txt")
+        assertTrue(repository.renameThread(ACCOUNT, PEER, MessageKind.CHAT, direct, "Renamed"))
+        assertTrue(!repository.renameThread(OTHER_ACCOUNT, PEER, MessageKind.CHAT, direct, "Wrong account"))
+        assertTrue(!repository.renameThread(ACCOUNT, OTHER_PEER, MessageKind.CHAT, direct, "Wrong peer"))
+        assertTrue(!repository.renameThread(ACCOUNT, PEER, MessageKind.GROUPCHAT, direct, "Wrong kind"))
+        for (invalid in listOf("", "  ", "line\nbreak", "name\u0000", "x".repeat(81))) {
+            assertEquals(null, repository.createNamedThread(ACCOUNT, PEER, MessageKind.CHAT, invalid))
+            assertTrue(!repository.renameThread(ACCOUNT, PEER, MessageKind.CHAT, direct, invalid))
+        }
+        database.close()
+        database = NemaDatabase.create(context, databaseName)
+        repository = ChatRepository(database)
+        val directRows = repository.observeRecentThreads(ACCOUNT, PEER).first()
+        assertEquals(setOf(direct, duplicate), directRows.map { it.thread }.toSet())
+        assertTrue(directRows.all { it.locallyNamed && it.messageKind == MessageKind.CHAT })
+        assertEquals("Renamed", directRows.single { it.thread == direct }.title)
+        assertEquals("  exact draft\n", repository.observeStoredDraft(key).first().body)
+        assertEquals("notes.txt", repository.observeStoredDraft(key).first().attachmentName)
+        assertEquals(room, repository.observeRecentThreads(ACCOUNT, OTHER_PEER).first().single().thread)
+        assertEquals(otherAccount, repository.observeRecentThreads(OTHER_ACCOUNT, PEER).first().single().thread)
+    }
+
+    @Test
+    fun namedDirectSendAndInboundNeverReplaceMainSession() = runBlocking {
+        val repository = ChatRepository(database)
+        val store = MessageStore(database)
+        val session = store.ensureDirectThreadSession(ACCOUNT, PEER)
+        suspend fun send(suffix: String, thread: ThreadRef? = null, body: String = "outbound body") {
+            requireNotNull(store.composeDirectDraft(
+                ACCOUNT, "operation-$suffix", "local-$suffix", "origin-$suffix", PEER, SELF, body, thread,
+            ))
+        }
+        val named = requireNotNull(repository.createNamedThread(ACCOUNT, PEER, MessageKind.CHAT, "Project"))
+        send("named", named, "  exact project body\n")
+        store.ingest(incoming(ACCOUNT, "named-inbound", "reply body", threadId = named.id.value))
+        assertEquals(session, repository.observeCurrentSession(ACCOUNT, PEER).first())
+        send("main")
+        assertEquals(session.id.value, database.messageDao().message(ACCOUNT, "local-main")?.threadId)
+        assertEquals(named.id.value, database.messageDao().message(ACCOUNT, "local-named")?.threadId)
+        assertEquals(listOf("outbound body"), repository.observeTimeline(ACCOUNT, PEER).first().map { it.body })
+        assertEquals(listOf("  exact project body\n", "reply body"),
+            repository.observeTimeline(DirectConversationKey(ACCOUNT, PEER, named)).first().map { it.body })
+        assertTrue(repository.observeRecentThreads(ACCOUNT, PEER).first().filter { it.locallyNamed }.single().thread == named)
+        // Naming a previously implicit session must also stop it from owning future Main sends.
+        assertTrue(repository.renameThread(ACCOUNT, PEER, MessageKind.CHAT, session, "Former session"))
+        assertEquals(null, repository.observeCurrentSession(ACCOUNT, PEER).first())
+        send("new-main")
+        val rotated = requireNotNull(database.messageDao().message(ACCOUNT, "local-new-main")?.threadId)
+        assertTrue(rotated != session.id.value && rotated != named.id.value)
+        assertTrue(!database.messageDao().isNamedThread(ACCOUNT, PEER, MessageKind.CHAT, rotated))
+        assertEquals(rotated, repository.observeCurrentSession(ACCOUNT, PEER).first()?.id?.value)
+    }
+
+    @Test
+    fun emptyNamedRootRejectsIncomingReparentingWithoutLosingBody() = runBlocking {
+        val repository = ChatRepository(database)
+        val store = MessageStore(database)
+        for (kind in listOf(MessageKind.CHAT, MessageKind.GROUPCHAT)) {
+            val peer = if (kind == MessageKind.CHAT) PEER else OTHER_PEER
+            val root = requireNotNull(repository.createNamedThread(ACCOUNT, peer, kind, "Project"))
+            database.messageDao().insertThread(org.thanosapollo.nema.storage.MessageThreadEntity(
+                ACCOUNT, peer, kind, "existing-parent", null,
+            ))
+            // The lowest writer must not treat a named empty root as an unresolved placeholder.
+            assertEquals(0, database.messageDao().resolveThreadParent(ACCOUNT, peer, kind, root.id.value, "existing-parent"))
+            val result = store.ingest(incoming(ACCOUNT, "$kind-conflict", "  valid body\n", root.id.value, "claimed-parent").copy(
+                peerJid = peer, senderJid = if (kind == MessageKind.CHAT) peer else "$peer/alice", messageKind = kind,
+            ))
+            assertTrue(result.inserted)
+            assertEquals(root, result.storedThread)
+            assertEquals(null, database.messageDao().thread(ACCOUNT, peer, kind, root.id.value)?.parentThreadId)
+            assertEquals(null, database.messageDao().thread(ACCOUNT, peer, kind, "claimed-parent"))
+            assertEquals(null, database.messageDao().message(ACCOUNT, result.messageId)?.parentThreadId)
+            assertEquals(listOf("  valid body\n"), repository.observeTimeline(DirectConversationKey(ACCOUNT, peer, root)).first().map { it.body })
+            assertTrue(repository.observeTimeline(ACCOUNT, peer).first().isEmpty())
+        }
+    }
+
+    @Test
+    fun namedRoomPartitionAndReadSynchronizationLeaveOtherDestinationsUnread() = runBlocking {
+        val repository = ChatRepository(database)
+        val store = MessageStore(database)
+        for (kind in listOf(MessageKind.CHAT, MessageKind.GROUPCHAT)) {
+            val peer = if (kind == MessageKind.CHAT) PEER else OTHER_PEER
+            val named = requireNotNull(repository.createNamedThread(ACCOUNT, peer, kind, "Project"))
+            val other = requireNotNull(repository.createNamedThread(ACCOUNT, peer, kind, "Other"))
+            suspend fun ingest(id: String, thread: String?) = store.ingest(
+                incoming(ACCOUNT, "$kind-$id", "body-$id", threadId = thread).copy(
+                    peerJid = peer, senderJid = if (kind == MessageKind.CHAT) peer else "$peer/alice",
+                    messageKind = kind,
+                ),
+            )
+            ingest("named", named.id.value)
+            ingest("other", other.id.value)
+            ingest("implicit", "legacy-$kind")
+            ingest("main", null)
+            val dao = database.messageDao()
+            dao.markMessagesReadThrough(ACCOUNT, peer, requireNotNull(dao.message(ACCOUNT, "$kind-main")).localSequence)
+            assertTrue(requireNotNull(dao.message(ACCOUNT, "$kind-main")).locallyRead)
+            assertTrue(requireNotNull(dao.message(ACCOUNT, "$kind-implicit")).locallyRead)
+            assertTrue(!requireNotNull(dao.message(ACCOUNT, "$kind-named")).locallyRead)
+            assertTrue(!requireNotNull(dao.message(ACCOUNT, "$kind-other")).locallyRead)
+            ingest("named-later", named.id.value)
+            dao.markMessagesReadThrough(ACCOUNT, peer, requireNotNull(dao.message(ACCOUNT, "$kind-named-later")).localSequence)
+            assertTrue(requireNotNull(dao.message(ACCOUNT, "$kind-named")).locallyRead)
+            assertTrue(!requireNotNull(dao.message(ACCOUNT, "$kind-other")).locallyRead)
+            assertEquals(listOf("body-implicit", "body-main"), repository.observeTimeline(ACCOUNT, peer).first().map { it.body })
+            assertEquals(listOf("body-named", "body-named-later"),
+                repository.observeTimeline(DirectConversationKey(ACCOUNT, peer, named)).first().map { it.body })
+            assertEquals(1, repository.observeRecentThreads(ACCOUNT, peer).first().single { it.thread == other }.unreadCount)
+        }
+    }
+
+    @Test
+    fun presenterCreatesBothKindsAndRejectsStaleDirectoryCommands() = runBlocking {
+        val repository = ChatRepository(database)
+        val presenter = DirectChatPresenter(accountConfiguration(ACCOUNT, SELF), repository, scope, { _, _ -> true })
+        try {
+            for (room in listOf(false, true)) {
+                val peer = if (room) OTHER_PEER else PEER
+                if (room) repository.markRoom(ACCOUNT, peer)
+                presenter.selectPeer(peer)
+                val main = withTimeout(5_000) { presenter.state.first {
+                    it.selectedPeer == peer && it.contentStatus == ChatContentStatus.Ready && it.selectedThread == null
+                } }
+                assertTrue(presenter.createNamedThread(main.routeOccurrence, "Project"))
+                val selected = withTimeout(5_000) { presenter.state.first {
+                    it.selectedPeer == peer && it.selectedThread != null && it.contentStatus == ChatContentStatus.Ready
+                } }
+                val named = selected.recentThreads.single { it.locallyNamed }
+                assertEquals(if (room) MessageKind.GROUPCHAT else MessageKind.CHAT, named.messageKind)
+                assertEquals(null, named.thread.parentId)
+                assertTrue(selected.messages.isEmpty())
+                presenter.selectThreadDestination(selected.routeOccurrence, null)
+                val back = withTimeout(5_000) { presenter.state.first {
+                    it.selectedPeer == peer && it.selectedThread == null && it.contentStatus == ChatContentStatus.Ready
+                } }
+                assertTrue(!presenter.createNamedThread(main.routeOccurrence, "Stale"))
+                assertTrue(!presenter.renameNamedThread(selected.routeOccurrence, named, "Stale", null))
+                presenter.selectThreadDestination(selected.routeOccurrence, named.thread)
+                assertEquals(back.routeOccurrence, presenter.state.value.routeOccurrence)
+                presenter.selectThreadDestination(back.routeOccurrence, named.thread)
+                withTimeout(5_000) { presenter.state.first { it.selectedThread == named.thread } }
+            }
+        } finally { presenter.close() }
+    }
+
+    @Test
+    fun emptyNamedThreadsAreDurableAndNotLimitedByRecentMessages() = runBlocking {
+        val dao = database.messageDao()
+        dao.insertPeer(PeerEntity(ACCOUNT, PEER))
+        repeat(12) { index ->
+            dao.insertThread(org.thanosapollo.nema.storage.MessageThreadEntity(
+                ACCOUNT, PEER, MessageKind.CHAT, "empty-$index", null,
+            ))
+            dao.saveThreadTitle(org.thanosapollo.nema.storage.MessageThreadTitleEntity(
+                ACCOUNT, PEER, MessageKind.CHAT, "empty-$index", "Project $index",
+            ))
+        }
+        database.close()
+        database = NemaDatabase.create(context, databaseName)
+        val directory = ChatRepository(database).observeRecentThreads(ACCOUNT, PEER).first()
+        assertEquals((0 until 12).map { "empty-$it" }.toSet(), directory.map { it.thread.id.value }.toSet())
+    }
+
+    @Test
+    fun namedTopLevelMessagesStayOutOfMainWithoutHidingUnknownBodies() = runBlocking {
+        val store = MessageStore(database)
+        store.ingest(incoming(ACCOUNT, "main", "ordinary body", threadId = "implicit-session"))
+        store.ingest(incoming(ACCOUNT, "project", "project body", threadId = "project"))
+        val repository = ChatRepository(database)
+        assertTrue(repository.renameThread(ACCOUNT, PEER, MessageKind.CHAT,
+            ThreadRef(ThreadId.require("project")), "Project"))
+        assertEquals(listOf("ordinary body"), repository.observeTimeline(ACCOUNT, PEER).first().map { it.body })
+    }
+
+    @Test
     fun recentThreadsKeepLatestTenAndPersistCustomLocalTitle() = runBlocking {
         val store = MessageStore(database)
         repeat(12) { index ->
