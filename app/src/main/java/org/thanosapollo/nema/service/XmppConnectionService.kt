@@ -39,6 +39,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import org.thanosapollo.nema.DatabaseStartup
 import org.thanosapollo.nema.NemaApplication
 import org.thanosapollo.nema.MainActivity
 import org.thanosapollo.nema.R
@@ -1269,8 +1270,6 @@ class XmppConnectionService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        runtime = (application as NemaApplication).sessionRuntime
-        runtime.onInsertedInbound = { accountId, peer, preview, thread -> notifyInbound(accountId, peer, preview, thread) }
         notifications = getSystemService(NotificationManager::class.java)
         commands = SerializedServiceCommandRunner(serviceScope)
         try {
@@ -1295,6 +1294,20 @@ class XmppConnectionService : Service() {
         } catch (_: RuntimeException) {
             notificationChannelReady = false
         }
+        visibilityJob = serviceScope.launch {
+            while (isActive) {
+                delay(VISIBILITY_CHECK_MILLIS)
+                if (foregroundRequired && !canShowNotifications()) shutdownForVisibility()
+            }
+        }
+        val app = application as NemaApplication
+        if (app.databaseStartup.value == DatabaseStartup.READY) attachRuntime(app)
+    }
+
+    private fun attachRuntime(app: NemaApplication) {
+        if (::runtime.isInitialized) return
+        runtime = app.sessionRuntime
+        runtime.onInsertedInbound = { accountId, peer, preview, thread -> notifyInbound(accountId, peer, preview, thread) }
         stateJob = serviceScope.launch {
             runtime.state.collect { state ->
                 sessionOwner.claimTerminal(state, runtime.state.value)?.let { startId ->
@@ -1313,24 +1326,34 @@ class XmppConnectionService : Service() {
                 }
             }
         }
-        visibilityJob = serviceScope.launch {
-            while (isActive) {
-                delay(VISIBILITY_CHECK_MILLIS)
-                if (foregroundRequired && !canShowNotifications()) shutdownForVisibility()
-            }
-        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val app = application as NemaApplication
+        val startup = app.databaseStartup.value
+        if (startup != DatabaseStartup.OPENING && startup != DatabaseStartup.READY) {
+            foregroundRequired = false
+            commands.cancelCurrent()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         visibilityShutdown.supersede()
         latestStartId = startId
         val action = intent?.action ?: ACTION_CONNECT
         val accountId = intent?.getStringExtra(EXTRA_ACCOUNT_ID)
         foregroundRequired = commandRequiresForegroundVisibility(action)
-        if (!foregroundRequired) {
+        if (!foregroundRequired && ::runtime.isInitialized) {
             runtime.invalidatePendingActivation()
         }
         sessionOwner.invalidate()
+        if (action == ACTION_STOP && startup == DatabaseStartup.OPENING) {
+            // There is no runtime yet. Revoke the waiting start without waiting for IO.
+            commands.cancelCurrent()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         if (foregroundRequired) {
             if (!notificationChannelReady || !canShowNotifications()) {
                 shutdownForVisibility()
@@ -1346,7 +1369,17 @@ class XmppConnectionService : Service() {
         commands.submit(startId) { current ->
             runCurrentServiceCommand(
                 current = current,
-                command = {
+                command = command@{
+                    // The serialized, service-owned command retains admission while Room opens.
+                    // Foreground timing is already satisfied; cancellation/replacement revokes
+                    // this wait, and a terminal gate consumes it rather than replaying on Retry.
+                    val ready = app.databaseStartup.first { it != DatabaseStartup.OPENING }
+                    if (!current()) return@command
+                    if (ready != DatabaseStartup.READY) {
+                        stopAfterCommand(startId, current)
+                        return@command
+                    }
+                    attachRuntime(app)
                     when (action) {
                         ACTION_ACTIVATE -> {
                             val id = accountId?.let { runCatching { AccountId.require(it) }.getOrNull() }
@@ -1384,9 +1417,9 @@ class XmppConnectionService : Service() {
         visibilityJob?.cancel()
         visibilityShutdown.supersede()
         sessionOwner.invalidate()
-        runBlocking(Dispatchers.IO) {
+        if (::runtime.isInitialized) runBlocking(Dispatchers.IO) {
             stopServiceRuntime(commands::cancelCurrent, runtime::serviceDestroyed)
-        }
+        } else commands.cancelCurrent()
         serviceScope.cancel()
         super.onDestroy()
     }
@@ -1433,7 +1466,7 @@ class XmppConnectionService : Service() {
         sessionOwner.invalidate()
         failCurrentServiceCommand(
             current = current,
-            stopRuntime = runtime::stop,
+            stopRuntime = { if (::runtime.isInitialized) runtime.stop() },
             removeForeground = { stopForeground(STOP_FOREGROUND_REMOVE) },
             stopService = { stopSelf(startId) },
         )
@@ -1447,7 +1480,7 @@ class XmppConnectionService : Service() {
         serviceScope.launch {
             failCurrentServiceCommand(
                 current = { visibilityShutdown.isCurrent(token) },
-                stopRuntime = runtime::stop,
+                stopRuntime = { if (::runtime.isInitialized) runtime.stop() },
                 removeForeground = { stopForeground(STOP_FOREGROUND_REMOVE) },
                 stopService = { stopSelf(token.ownerStartId) },
             )

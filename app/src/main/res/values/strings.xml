@@ -8,4 +8,14 @@
     <string name="connection_notification_title">Nema connection</string>
     <string name="connection_starting">Starting</string>
     <string name="stop_connection">Stop</string>
+    <string name="database_reset_title">Local database reset required</string>
+    <string name="database_startup_title">Opening Nema</string>
+    <string name="database_reset_warning">This alpha version cannot use your existing local database. Reset permanently deletes account records, messages, drafts, unsent messages, and local-only threads on this device. You will need to add your accounts again. Server archives cannot restore drafts, unsent messages, or local-only threads. Saved credentials and app preferences are not deleted.</string>
+    <string name="database_reset_continue">Reset and continue</string>
+    <string name="database_reset_failed">Reset could not finish. Check available storage and try again. Nema has not started a session.</string>
+    <string name="database_startup_failed">Nema could not open its database. Retry opens it without deleting data. Check available storage and try again.</string>
+    <string name="database_newer">This database was created by a newer Nema version. Install that version or a newer one to continue. Your local data has not been reset.</string>
+    <string name="database_opening">Opening the local database…</string>
+    <string name="database_retry">Retry</string>
+    <string name="database_cancel">Cancel</string>
 </resources>

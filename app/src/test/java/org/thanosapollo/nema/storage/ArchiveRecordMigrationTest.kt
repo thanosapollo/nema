@@ -74,7 +74,7 @@ class ArchiveRecordMigrationTest {
             repeat(2) {
                 NemaDatabase.create(context, name).use { db ->
                     val sql = db.openHelper.writableDatabase
-                    assertEquals(29, sql.version)
+                    assertEquals(30, sql.version)
                     assertEquals(before, snapshot(sql))
                     assertEquals(listOf("control-first" to 0L, "control-last" to 3L), raw(db))
                     assertTrue(raw(db, key.copy(accountId = "b")).isEmpty())
@@ -83,7 +83,7 @@ class ArchiveRecordMigrationTest {
                     sql.query("PRAGMA integrity_check").use { assertTrue(it.moveToFirst()); assertEquals("ok", it.getString(0)) }
                 }
             }
-            migrations.runMigrationsAndValidate(name, 29, true, MessageSchema.MIGRATION_27_28).close()
+            migrations.runMigrationsAndValidate(name, 30, true, MessageSchema.MIGRATION_27_28).close()
             NemaDatabase.create(context, name).use { db ->
                 val store = MessageStore(db)
                 val after = store.applyArchivePage(page(ArchiveDirection.AFTER, "control-last",
@@ -190,7 +190,7 @@ class ArchiveRecordMigrationTest {
             }
             NemaDatabase.create(context, name).use { db ->
                 val store = MessageStore(db)
-                assertEquals(29, db.openHelper.writableDatabase.version)
+                assertEquals(30, db.openHelper.writableDatabase.version)
                 assertTrue(raw(db, oldKey).isEmpty())
                 assertNull(store.archiveCursor(oldKey)?.oldestId)
                 val result = store.applyArchivePage(page(ArchiveDirection.BOOTSTRAP, null,

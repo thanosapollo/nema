@@ -17,7 +17,7 @@ android {
         applicationId = "org.thanosapollo.nema"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
+        versionCode = 4
         versionName = "0.2.0"
 
         // The opt-in network journey must never start NemaApplication against installed data.

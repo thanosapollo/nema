@@ -51,14 +51,14 @@ class ConflictIndexMigrationTest {
                 val db = NemaDatabase.create(context, name)
                 try {
                     val sql = db.openHelper.writableDatabase
-                    assertEquals(29, sql.version)
+                    assertEquals(30, sql.version)
                     assertEquals(before, snapshot(sql))
                     assertEquals(listOf("root"), db.messageDao().mucConflictedEvents("a", listOf("root")))
                     sql.query("PRAGMA foreign_key_check").use { assertFalse(it.moveToFirst()) }
                     sql.query("PRAGMA integrity_check").use { assertTrue(it.moveToFirst()); assertEquals("ok", it.getString(0)) }
                 } finally { db.close() }
             }
-            migrations.runMigrationsAndValidate(name, 29, true, MessageSchema.MIGRATION_26_27, MessageSchema.MIGRATION_27_28).close()
+            migrations.runMigrationsAndValidate(name, 30, true, MessageSchema.MIGRATION_26_27, MessageSchema.MIGRATION_27_28).close()
         } finally { context.deleteDatabase(name) }
     }
 

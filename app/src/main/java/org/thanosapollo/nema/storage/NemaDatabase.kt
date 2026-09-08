@@ -268,7 +268,7 @@ abstract class AccountDao {
         DirectoryIntentEntity::class,
     ],
     views = [ThreadDestination::class],
-    version = 29,
+    version = 30,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -278,6 +278,7 @@ abstract class AccountDao {
         AutoMigration(from = 6, to = 7),
         AutoMigration(from = 7, to = 8),
         AutoMigration(from = 28, to = 29),
+        AutoMigration(from = 29, to = 30),
     ],
     exportSchema = true,
 )
@@ -291,7 +292,7 @@ abstract class NemaDatabase : RoomDatabase() {
     companion object {
         fun create(
             context: Context,
-            databaseName: String = "nema.db",
+            databaseName: String = NEMA_DATABASE_NAME,
         ): NemaDatabase = Room.databaseBuilder(
             context.applicationContext,
             NemaDatabase::class.java,
@@ -319,6 +320,7 @@ abstract class NemaDatabase : RoomDatabase() {
                 MessageSchema.MIGRATION_26_27,
                 MessageSchema.MIGRATION_27_28,
             )
+            .openHelperFactory(preservingOpenHelperFactory)
             .addCallback(MessageSchema.REOPEN_CALLBACK)
             .build()
     }
