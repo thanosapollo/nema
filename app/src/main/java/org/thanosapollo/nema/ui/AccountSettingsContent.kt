@@ -77,7 +77,7 @@ fun AccountSettingsContent(
                 item {
                     SettingsRow(
                         title = "Open Orbot",
-                        supportingText = "Messages and attachments require Tor at 127.0.0.1:9050 and valid TLS. App update checks use direct HTTPS; links opened in a browser follow that browser’s routing.",
+                        supportingText = "Messages and attachments require trusted Orbot at 127.0.0.1:9050. A verified same-onion message connection can use Tor protection without XMPP TLS when the server offers none. Offered TLS must validate; attachments always use HTTPS. App update checks use direct HTTPS; browser links follow the browser’s routing.",
                         onClick = onStartOrbot,
                         modifier = Modifier.testTag("start-orbot"),
                         role = Role.Button,

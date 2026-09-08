@@ -169,8 +169,10 @@ class SmackSessionConnectionFactory : SessionConnectionFactory {
         installNemaRttProviders()
         require(identity.accountId == configuration.id) { "Session account does not match configuration" }
         val policy = AccountTransportPolicy.forAccount(configuration)
-        val torSockets = torSocketsFor(configuration)
-        val connection = XMPPTCPConnection(configurationFor(configuration, torSockets)).apply {
+        val torSockets = torSocketsFor(configuration, identity)
+        val smackConfiguration = configurationFor(configuration, torSockets)
+        val connection = (if (torSockets?.onionEligible == true) OnionXmppConnection(smackConfiguration, torSockets)
+            else XMPPTCPConnection(smackConfiguration)).apply {
             setUseStreamManagement(false)
             setUseStreamManagementResumption(false)
             setParsingExceptionCallback(NemaParsingExceptionCallback)
@@ -188,9 +190,11 @@ class SmackSessionConnectionFactory : SessionConnectionFactory {
     }
 
     companion object {
-        private fun torSocketsFor(configuration: AccountConfiguration): TorSocketFactory? =
+        private fun torSocketsFor(configuration: AccountConfiguration, identity: SessionIdentity =
+            SessionIdentity(configuration.id, ConnectionGeneration.require(1))): TorSocketFactory? =
             if (AccountTransportPolicy.forAccount(configuration) == AccountTransportPolicy.TOR) {
-                TorSocketFactory(configuration.networkEndpoint ?: NetworkEndpoint.create(configuration.serviceDomain.value, 5222))
+                TorSocketFactory(configuration.networkEndpoint ?: NetworkEndpoint.create(configuration.serviceDomain.value, 5222),
+                    owner = identity, serviceDomain = configuration.serviceDomain.value)
             } else null
 
         fun configurationFor(configuration: AccountConfiguration): XMPPTCPConnectionConfiguration =
@@ -200,10 +204,12 @@ class SmackSessionConnectionFactory : SessionConnectionFactory {
             configuration: AccountConfiguration,
             torSockets: TorSocketFactory?,
         ): XMPPTCPConnectionConfiguration {
+            require(torSockets == null || torSockets.matches(configuration)) { "Tor route does not match account endpoint" }
             val builder = XMPPTCPConnectionConfiguration.builder()
                 .setXmppDomain(JidCreate.domainBareFrom(configuration.serviceDomain.value))
                 .setUsernameAndPassword(configuration.authenticationId.value, null)
-                .setSecurityMode(ConnectionConfiguration.SecurityMode.required)
+                .setSecurityMode(if (torSockets?.onionEligible == true) ConnectionConfiguration.SecurityMode.ifpossible
+                    else ConnectionConfiguration.SecurityMode.required)
                 .setHostnameVerifier(
                     XmppDomainCertificateVerifier(configuration.serviceDomain.value),
                 )
@@ -363,13 +369,17 @@ internal class SmackSessionConnection(
     }
 
     override val isUsable: Boolean
-        get() = !revoked.get() && isSmackSessionUsable(
+        get() = !revoked.get() && (connection !is OnionXmppConnection ||
+            connectionListener.currentAttempt()?.let(connection::permitsTransport) == true) && isSmackSessionUsable(
             expectedBareJid = expectedBareJid,
             boundBareJid = connection.user?.asBareJid()?.toString(),
             connected = connection.isConnected,
             authenticated = connection.isAuthenticated,
             disconnectedButResumable = connection.isDisconnectedButSmResumptionPossible,
         )
+
+    override val onionWithoutTls: Boolean
+        get() = connection is OnionXmppConnection && !connection.isSecureConnection && isUsable
 
     override fun revoke() {
         synchronized(entryGate) { if (!revoked.compareAndSet(false, true)) return }
@@ -392,6 +402,7 @@ internal class SmackSessionConnection(
     }
 
     override fun updateAttempt(attempt: SessionAttemptIdentity) {
+        torSockets?.invalidateAttempt()
         connectionListener.updateAttempt(attempt)
     }
 
@@ -1103,15 +1114,21 @@ internal class SmackSessionConnection(
             }
             synchronized(connection) {
                 ensureNotRevoked()
+                if (connection is OnionXmppConnection) connection.beginAttempt(attempt)
+                else torSockets?.beginAttempt(attempt)
                 connection.connect()
             }
-            if (!connection.isSecureConnection) {
+            if (!connection.isSecureConnection &&
+                (connection !is OnionXmppConnection || !connection.permitsTransport(attempt))) {
                 connectionListener.localDisconnect()
                 runCatching { connection.disconnect() }
                 throw SessionFailure(SessionFailureReason.TLS_CERTIFICATE)
             }
             synchronized(connection) {
                 ensureNotRevoked()
+                if (connection is OnionXmppConnection && !connection.permitsTransport(attempt)) {
+                    throw SessionFailure(SessionFailureReason.TLS_CERTIFICATE)
+                }
                 if (credential == null) {
                     connection.login()
                 } else {
@@ -1140,12 +1157,15 @@ internal class SmackSessionConnection(
                 connectionListener.attemptFailed(attempt)
             }
         } catch (failure: CancellationException) {
+            torSockets?.invalidateAttempt()
             connectionListener.attemptFailed(attempt)
             throw failure
         } catch (failure: SessionFailure) {
+            torSockets?.invalidateAttempt()
             connectionListener.attemptFailed(attempt)
             throw failure
         } catch (error: Exception) {
+            torSockets?.invalidateAttempt()
             connectionListener.attemptFailed(attempt)
             val reason = classifySmackFailure(error)
             throw SessionFailure(
@@ -1169,13 +1189,17 @@ internal class SmackSessionConnection(
 
         override fun connectionClosed() {
             rosterLifecycle.retireCurrent()
-            lossNotifier.remoteClosed(SessionFailureReason.NETWORK)
+            lossNotifier.remoteClosed(transportFailureReason(SessionFailureReason.NETWORK))
         }
 
         override fun connectionClosedOnError(error: Exception) {
             rosterLifecycle.retireCurrent()
-            lossNotifier.remoteClosed(classifySmackFailure(error))
+            lossNotifier.remoteClosed(transportFailureReason(classifySmackFailure(error)))
         }
+
+        private fun transportFailureReason(reason: SessionFailureReason): SessionFailureReason =
+            if (connection is OnionXmppConnection && connection.hasIncompleteTlsNegotiation)
+                SessionFailureReason.TLS_CERTIFICATE else reason
 
         fun attemptStarting(attempt: SessionAttemptIdentity) {
             rosterLifecycle.retireCurrent()

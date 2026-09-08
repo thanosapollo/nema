@@ -161,13 +161,16 @@ class TorNetworkBoundaryTest {
 
     @Test fun accountHttpUsesRemoteDnsForClearnetAndRedirectAndUpload() = runBlocking {
         val methods = CopyOnWriteArrayList<String>()
+        val uploads = CopyOnWriteArrayList<Pair<String, ByteArray>>()
         SocksFixture { socket, target ->
             tls(socket).use { secure ->
                 val request = readThrough(secure, "\r\n\r\n")
                 methods += request.substringBefore("\r\n")
                 if (request.startsWith("PUT")) {
                     val length = Regex("(?i)content-length: (\\d+)").find(request)!!.groupValues[1].toInt()
-                    DataInputStream(secure.inputStream).readFully(ByteArray(length))
+                    val body = ByteArray(length)
+                    DataInputStream(secure.inputStream).readFully(body)
+                    uploads += request to body
                 }
                 val reply = if (target.first == "first.invalid") "HTTP/1.1 302 Found\r\nLocation: https://second.invalid/file\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                     else "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
@@ -176,10 +179,24 @@ class TorNetworkBoundaryTest {
         }.use { proxy ->
             transfer(proxy).use { http ->
                 assertArrayEquals("ok".toByteArray(), http.fetch("https://first.invalid/file"))
-                assertTrue(http.put("https://second.invalid/upload", mapOf("Authorization" to "fixture-only"), "bytes".toByteArray()))
+                assertTrue(http.put("https://second.invalid/upload", mapOf("Authorization" to "fixture-only",
+                    "Cookie" to "upload=fixture", "Expires" to "Wed, 09 Sep 2026 00:00:00 GMT"), "bytes".toByteArray(), "application/octet-stream"))
+                for (header in listOf("Host", "Proxy-Authorization")) {
+                    assertTrue(runCatching { http.put("https://second.invalid/upload", mapOf(header to "forbidden"), byteArrayOf(1)) }.isFailure)
+                }
             }
             assertEquals(listOf("first.invalid", "second.invalid", "second.invalid"), proxy.destinations.map { it.first })
             assertEquals(listOf("GET /file HTTP/1.1", "GET /file HTTP/1.1", "PUT /upload HTTP/1.1"), methods.toList())
+            assertEquals(1, uploads.size)
+            val (request, body) = uploads.single()
+            assertArrayEquals("bytes".toByteArray(), body)
+            val headers = request.split("\r\n").drop(1).filter { it.contains(':') }
+                .associate { it.substringBefore(':').lowercase() to it.substringAfter(": ") }
+            assertEquals("fixture-only", headers["authorization"])
+            assertEquals("upload=fixture", headers["cookie"])
+            assertEquals("Wed, 09 Sep 2026 00:00:00 GMT", headers["expires"])
+            assertEquals("application/octet-stream", headers["content-type"])
+            assertNull(headers["proxy-authorization"])
         }
     }
 
@@ -321,7 +338,7 @@ class TorNetworkBoundaryTest {
 
 private fun streamOpen() = "<stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' from='$ONION' id='fixture' version='1.0'>"
 
-private fun readThrough(socket: Socket, ending: String, contains: String = ""): String {
+internal fun readThrough(socket: Socket, ending: String, contains: String = ""): String {
     val result = StringBuilder()
     while (result.length < 16_384) {
         val value = socket.inputStream.read()
@@ -332,7 +349,7 @@ private fun readThrough(socket: Socket, ending: String, contains: String = ""): 
     return result.toString()
 }
 
-private class SocksFixture(
+internal class SocksFixture(
     private val reply: ByteArray = byteArrayOf(5, 0, 0, 1, 127, 0, 0, 1, 0, 0),
     private val beforeGreeting: () -> Unit = {},
     private val serve: (Socket, Pair<String, Int>) -> Unit,

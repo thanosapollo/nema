@@ -26,6 +26,14 @@ class ConnectionStatePresentationTest {
     private val account = AccountId.require("private-account-id")
     private val generation = ConnectionGeneration.require(9)
 
+    @Test fun `Tor protected transport without XMPP TLS remains explicitly visible`() {
+        val status = privacySafeStatus(ConnectionState.Connected(account, generation, onionWithoutTls = true))
+        assertEquals("Connected through Tor · no XMPP TLS", status)
+        assertEquals(status, org.thanosapollo.nema.ui.quietConnectionStatus(status))
+        assertFalse(status.contains(account.value))
+        assertFalse(status.contains("Secure"))
+    }
+
     @Test
     fun `connection status contains no account server or failure detail`() {
         val states = listOf(

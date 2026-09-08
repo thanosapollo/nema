@@ -22,7 +22,8 @@ internal fun isOnionHost(host: String): Boolean =
     host.trimEnd('.').endsWith(".onion", ignoreCase = true)
 
 // Trust boundary: the local process listening here is assumed to be Orbot. SOCKS success does
-// not authenticate Tor or an onion identity. TLS and service-domain certificate checks stay required.
+// not authenticate Tor or an onion identity. Only a validated same-onion XMPP route may omit
+// STARTTLS; offered TLS and all attachment HTTPS still require certificate validation.
 internal fun orbotAddress(): InetSocketAddress =
     InetSocketAddress(InetAddress.getByAddress(byteArrayOf(127, 0, 0, 1)), 9050)
 

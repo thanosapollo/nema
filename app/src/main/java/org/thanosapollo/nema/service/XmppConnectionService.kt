@@ -35,7 +35,6 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -103,7 +102,7 @@ fun privacySafeStatus(state: ConnectionState): String = when (state) {
     is ConnectionState.Disconnected -> "Disconnected"
     is ConnectionState.Switching -> "Switching account"
     is ConnectionState.Connecting -> "Connecting"
-    is ConnectionState.Connected -> "Connected"
+    is ConnectionState.Connected -> if (state.onionWithoutTls) "Connected through Tor · no XMPP TLS" else "Connected"
     is ConnectionState.ReconnectWait -> "Waiting to reconnect"
     is ConnectionState.Disconnecting -> "Disconnecting"
     is ConnectionState.Failed -> when (state.reason) {
@@ -1037,6 +1036,13 @@ class SessionRuntime(
 
     suspend fun serviceDestroyed() = accountCommands.withLock { controller.serviceDestroyed() }
 
+    internal fun requestServiceDestruction(): Job = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+        // Join the account-command queue before onDestroy returns, so a replacement
+        // service cannot overtake cleanup. The application runtime owns completion;
+        // Main must remain free to unwind canceled commands holding this mutex.
+        serviceDestroyed()
+    }
+
     private suspend fun acknowledgeReceiptRequest(
         message: org.thanosapollo.nema.xmpp.transport.IncomingMessageEnvelope,
         result: IngestionResult,
@@ -1417,9 +1423,8 @@ class XmppConnectionService : Service() {
         visibilityJob?.cancel()
         visibilityShutdown.supersede()
         sessionOwner.invalidate()
-        if (::runtime.isInitialized) runBlocking(Dispatchers.IO) {
-            stopServiceRuntime(commands::cancelCurrent, runtime::serviceDestroyed)
-        } else commands.cancelCurrent()
+        commands.cancelCurrent()
+        if (::runtime.isInitialized) runtime.requestServiceDestruction()
         serviceScope.cancel()
         super.onDestroy()
     }
