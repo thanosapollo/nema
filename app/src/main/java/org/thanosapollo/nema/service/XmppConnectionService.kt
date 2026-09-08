@@ -102,7 +102,7 @@ fun privacySafeStatus(state: ConnectionState): String = when (state) {
     is ConnectionState.Disconnected -> "Disconnected"
     is ConnectionState.Switching -> "Switching account"
     is ConnectionState.Connecting -> "Connecting"
-    is ConnectionState.Connected -> "Connected"
+    is ConnectionState.Connected -> if (state.onionWithoutTls) "Connected through Tor · no XMPP TLS" else "Connected"
     is ConnectionState.ReconnectWait -> "Waiting to reconnect"
     is ConnectionState.Disconnecting -> "Disconnecting"
     is ConnectionState.Failed -> when (state.reason) {

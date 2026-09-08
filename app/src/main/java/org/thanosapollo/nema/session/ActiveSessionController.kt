@@ -156,6 +156,7 @@ interface SessionConnection {
         throw ThreadDirectoryException.Unsupported()
 
     val isUsable: Boolean
+    val onionWithoutTls: Boolean get() = false
     fun revoke()
     suspend fun connect(credential: CharArray, attempt: SessionAttemptIdentity)
     suspend fun reconnect(attempt: SessionAttemptIdentity)
@@ -253,6 +254,7 @@ sealed interface ConnectionState {
     data class Connected(
         val accountId: AccountId,
         val generation: ConnectionGeneration,
+        val onionWithoutTls: Boolean = false,
     ) : ConnectionState
     data class ReconnectWait(
         val accountId: AccountId,
@@ -656,7 +658,7 @@ internal class ActiveSessionController(
                 if (!isHealthy(owned, attempt)) {
                     beginReconnectLocked(owned)
                 } else {
-                    publishStateLocked(ConnectionState.Connected(identity.accountId, identity.generation))
+                    publishStateLocked(ConnectionState.Connected(identity.accountId, identity.generation, connection.onionWithoutTls))
                 }
             }
         } catch (failure: CancellationException) {
@@ -828,6 +830,7 @@ internal class ActiveSessionController(
                     publishStateLocked(ConnectionState.Connected(
                         owner.identity.accountId,
                         owner.identity.generation,
+                        owner.connection.onionWithoutTls,
                     ))
                     true
                 }
