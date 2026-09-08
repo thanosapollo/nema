@@ -71,6 +71,10 @@ import org.jxmpp.jid.Jid
 import org.jxmpp.jid.impl.JidCreate
 import org.jxmpp.jid.parts.Resourcepart
 import org.thanosapollo.nema.account.AccountConfiguration
+import org.thanosapollo.nema.account.AccountTransportPolicy
+import org.thanosapollo.nema.account.NetworkEndpoint
+import org.thanosapollo.nema.account.orbotAddress
+import org.thanosapollo.nema.xmpp.httpupload.AccountHttpTransfer
 import org.thanosapollo.nema.session.SessionAttemptIdentity
 import org.thanosapollo.nema.session.SessionConnection
 import org.thanosapollo.nema.session.SessionConnectionFactory
@@ -164,7 +168,9 @@ class SmackSessionConnectionFactory : SessionConnectionFactory {
         installNemaReactionProviders()
         installNemaRttProviders()
         require(identity.accountId == configuration.id) { "Session account does not match configuration" }
-        val connection = XMPPTCPConnection(configurationFor(configuration)).apply {
+        val policy = AccountTransportPolicy.forAccount(configuration)
+        val torSockets = torSocketsFor(configuration)
+        val connection = XMPPTCPConnection(configurationFor(configuration, torSockets)).apply {
             setUseStreamManagement(false)
             setUseStreamManagementResumption(false)
             setParsingExceptionCallback(NemaParsingExceptionCallback)
@@ -175,13 +181,24 @@ class SmackSessionConnectionFactory : SessionConnectionFactory {
             connection = connection,
             authenticationId = configuration.authenticationId.value,
             expectedBareJid = configuration.bareJid.value,
+            torSockets = torSockets,
+            httpTransfer = AccountHttpTransfer(policy),
             event = event,
         )
     }
 
     companion object {
-        fun configurationFor(
+        private fun torSocketsFor(configuration: AccountConfiguration): TorSocketFactory? =
+            if (AccountTransportPolicy.forAccount(configuration) == AccountTransportPolicy.TOR) {
+                TorSocketFactory(configuration.networkEndpoint ?: NetworkEndpoint.create(configuration.serviceDomain.value, 5222))
+            } else null
+
+        fun configurationFor(configuration: AccountConfiguration): XMPPTCPConnectionConfiguration =
+            configurationFor(configuration, torSocketsFor(configuration))
+
+        internal fun configurationFor(
             configuration: AccountConfiguration,
+            torSockets: TorSocketFactory?,
         ): XMPPTCPConnectionConfiguration {
             val builder = XMPPTCPConnectionConfiguration.builder()
                 .setXmppDomain(JidCreate.domainBareFrom(configuration.serviceDomain.value))
@@ -196,6 +213,13 @@ class SmackSessionConnectionFactory : SessionConnectionFactory {
             configuration.networkEndpoint?.let {
                 builder.setHost(it.host)
                 builder.setPort(it.port)
+            }
+            if (torSockets != null) {
+                // This literal suppresses Smack's pre-socket DNS/SRV lookup. The socket adapter
+                // exclusively uses its immutable intended host/port, not this placeholder.
+                builder.setHostAddress(orbotAddress().address)
+                builder.setSocketFactory(torSockets)
+                builder.setDnssecMode(ConnectionConfiguration.DnssecMode.disabled)
             }
             return builder.build()
         }
@@ -263,6 +287,8 @@ internal class SmackSessionConnection(
     private val authenticationId: String,
     private val expectedBareJid: String,
     private val event: (SessionEvent) -> Unit,
+    private val torSockets: TorSocketFactory? = null,
+    private val httpTransfer: AccountHttpTransfer = AccountHttpTransfer(AccountTransportPolicy.DIRECT),
     private val rosterHandoffFactory: (SessionAttemptIdentity) -> RosterAttemptHandoff = { attempt ->
         RosterHandoff(SmackRosterSource(Roster.getInstanceFor(connection)), attempt, event)
     },
@@ -347,6 +373,8 @@ internal class SmackSessionConnection(
 
     override fun revoke() {
         synchronized(entryGate) { if (!revoked.compareAndSet(false, true)) return }
+        torSockets?.close()
+        httpTransfer.close()
         rosterLifecycle.retireCurrent()
         roomViewHandoff.retireAllIf {
             stableIdGate.retireAll()
@@ -651,6 +679,17 @@ internal class SmackSessionConnection(
         }
     }
 
+    override suspend fun fetchHttpFile(
+        accountId: AccountId,
+        generation: ConnectionGeneration,
+        url: String,
+    ): ByteArray? {
+        requireExactAttempt(accountId, generation)
+        val bytes = httpTransfer.fetch(url)
+        requireExactAttempt(accountId, generation)
+        return bytes
+    }
+
     override suspend fun uploadHttpFile(
         accountId: AccountId,
         generation: ConnectionGeneration,
@@ -662,10 +701,14 @@ internal class SmackSessionConnection(
             return@runInterruptible null
         }
         requireExactAttempt(accountId, generation)
-        val url = manager.uploadFile(request.bytes.inputStream(), request.name, request.size)
+        val slot = manager.requestSlot(request.name, request.size, request.mime)
+        requireExactAttempt(accountId, generation)
+        val download = org.thanosapollo.nema.xmpp.httpupload.httpsAttachmentUrl(slot.getUrl.toString())
+            ?: return@runInterruptible null
+        if (!httpTransfer.put(slot.putUrl.toString(), slot.headers, request.bytes, request.mime)) return@runInterruptible null
         requireExactAttempt(accountId, generation)
         UploadedFile(
-            url = url.toString(),
+            url = download,
             name = request.name,
             mime = request.mime,
             size = request.size,
@@ -1104,7 +1147,12 @@ internal class SmackSessionConnection(
             throw failure
         } catch (error: Exception) {
             connectionListener.attemptFailed(attempt)
-            throw SessionFailure(classifySmackFailure(error), error)
+            val reason = classifySmackFailure(error)
+            throw SessionFailure(
+                if (reason == SessionFailureReason.NETWORK && torSockets?.routeFailed == true)
+                    SessionFailureReason.TOR_UNAVAILABLE else reason,
+                error,
+            )
         }
     }
 

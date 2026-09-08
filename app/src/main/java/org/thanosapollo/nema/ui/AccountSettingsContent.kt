@@ -44,6 +44,9 @@ fun AccountSettingsContent(
     onAddAccount: () -> Unit = {},
     onStop: () -> Unit = {},
     onSignOut: () -> Unit = {},
+    torRequired: Boolean = false,
+    onStartOrbot: () -> Unit = {},
+    onRetryTor: () -> Unit = {},
     update: UpdateUiModel? = null,
     onCheckForUpdates: () -> Unit = {},
     onDownloadUpdate: () -> Unit = {},
@@ -68,6 +71,26 @@ fun AccountSettingsContent(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
+                }
+            }
+            if (torRequired) {
+                item {
+                    SettingsRow(
+                        title = "Open Orbot",
+                        supportingText = "Messages and attachments require Tor at 127.0.0.1:9050 and valid TLS. App update checks use direct HTTPS; links opened in a browser follow that browser’s routing.",
+                        onClick = onStartOrbot,
+                        modifier = Modifier.testTag("start-orbot"),
+                        role = Role.Button,
+                    )
+                }
+                item {
+                    SettingsRow(
+                        title = "Retry Tor connection",
+                        supportingText = "Start Orbot first. Nema never retries over a direct connection.",
+                        onClick = onRetryTor,
+                        modifier = Modifier.testTag("retry-tor"),
+                        role = Role.Button,
+                    )
                 }
             }
             item {

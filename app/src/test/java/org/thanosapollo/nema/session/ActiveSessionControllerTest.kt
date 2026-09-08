@@ -38,6 +38,26 @@ import org.thanosapollo.nema.xmpp.transport.SendNotAttemptedException
 @OptIn(ExperimentalCoroutinesApi::class)
 class ActiveSessionControllerTest {
     @Test
+    fun `HTTP downloads cannot cross account switch or retired generation`() = runTest {
+        val factory = FakeFactory()
+        val controller = ActiveSessionController(this, factory, retryWait = {})
+        controller.start(account("first"), "secret".toCharArray())
+        val old = requireNotNull(controller.lifecycle.value.dispatchLease()).identity
+        assertEquals("ok", controller.fetchHttpFile(old.accountId, old.generation, "https://fixture.invalid/a")?.decodeToString())
+        val first = factory.created.single()
+        controller.switchTo(account("second"), "secret".toCharArray()) {}
+        assertTrue(first.revoked)
+        assertTrue(runCatching { controller.fetchHttpFile(old.accountId, old.generation, "https://fixture.invalid/b") }.isFailure)
+        assertEquals(listOf("https://fixture.invalid/a"), first.httpQueries)
+        assertTrue(factory.created.last().httpQueries.isEmpty())
+        val current = requireNotNull(controller.lifecycle.value.dispatchLease()).identity
+        assertEquals("ok", controller.fetchHttpFile(current.accountId, current.generation, "https://fixture.invalid/c")?.decodeToString())
+        controller.stop()
+        assertTrue(runCatching { controller.fetchHttpFile(current.accountId, current.generation, "https://fixture.invalid/d") }.isFailure)
+        assertEquals(listOf("https://fixture.invalid/c"), factory.created.last().httpQueries)
+    }
+
+    @Test
     fun `blocking uses exact account generation and cannot cross a switch`() = runTest {
         val factory = FakeFactory()
         factory.next.blocking = PeerBlockingState(true, listOf("peer@example.org"))
@@ -1648,6 +1668,7 @@ class ActiveSessionControllerTest {
         var blockingStarted: CompletableDeferred<Unit>? = null
         var blockingGate: CompletableDeferred<Unit>? = null
         var blockingResult: PeerBlockingMutationResult? = null
+        val httpQueries = mutableListOf<String>()
         val blockingQueries = mutableListOf<String>()
         val blockingMutations = mutableListOf<Pair<String, Boolean>>()
         var authenticationCalls = 0
@@ -1716,6 +1737,15 @@ class ActiveSessionControllerTest {
             entered()
             sendStarted?.complete(Unit)
             sendGate?.await()
+        }
+
+        override suspend fun fetchHttpFile(
+            accountId: AccountId,
+            generation: org.thanosapollo.nema.xmpp.transport.ConnectionGeneration,
+            url: String,
+        ): ByteArray {
+            httpQueries += url
+            return "ok".encodeToByteArray()
         }
 
         override suspend fun peerBlockingState(

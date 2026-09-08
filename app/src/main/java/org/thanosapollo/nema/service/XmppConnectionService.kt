@@ -109,6 +109,7 @@ fun privacySafeStatus(state: ConnectionState): String = when (state) {
         SessionFailureReason.TLS_CERTIFICATE -> "Secure connection failed"
         SessionFailureReason.AUTHENTICATION -> "Sign-in failed"
         SessionFailureReason.NETWORK -> "Network unavailable"
+        SessionFailureReason.TOR_UNAVAILABLE -> "Tor unavailable — start Orbot, then retry"
         SessionFailureReason.CONFIGURATION -> "Check connection settings"
         SessionFailureReason.RETRY_EXHAUSTED -> "Reconnect failed"
         SessionFailureReason.LOCAL_STORAGE -> "Local storage failed"
@@ -409,8 +410,16 @@ class SessionRuntime(
         )
     }
 
-    suspend fun uploadHttpFile(request: LocalUploadRequest): UploadedFile? {
+    suspend fun fetchHttpFile(expected: SessionIdentity?, url: String): ByteArray? {
         val lease = controller.lifecycle.value.dispatchLease() ?: return null
+        if (lease.identity != expected) return null
+        val bytes = controller.fetchHttpFile(lease.identity.accountId, lease.identity.generation, url)
+        return bytes.takeIf { controller.lifecycle.value.dispatchLease() == lease }
+    }
+
+    suspend fun uploadHttpFile(expected: SessionIdentity?, request: LocalUploadRequest): UploadedFile? {
+        val lease = controller.lifecycle.value.dispatchLease() ?: return null
+        if (lease.identity != expected) return null
         return controller.uploadHttpFile(lease.identity.accountId, lease.identity.generation, request)
     }
 

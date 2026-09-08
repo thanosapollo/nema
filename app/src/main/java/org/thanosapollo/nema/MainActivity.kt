@@ -72,9 +72,9 @@ import org.thanosapollo.nema.ui.theme.AppearanceSpec
 import org.thanosapollo.nema.ui.theme.NemaTheme
 import org.thanosapollo.nema.xmpp.httpupload.cachedAttachment
 import org.thanosapollo.nema.xmpp.httpupload.decodeInlineImage
-import org.thanosapollo.nema.xmpp.httpupload.fetchHttpsBytes
+import org.thanosapollo.nema.xmpp.httpupload.fetchAndCacheAttachment
+import org.thanosapollo.nema.account.AccountTransportPolicy
 import org.thanosapollo.nema.xmpp.httpupload.openCachedAttachment
-import org.thanosapollo.nema.xmpp.httpupload.persistFetchedAttachment
 import androidx.compose.ui.graphics.asImageBitmap
 import org.thanosapollo.nema.xmpp.transport.AccountId
 
@@ -431,6 +431,10 @@ private fun AccountConnectionScreen(
                 keepDirectory = application.sessionRuntime::keepCurrentThreadDirectory,
             )
         }
+        val accountTransport = remember(account) { AccountTransportPolicy.forAccount(account) }
+        val attachmentDir = remember(account.id) {
+            File(context.cacheDir, "attachments/${org.thanosapollo.nema.xmpp.httpupload.attachmentCacheKey(account.id.value)}")
+        }
         val directoryView by presenter.directoryState.collectAsState()
         fun selectDestination(next: PrimaryDestination) {
             destination = selectSessionDestination(next, presenter::closeConversation)
@@ -591,26 +595,31 @@ private fun AccountConnectionScreen(
                             onOpenOwnProfile = { selectDestination(PrimaryDestination.SETTINGS) },
                             onUploadFile = { name, mime, bytes ->
                                 application.sessionRuntime.uploadHttpFile(
+                                    blockingSession,
                                     org.thanosapollo.nema.xmpp.httpupload.LocalUploadRequest(name, mime, bytes),
                                 )
                             },
                             onUseAttachment = { url, _, mime ->
                                 runCatching {
-                                    val dir = File(context.cacheDir, "attachments")
+                                    val dir = attachmentDir
                                     val file = withContext(Dispatchers.IO) {
-                                        persistFetchedAttachment(dir, url, fetch = ::fetchHttpsBytes)
+                                        fetchAndCacheAttachment(dir, url) {
+                                            application.sessionRuntime.fetchHttpFile(blockingSession, it)
+                                        }
                                     }
                                     file != null && openCachedAttachment(context, file, mime)
                                 }.getOrDefault(false)
                             },
                             isAttachmentCached = { url ->
-                                cachedAttachment(File(context.cacheDir, "attachments"), url) != null
+                                cachedAttachment(attachmentDir, url) != null
                             },
                             onLoadInlineImage = { url ->
                                 runCatching {
-                                    val dir = File(context.cacheDir, "attachments")
+                                    val dir = attachmentDir
                                     val file = withContext(Dispatchers.IO) {
-                                        persistFetchedAttachment(dir, url, fetch = ::fetchHttpsBytes)
+                                        fetchAndCacheAttachment(dir, url) {
+                                            application.sessionRuntime.fetchHttpFile(blockingSession, it)
+                                        }
                                     } ?: return@runCatching null
                                     withContext(Dispatchers.IO) { decodeInlineImage(file) }?.asImageBitmap()
                                 }.getOrNull()
@@ -647,6 +656,19 @@ private fun AccountConnectionScreen(
                     PrimaryDestination.SETTINGS -> {
                         AccountSettingsContent(
                             activeAccountId = account.id,
+                            torRequired = accountTransport == AccountTransportPolicy.TOR,
+                            onStartOrbot = {
+                                runCatching {
+                                    val launch = context.packageManager.getLaunchIntentForPackage("org.torproject.android")
+                                        ?: error("Orbot unavailable")
+                                    context.startActivity(launch)
+                                }.onFailure {
+                                    android.widget.Toast.makeText(context, "Install Orbot from orbot.app, then retry", android.widget.Toast.LENGTH_LONG).show()
+                                }
+                            },
+                            onRetryTor = {
+                                context.startForegroundService(XmppConnectionService.activateIntent(context, account.id))
+                            },
                             connectionStatus = privacySafeStatus(connectionState),
                             appearanceScope = appearanceScope,
                             appearance = shellAppearance,

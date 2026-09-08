@@ -60,6 +60,30 @@ class AccountSettingsContentTest {
     val composeRule = createComposeRule()
 
     @Test
+    fun torActionsAreExplicitAndDoNotStartOnComposition() {
+        var opens = 0
+        var retries = 0
+        composeRule.setContent {
+            MaterialTheme {
+                AccountSettingsContent(
+                    activeAccountId = FIRST,
+                    torRequired = true,
+                    connectionStatus = "Tor unavailable — start Orbot, then retry",
+                    onStartOrbot = { opens++ },
+                    onRetryTor = { retries++ },
+                )
+            }
+        }
+        composeRule.onNodeWithText("Tor unavailable — start Orbot, then retry").assertIsDisplayed()
+        assertEquals(0, opens)
+        assertEquals(0, retries)
+        composeRule.onNodeWithTag("start-orbot").assert(hasButtonRole).performClick()
+        composeRule.onNodeWithTag("retry-tor").assert(hasButtonRole).performClick()
+        assertEquals(1, opens)
+        assertEquals(1, retries)
+    }
+
+    @Test
     fun updatesActionsAreVisibleAndInvokeEnabledCallbacksOnce() {
         var checks = 0
         var downloads = 0

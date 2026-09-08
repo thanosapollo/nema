@@ -10,7 +10,7 @@ import java.io.File
 import java.io.InputStream
 import java.net.URI
 import java.security.MessageDigest
-import javax.net.ssl.HttpsURLConnection
+import kotlinx.coroutines.ensureActive
 
 const val MAX_ATTACHMENT_BYTES = 25L * 1024 * 1024
 
@@ -43,6 +43,14 @@ fun storeAttachment(dir: File, url: String, bytes: ByteArray): File? {
         if (!tmp.renameTo(target)) return@runCatching null
         target
     }.getOrNull().also { if (it == null) tmp.delete() }
+}
+
+internal suspend fun fetchAndCacheAttachment(dir: File, url: String, fetch: suspend (String) -> ByteArray?): File? {
+    val safe = httpsAttachmentUrl(url) ?: return null
+    cachedAttachment(dir, safe)?.let { return it }
+    val bytes = fetch(safe) ?: return null
+    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+    return persistFetchedAttachment(dir, safe) { bytes }
 }
 
 fun persistFetchedAttachment(
@@ -80,29 +88,7 @@ internal fun httpsFetchStep(
     return HttpsFetchStep.ReadBody
 }
 
-fun fetchHttpsBytes(url: String, maxBytes: Long = MAX_ATTACHMENT_BYTES): ByteArray? = runCatching {
-    var current = httpsAttachmentUrl(url) ?: return@runCatching null
-    repeat(5) {
-        val connection = (URI(current).toURL().openConnection() as? HttpsURLConnection)
-            ?: return@runCatching null
-        connection.instanceFollowRedirects = false
-        connection.connectTimeout = 15_000
-        connection.readTimeout = 15_000
-        connection.requestMethod = "GET"
-        try {
-            when (val step = httpsFetchStep(current, connection.responseCode, connection.getHeaderField("Location"), connection.contentLengthLong, maxBytes)) {
-                is HttpsFetchStep.Follow -> current = step.url
-                HttpsFetchStep.Reject -> return@runCatching null
-                HttpsFetchStep.ReadBody -> return@runCatching connection.inputStream.use { it.readAtMost(maxBytes) }
-            }
-        } finally {
-            connection.disconnect()
-        }
-    }
-    null
-}.getOrNull()
-
-private fun InputStream.readAtMost(maxBytes: Long): ByteArray? {
+internal fun InputStream.readAtMost(maxBytes: Long): ByteArray? {
     val out = ByteArrayOutputStream()
     val buf = ByteArray(8 * 1024)
     var total = 0L

@@ -83,6 +83,7 @@ enum class SessionFailureReason {
     TLS_CERTIFICATE,
     AUTHENTICATION,
     NETWORK,
+    TOR_UNAVAILABLE,
     CONFIGURATION,
     RETRY_EXHAUSTED,
     LOCAL_STORAGE,
@@ -193,6 +194,11 @@ interface SessionConnection {
         blocked: Boolean,
         entered: () -> Unit,
     ): PeerBlockingMutationResult = PeerBlockingMutationResult.NotAttempted
+    suspend fun fetchHttpFile(
+        accountId: AccountId,
+        generation: ConnectionGeneration,
+        url: String,
+    ): ByteArray? = null
     suspend fun uploadHttpFile(
         accountId: AccountId,
         generation: ConnectionGeneration,
@@ -501,6 +507,12 @@ internal class ActiveSessionController(
             }
         }
     }
+
+    suspend fun fetchHttpFile(
+        accountId: AccountId,
+        generation: ConnectionGeneration,
+        url: String,
+    ): ByteArray? = exactConnection(accountId, generation).fetchHttpFile(accountId, generation, url)
 
     suspend fun uploadHttpFile(
         accountId: AccountId,
