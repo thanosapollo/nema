@@ -17,6 +17,13 @@ automated coverage, but releases may still contain bugs or incomplete UI.
 + [[https://git.thanosapollo.org/nema/releases/][Releases]]
 + [[https://todos.thanosapollo.org/r/nema][Issues]]
 
+* Threads
+
+The first-class thread proof is specified in
+[[file:docs/threads.md][First-class threads]]. It documents Main, named threads in direct and group
+chats, synchronization requirements, and what has actually been demonstrated.
+Shared thread names are experimental work, not a released interoperability claim.
+
 * Requirements
 
 + Android 8.0 (API 26) or newer
