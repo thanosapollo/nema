@@ -10,5 +10,9 @@ subprojects {
     tasks.withType<org.gradle.api.tasks.testing.Test>().configureEach {
         inputs.file(rootProject.file("docs/android-signing-rotation.md"))
             .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
+        // LauncherArtworkTest reads the approved SVGs and all source-set icon variants.
+        inputs.files(rootProject.fileTree("artwork/launcher"), project.fileTree("src") {
+            include("**/res/**/ic_launcher*")
+        }).withPathSensitivity(org.gradle.api.tasks.PathSensitivity.RELATIVE)
     }
 }
