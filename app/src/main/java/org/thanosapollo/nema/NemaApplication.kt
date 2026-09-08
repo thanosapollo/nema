@@ -5,6 +5,12 @@ import java.util.UUID
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import org.thanosapollo.nema.storage.DatabaseCompatibility
+import org.thanosapollo.nema.storage.inspectAlphaDatabase
+import org.thanosapollo.nema.storage.resetAlphaDatabase
 import org.thanosapollo.nema.chat.ChatRepository
 import org.thanosapollo.nema.credentials.AndroidKeystoreCredentialCipher
 import org.thanosapollo.nema.credentials.CredentialVault
@@ -24,7 +30,11 @@ import org.thanosapollo.nema.xmpp.smack.installNemaMamResultProvider
 import org.thanosapollo.nema.xmpp.smack.installNemaMucUserProvider
 import org.thanosapollo.nema.xmpp.smack.installNemaSidProviders
 
-class NemaApplication : Application() {
+internal enum class DatabaseStartup { OPENING, READY, RESET_REQUIRED, RESET_FAILED, FAILED, NEWER }
+
+open class NemaApplication : Application() {
+    private val mutableDatabaseStartup = MutableStateFlow(DatabaseStartup.OPENING)
+    internal val databaseStartup = mutableDatabaseStartup.asStateFlow()
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     val processToken: String = UUID.randomUUID().toString()
     internal val installResumeGate = InstallResumeGate()
@@ -58,20 +68,72 @@ class NemaApplication : Application() {
         installNemaMucUserProvider()
         installNemaMamResultProvider()
         installNemaSidProviders()
-        database = NemaDatabase.create(applicationContext)
-        val accounts = AccountRepository(database.accountDao())
-        chatRepository = ChatRepository(database)
-        peerIdentityStore = PeerIdentityStore(database.messageDao())
         appearanceRepository = AppearanceRepository.create(applicationContext)
         messagingPreferences = MessagingPreferencesRepository.create(applicationContext)
+        retryDatabaseStartup()
+    }
+
+    internal fun retryDatabaseStartup() = applicationScope.launch(Dispatchers.IO) { openDatabase() }
+
+    internal fun resetDatabaseAndContinue() = applicationScope.launch(Dispatchers.IO) { openDatabase(reset = true) }
+
+    @Synchronized
+    private fun openDatabase(reset: Boolean = false) {
+        val previous = mutableDatabaseStartup.value
+        if (previous == DatabaseStartup.READY) return
+        if (reset && previous != DatabaseStartup.RESET_REQUIRED && previous != DatabaseStartup.RESET_FAILED) return
+        mutableDatabaseStartup.value = DatabaseStartup.OPENING
+        if (reset) {
+            // No session, repository observer, or Room handle exists while this gate is closed.
+            try { resetAlphaDatabase(this) } catch (_: Exception) {
+                mutableDatabaseStartup.value = DatabaseStartup.RESET_FAILED
+                return
+            }
+        }
+        try {
+            when (inspectAlphaDatabase(this)) {
+                DatabaseCompatibility.INCOMPATIBLE -> {
+                    mutableDatabaseStartup.value = DatabaseStartup.RESET_REQUIRED
+                    return
+                }
+                DatabaseCompatibility.NEWER -> {
+                    mutableDatabaseStartup.value = DatabaseStartup.NEWER
+                    return
+                }
+                DatabaseCompatibility.COMPATIBLE -> Unit
+            }
+            val opened = NemaDatabase.create(applicationContext)
+            try {
+                // Room is lazy: force validation before any ordinary database/session consumer.
+                opened.openHelper.writableDatabase
+                initializeDatabaseConsumers(opened)
+            } catch (failure: Exception) {
+                opened.close()
+                throw failure
+            }
+            mutableDatabaseStartup.value = DatabaseStartup.READY
+        } catch (_: Exception) {
+            // IO, corruption and unclassified startup failures never grant reset permission.
+            mutableDatabaseStartup.value = DatabaseStartup.FAILED
+        }
+    }
+
+    private fun initializeDatabaseConsumers(opened: NemaDatabase) {
+        database = opened
+        chatRepository = ChatRepository(database)
+        peerIdentityStore = PeerIdentityStore(database.messageDao())
+        sessionRuntime = createSessionRuntime(opened)
+    }
+
+    internal open fun createSessionRuntime(opened: NemaDatabase): SessionRuntime {
         val credentials = CredentialVault(
             NoBackupCredentialBlobStore(applicationContext),
             AndroidKeystoreCredentialCipher(),
         )
-        sessionRuntime = SessionRuntime(
-            accounts = accounts,
+        return SessionRuntime(
+            accounts = AccountRepository(opened.accountDao()),
             credentials = credentials,
-            messages = MessageStore(database),
+            messages = MessageStore(opened),
             peerIdentities = peerIdentityStore,
         )
     }

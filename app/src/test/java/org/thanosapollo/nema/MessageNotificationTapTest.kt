@@ -99,7 +99,10 @@ class MessageNotificationTapTest {
         fun removeTestKeystore() { java.security.Security.removeProvider("NemaTest") }
     }
 
-    private val app get() = ApplicationProvider.getApplicationContext<NemaApplication>()
+    private val app get() = ApplicationProvider.getApplicationContext<NemaApplication>().also { application ->
+        runBlocking { withTimeout(10_000) { application.databaseStartup.first { it != DatabaseStartup.OPENING } } }
+        check(application.databaseStartup.value == DatabaseStartup.READY)
+    }
     private val accountId = AccountId.require("account-a")
 
     private fun seed() {

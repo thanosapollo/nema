@@ -1,0 +1,1871 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 30,
+    "identityHash": "5e8e901ae2a87582117fb5276a3c5e9b",
+    "entities": [
+      {
+        "tableName": "accounts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `bareJid` TEXT NOT NULL, `authenticationId` TEXT NOT NULL, `authorizationId` TEXT, `serviceDomain` TEXT NOT NULL, `networkHost` TEXT, `networkPort` INTEGER, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bareJid",
+            "columnName": "bareJid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authenticationId",
+            "columnName": "authenticationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authorizationId",
+            "columnName": "authorizationId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "serviceDomain",
+            "columnName": "serviceDomain",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "networkHost",
+            "columnName": "networkHost",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "networkPort",
+            "columnName": "networkPort",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "account_reconciliation_state",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `repairKey` TEXT NOT NULL, `status` TEXT NOT NULL, `wallFloorMs` INTEGER NOT NULL, `beforeCount` INTEGER, `afterCount` INTEGER, `matchedCount` INTEGER NOT NULL, `skippedCount` INTEGER NOT NULL, `caughtErrorCount` INTEGER NOT NULL, PRIMARY KEY(`accountId`, `repairKey`), FOREIGN KEY(`accountId`) REFERENCES `accounts`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "repairKey",
+            "columnName": "repairKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "wallFloorMs",
+            "columnName": "wallFloorMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "beforeCount",
+            "columnName": "beforeCount",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "afterCount",
+            "columnName": "afterCount",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "matchedCount",
+            "columnName": "matchedCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "skippedCount",
+            "columnName": "skippedCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "caughtErrorCount",
+            "columnName": "caughtErrorCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId",
+            "repairKey"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "accounts",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "active_account",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`singletonId` INTEGER NOT NULL, `accountId` TEXT NOT NULL, PRIMARY KEY(`singletonId`), FOREIGN KEY(`accountId`) REFERENCES `accounts`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "singletonId",
+            "columnName": "singletonId",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "singletonId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_active_account_accountId",
+            "unique": true,
+            "columnNames": [
+              "accountId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_active_account_accountId` ON `${TABLE_NAME}` (`accountId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "accounts",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "peers",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `jid` TEXT NOT NULL, `displayName` TEXT, `localNickname` TEXT, `rosterName` TEXT, `inRoster` INTEGER NOT NULL DEFAULT 0, `photoMime` TEXT, `photoBytes` BLOB, `photoSha1` TEXT, `vcardFetchedAtMs` INTEGER, `vcardFailureAtMs` INTEGER, `room` INTEGER NOT NULL DEFAULT 0, `lastReadLocalSequence` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`accountId`, `jid`), FOREIGN KEY(`accountId`) REFERENCES `accounts`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "jid",
+            "columnName": "jid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "displayName",
+            "columnName": "displayName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "localNickname",
+            "columnName": "localNickname",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "rosterName",
+            "columnName": "rosterName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "inRoster",
+            "columnName": "inRoster",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "photoMime",
+            "columnName": "photoMime",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "photoBytes",
+            "columnName": "photoBytes",
+            "affinity": "BLOB"
+          },
+          {
+            "fieldPath": "photoSha1",
+            "columnName": "photoSha1",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "vcardFetchedAtMs",
+            "columnName": "vcardFetchedAtMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "vcardFailureAtMs",
+            "columnName": "vcardFailureAtMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "room",
+            "columnName": "room",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "lastReadLocalSequence",
+            "columnName": "lastReadLocalSequence",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId",
+            "jid"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "accounts",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "message_threads",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `peerJid` TEXT NOT NULL, `messageKind` TEXT NOT NULL, `threadId` TEXT NOT NULL, `parentThreadId` TEXT, PRIMARY KEY(`accountId`, `peerJid`, `messageKind`, `threadId`), FOREIGN KEY(`accountId`, `peerJid`) REFERENCES `peers`(`accountId`, `jid`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`accountId`, `peerJid`, `messageKind`, `parentThreadId`) REFERENCES `message_threads`(`accountId`, `peerJid`, `messageKind`, `threadId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerJid",
+            "columnName": "peerJid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "messageKind",
+            "columnName": "messageKind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "threadId",
+            "columnName": "threadId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "parentThreadId",
+            "columnName": "parentThreadId",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId",
+            "peerJid",
+            "messageKind",
+            "threadId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_message_threads_accountId_peerJid",
+            "unique": false,
+            "columnNames": [
+              "accountId",
+              "peerJid"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_message_threads_accountId_peerJid` ON `${TABLE_NAME}` (`accountId`, `peerJid`)"
+          },
+          {
+            "name": "index_message_threads_accountId_peerJid_messageKind_parentThreadId",
+            "unique": false,
+            "columnNames": [
+              "accountId",
+              "peerJid",
+              "messageKind",
+              "parentThreadId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_message_threads_accountId_peerJid_messageKind_parentThreadId` ON `${TABLE_NAME}` (`accountId`, `peerJid`, `messageKind`, `parentThreadId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "peers",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId",
+              "peerJid"
+            ],
+            "referencedColumns": [
+              "accountId",
+              "jid"
+            ]
+          },
+          {
+            "table": "message_threads",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId",
+              "peerJid",
+              "messageKind",
+              "parentThreadId"
+            ],
+            "referencedColumns": [
+              "accountId",
+              "peerJid",
+              "messageKind",
+              "threadId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "direct_thread_sessions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `peerJid` TEXT NOT NULL, `messageKind` TEXT NOT NULL, `threadId` TEXT NOT NULL, PRIMARY KEY(`accountId`, `peerJid`), FOREIGN KEY(`accountId`, `peerJid`) REFERENCES `peers`(`accountId`, `jid`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`accountId`, `peerJid`, `messageKind`, `threadId`) REFERENCES `message_threads`(`accountId`, `peerJid`, `messageKind`, `threadId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerJid",
+            "columnName": "peerJid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "messageKind",
+            "columnName": "messageKind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "threadId",
+            "columnName": "threadId",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId",
+            "peerJid"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_direct_thread_sessions_accountId_peerJid_messageKind_threadId",
+            "unique": false,
+            "columnNames": [
+              "accountId",
+              "peerJid",
+              "messageKind",
+              "threadId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_direct_thread_sessions_accountId_peerJid_messageKind_threadId` ON `${TABLE_NAME}` (`accountId`, `peerJid`, `messageKind`, `threadId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "peers",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId",
+              "peerJid"
+            ],
+            "referencedColumns": [
+              "accountId",
+              "jid"
+            ]
+          },
+          {
+            "table": "message_threads",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId",
+              "peerJid",
+              "messageKind",
+              "threadId"
+            ],
+            "referencedColumns": [
+              "accountId",
+              "peerJid",
+              "messageKind",
+              "threadId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "message_thread_titles",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `peerJid` TEXT NOT NULL, `messageKind` TEXT NOT NULL, `threadId` TEXT NOT NULL, `title` TEXT NOT NULL, PRIMARY KEY(`accountId`, `peerJid`, `messageKind`, `threadId`), FOREIGN KEY(`accountId`, `peerJid`, `messageKind`, `threadId`) REFERENCES `message_threads`(`accountId`, `peerJid`, `messageKind`, `threadId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerJid",
+            "columnName": "peerJid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "messageKind",
+            "columnName": "messageKind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "threadId",
+            "columnName": "threadId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId",
+            "peerJid",
+            "messageKind",
+            "threadId"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "message_threads",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId",
+              "peerJid",
+              "messageKind",
+              "threadId"
+            ],
+            "referencedColumns": [
+              "accountId",
+              "peerJid",
+              "messageKind",
+              "threadId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "messages",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `localMessageId` TEXT NOT NULL, `peerJid` TEXT NOT NULL, `senderJid` TEXT NOT NULL, `direction` TEXT NOT NULL, `messageKind` TEXT NOT NULL, `threadId` TEXT, `parentThreadId` TEXT, `body` TEXT NOT NULL, `localSequence` INTEGER NOT NULL, `archiveOrdinal` INTEGER, `sentAtEpochMs` INTEGER, `sentTimeSource` TEXT, `reconciliationObservedAtMs` INTEGER, `attachmentUrl` TEXT, `attachmentName` TEXT, `attachmentMime` TEXT, `attachmentSize` INTEGER, `replyToId` TEXT, `replyToJid` TEXT, `replyFallbackBody` TEXT, `markable` INTEGER NOT NULL, `markerTargetId` TEXT, `replaceId` TEXT, `correctionTargetMessageId` TEXT, `directSessionTransitionApplied` INTEGER NOT NULL, `liveDeliveryObserved` INTEGER NOT NULL, `unreadEligible` INTEGER NOT NULL DEFAULT 1, `locallyRead` INTEGER NOT NULL DEFAULT 0, `mucMessageId` TEXT, `mucReplaceId` TEXT, `mucClaimState` TEXT NOT NULL DEFAULT 'UNKNOWN', `mucOccupantId` TEXT, `mucOccupantEvidence` TEXT NOT NULL DEFAULT 'UNKNOWN', `mucPayloadState` TEXT NOT NULL DEFAULT 'UNKNOWN', `mucLiveOrderEpoch` TEXT, `mucCorrectionSelected` INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(`accountId`, `localMessageId`), FOREIGN KEY(`accountId`, `peerJid`) REFERENCES `peers`(`accountId`, `jid`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`accountId`, `peerJid`, `messageKind`, `threadId`) REFERENCES `message_threads`(`accountId`, `peerJid`, `messageKind`, `threadId`) ON UPDATE NO ACTION ON DELETE RESTRICT )",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localMessageId",
+            "columnName": "localMessageId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerJid",
+            "columnName": "peerJid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "senderJid",
+            "columnName": "senderJid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "direction",
+            "columnName": "direction",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "messageKind",
+            "columnName": "messageKind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "threadId",
+            "columnName": "threadId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "parentThreadId",
+            "columnName": "parentThreadId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "body",
+            "columnName": "body",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localSequence",
+            "columnName": "localSequence",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "archiveOrdinal",
+            "columnName": "archiveOrdinal",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "sentAtEpochMs",
+            "columnName": "sentAtEpochMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "sentTimeSource",
+            "columnName": "sentTimeSource",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "reconciliationObservedAtMs",
+            "columnName": "reconciliationObservedAtMs",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "attachmentUrl",
+            "columnName": "attachmentUrl",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "attachmentName",
+            "columnName": "attachmentName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "attachmentMime",
+            "columnName": "attachmentMime",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "attachmentSize",
+            "columnName": "attachmentSize",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "replyToId",
+            "columnName": "replyToId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "replyToJid",
+            "columnName": "replyToJid",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "replyFallbackBody",
+            "columnName": "replyFallbackBody",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "markable",
+            "columnName": "markable",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "markerTargetId",
+            "columnName": "markerTargetId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "replaceId",
+            "columnName": "replaceId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "correctionTargetMessageId",
+            "columnName": "correctionTargetMessageId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "directSessionTransitionApplied",
+            "columnName": "directSessionTransitionApplied",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "liveDeliveryObserved",
+            "columnName": "liveDeliveryObserved",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "unreadEligible",
+            "columnName": "unreadEligible",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "1"
+          },
+          {
+            "fieldPath": "locallyRead",
+            "columnName": "locallyRead",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "mucMessageId",
+            "columnName": "mucMessageId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "mucReplaceId",
+            "columnName": "mucReplaceId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "mucClaimState",
+            "columnName": "mucClaimState",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'UNKNOWN'"
+          },
+          {
+            "fieldPath": "mucOccupantId",
+            "columnName": "mucOccupantId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "mucOccupantEvidence",
+            "columnName": "mucOccupantEvidence",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'UNKNOWN'"
+          },
+          {
+            "fieldPath": "mucPayloadState",
+            "columnName": "mucPayloadState",
+            "affinity": "TEXT",
+            "notNull": true,
+            "defaultValue": "'UNKNOWN'"
+          },
+          {
+            "fieldPath": "mucLiveOrderEpoch",
+            "columnName": "mucLiveOrderEpoch",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "mucCorrectionSelected",
+            "columnName": "mucCorrectionSelected",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId",
+            "localMessageId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_messages_accountId_localSequence",
+            "unique": true,
+            "columnNames": [
+              "accountId",
+              "localSequence"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_messages_accountId_localSequence` ON `${TABLE_NAME}` (`accountId`, `localSequence`)"
+          },
+          {
+            "name": "index_messages_accountId_peerJid",
+            "unique": false,
+            "columnNames": [
+              "accountId",
+              "peerJid"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_messages_accountId_peerJid` ON `${TABLE_NAME}` (`accountId`, `peerJid`)"
+          },
+          {
+            "name": "index_messages_accountId_peerJid_messageKind_threadId",
+            "unique": false,
+            "columnNames": [
+              "accountId",
+              "peerJid",
+              "messageKind",
+              "threadId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_messages_accountId_peerJid_messageKind_threadId` ON `${TABLE_NAME}` (`accountId`, `peerJid`, `messageKind`, `threadId`)"
+          },
+          {
+            "name": "index_messages_accountId_correctionTargetMessageId",
+            "unique": false,
+            "columnNames": [
+              "accountId",
+              "correctionTargetMessageId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_messages_accountId_correctionTargetMessageId` ON `${TABLE_NAME}` (`accountId`, `correctionTargetMessageId`)"
+          },
+          {
+            "name": "index_messages_accountId_peerJid_senderJid_mucReplaceId",
+            "unique": false,
+            "columnNames": [
+              "accountId",
+              "peerJid",
+              "senderJid",
+              "mucReplaceId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_messages_accountId_peerJid_senderJid_mucReplaceId` ON `${TABLE_NAME}` (`accountId`, `peerJid`, `senderJid`, `mucReplaceId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "peers",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId",
+              "peerJid"
+            ],
+            "referencedColumns": [
+              "accountId",
+              "jid"
+            ]
+          },
+          {
+            "table": "message_threads",
+            "onDelete": "RESTRICT",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId",
+              "peerJid",
+              "messageKind",
+              "threadId"
+            ],
+            "referencedColumns": [
+              "accountId",
+              "peerJid",
+              "messageKind",
+              "threadId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "archive_message_positions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `archiveAuthority` TEXT NOT NULL, `archiveScope` TEXT NOT NULL, `archiveOrdinal` INTEGER NOT NULL, `messageId` TEXT NOT NULL, PRIMARY KEY(`accountId`, `archiveAuthority`, `archiveScope`, `archiveOrdinal`), FOREIGN KEY(`accountId`, `messageId`) REFERENCES `messages`(`accountId`, `localMessageId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "archiveAuthority",
+            "columnName": "archiveAuthority",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "archiveScope",
+            "columnName": "archiveScope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "archiveOrdinal",
+            "columnName": "archiveOrdinal",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "messageId",
+            "columnName": "messageId",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId",
+            "archiveAuthority",
+            "archiveScope",
+            "archiveOrdinal"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_archive_message_positions_accountId_archiveAuthority_archiveScope_messageId",
+            "unique": true,
+            "columnNames": [
+              "accountId",
+              "archiveAuthority",
+              "archiveScope",
+              "messageId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_archive_message_positions_accountId_archiveAuthority_archiveScope_messageId` ON `${TABLE_NAME}` (`accountId`, `archiveAuthority`, `archiveScope`, `messageId`)"
+          },
+          {
+            "name": "index_archive_message_positions_accountId_messageId",
+            "unique": false,
+            "columnNames": [
+              "accountId",
+              "messageId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_archive_message_positions_accountId_messageId` ON `${TABLE_NAME}` (`accountId`, `messageId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "messages",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId",
+              "messageId"
+            ],
+            "referencedColumns": [
+              "accountId",
+              "localMessageId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "archive_record_positions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `archiveAuthority` TEXT NOT NULL, `archiveScope` TEXT NOT NULL, `resultId` TEXT NOT NULL, `archiveOrdinal` INTEGER NOT NULL, PRIMARY KEY(`accountId`, `archiveAuthority`, `archiveScope`, `resultId`), FOREIGN KEY(`accountId`) REFERENCES `accounts`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "archiveAuthority",
+            "columnName": "archiveAuthority",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "archiveScope",
+            "columnName": "archiveScope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "resultId",
+            "columnName": "resultId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "archiveOrdinal",
+            "columnName": "archiveOrdinal",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId",
+            "archiveAuthority",
+            "archiveScope",
+            "resultId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_archive_record_positions_accountId_archiveAuthority_archiveScope_archiveOrdinal",
+            "unique": true,
+            "columnNames": [
+              "accountId",
+              "archiveAuthority",
+              "archiveScope",
+              "archiveOrdinal"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_archive_record_positions_accountId_archiveAuthority_archiveScope_archiveOrdinal` ON `${TABLE_NAME}` (`accountId`, `archiveAuthority`, `archiveScope`, `archiveOrdinal`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "accounts",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "trusted_identity_aliases",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `kind` TEXT NOT NULL, `authority` TEXT NOT NULL, `value` TEXT NOT NULL, `messageId` TEXT, `status` TEXT NOT NULL, PRIMARY KEY(`accountId`, `kind`, `authority`, `value`), FOREIGN KEY(`accountId`, `messageId`) REFERENCES `messages`(`accountId`, `localMessageId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authority",
+            "columnName": "authority",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "value",
+            "columnName": "value",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "messageId",
+            "columnName": "messageId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId",
+            "kind",
+            "authority",
+            "value"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_trusted_identity_aliases_accountId_messageId",
+            "unique": false,
+            "columnNames": [
+              "accountId",
+              "messageId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_trusted_identity_aliases_accountId_messageId` ON `${TABLE_NAME}` (`accountId`, `messageId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "messages",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId",
+              "messageId"
+            ],
+            "referencedColumns": [
+              "accountId",
+              "localMessageId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "identity_conflicts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `kind` TEXT NOT NULL, `authority` TEXT NOT NULL, `value` TEXT NOT NULL, `firstMessageId` TEXT NOT NULL, `secondMessageId` TEXT NOT NULL, `detectedAtSequence` INTEGER NOT NULL, PRIMARY KEY(`accountId`, `kind`, `authority`, `value`, `firstMessageId`, `secondMessageId`), FOREIGN KEY(`accountId`, `firstMessageId`) REFERENCES `messages`(`accountId`, `localMessageId`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`accountId`, `secondMessageId`) REFERENCES `messages`(`accountId`, `localMessageId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "kind",
+            "columnName": "kind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authority",
+            "columnName": "authority",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "value",
+            "columnName": "value",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "firstMessageId",
+            "columnName": "firstMessageId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "secondMessageId",
+            "columnName": "secondMessageId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "detectedAtSequence",
+            "columnName": "detectedAtSequence",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId",
+            "kind",
+            "authority",
+            "value",
+            "firstMessageId",
+            "secondMessageId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_identity_conflicts_accountId_firstMessageId",
+            "unique": false,
+            "columnNames": [
+              "accountId",
+              "firstMessageId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_identity_conflicts_accountId_firstMessageId` ON `${TABLE_NAME}` (`accountId`, `firstMessageId`)"
+          },
+          {
+            "name": "index_identity_conflicts_accountId_secondMessageId",
+            "unique": false,
+            "columnNames": [
+              "accountId",
+              "secondMessageId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_identity_conflicts_accountId_secondMessageId` ON `${TABLE_NAME}` (`accountId`, `secondMessageId`)"
+          },
+          {
+            "name": "index_identity_conflicts_accountId_firstMessageId_kind",
+            "unique": false,
+            "columnNames": [
+              "accountId",
+              "firstMessageId",
+              "kind"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_identity_conflicts_accountId_firstMessageId_kind` ON `${TABLE_NAME}` (`accountId`, `firstMessageId`, `kind`)"
+          },
+          {
+            "name": "index_identity_conflicts_accountId_secondMessageId_kind",
+            "unique": false,
+            "columnNames": [
+              "accountId",
+              "secondMessageId",
+              "kind"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_identity_conflicts_accountId_secondMessageId_kind` ON `${TABLE_NAME}` (`accountId`, `secondMessageId`, `kind`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "messages",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId",
+              "firstMessageId"
+            ],
+            "referencedColumns": [
+              "accountId",
+              "localMessageId"
+            ]
+          },
+          {
+            "table": "messages",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId",
+              "secondMessageId"
+            ],
+            "referencedColumns": [
+              "accountId",
+              "localMessageId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "message_outbox",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `operationId` TEXT NOT NULL, `messageId` TEXT NOT NULL, `originId` TEXT NOT NULL, `status` TEXT NOT NULL, `generation` INTEGER, `attempt` INTEGER NOT NULL, `failureReason` TEXT, `receiptStage` TEXT, PRIMARY KEY(`accountId`, `operationId`), FOREIGN KEY(`accountId`, `messageId`) REFERENCES `messages`(`accountId`, `localMessageId`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operationId",
+            "columnName": "operationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "messageId",
+            "columnName": "messageId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "originId",
+            "columnName": "originId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "generation",
+            "columnName": "generation",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "attempt",
+            "columnName": "attempt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "failureReason",
+            "columnName": "failureReason",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "receiptStage",
+            "columnName": "receiptStage",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId",
+            "operationId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_message_outbox_accountId_messageId",
+            "unique": true,
+            "columnNames": [
+              "accountId",
+              "messageId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_message_outbox_accountId_messageId` ON `${TABLE_NAME}` (`accountId`, `messageId`)"
+          },
+          {
+            "name": "index_message_outbox_accountId_originId",
+            "unique": true,
+            "columnNames": [
+              "accountId",
+              "originId"
+            ],
+            "orders": [],
+            "createSql": "CREATE UNIQUE INDEX IF NOT EXISTS `index_message_outbox_accountId_originId` ON `${TABLE_NAME}` (`accountId`, `originId`)"
+          },
+          {
+            "name": "index_message_outbox_accountId_status",
+            "unique": false,
+            "columnNames": [
+              "accountId",
+              "status"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_message_outbox_accountId_status` ON `${TABLE_NAME}` (`accountId`, `status`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "messages",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId",
+              "messageId"
+            ],
+            "referencedColumns": [
+              "accountId",
+              "localMessageId"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "archive_cursors",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `archiveAuthority` TEXT NOT NULL, `scope` TEXT NOT NULL, `oldestId` TEXT, `newestId` TEXT, `hasEarlier` INTEGER NOT NULL, `retryableError` TEXT, `oldestOrdinal` INTEGER, `newestOrdinal` INTEGER, PRIMARY KEY(`accountId`, `archiveAuthority`, `scope`), FOREIGN KEY(`accountId`) REFERENCES `accounts`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "archiveAuthority",
+            "columnName": "archiveAuthority",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scope",
+            "columnName": "scope",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "oldestId",
+            "columnName": "oldestId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "newestId",
+            "columnName": "newestId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "hasEarlier",
+            "columnName": "hasEarlier",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "retryableError",
+            "columnName": "retryableError",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "oldestOrdinal",
+            "columnName": "oldestOrdinal",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "newestOrdinal",
+            "columnName": "newestOrdinal",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId",
+            "archiveAuthority",
+            "scope"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "accounts",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "message_drafts",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `peerJid` TEXT NOT NULL, `messageKind` TEXT NOT NULL, `threadKey` TEXT NOT NULL, `body` TEXT NOT NULL, `replyToId` TEXT, `replyToJid` TEXT, `replyFallbackBody` TEXT, `replyFallbackSender` TEXT, `attachmentUrl` TEXT, `attachmentName` TEXT, `attachmentMime` TEXT, `attachmentSize` INTEGER, PRIMARY KEY(`accountId`, `peerJid`, `messageKind`, `threadKey`), FOREIGN KEY(`accountId`, `peerJid`) REFERENCES `peers`(`accountId`, `jid`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerJid",
+            "columnName": "peerJid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "messageKind",
+            "columnName": "messageKind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "threadKey",
+            "columnName": "threadKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "body",
+            "columnName": "body",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "replyToId",
+            "columnName": "replyToId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "replyToJid",
+            "columnName": "replyToJid",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "replyFallbackBody",
+            "columnName": "replyFallbackBody",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "replyFallbackSender",
+            "columnName": "replyFallbackSender",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "attachmentUrl",
+            "columnName": "attachmentUrl",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "attachmentName",
+            "columnName": "attachmentName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "attachmentMime",
+            "columnName": "attachmentMime",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "attachmentSize",
+            "columnName": "attachmentSize",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId",
+            "peerJid",
+            "messageKind",
+            "threadKey"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_message_drafts_accountId_peerJid",
+            "unique": false,
+            "columnNames": [
+              "accountId",
+              "peerJid"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_message_drafts_accountId_peerJid` ON `${TABLE_NAME}` (`accountId`, `peerJid`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "peers",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId",
+              "peerJid"
+            ],
+            "referencedColumns": [
+              "accountId",
+              "jid"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "account_message_sequences",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `nextValue` INTEGER NOT NULL, PRIMARY KEY(`accountId`), FOREIGN KEY(`accountId`) REFERENCES `accounts`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nextValue",
+            "columnName": "nextValue",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "accounts",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "chat_navigation",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `peerJid` TEXT NOT NULL, `threadId` TEXT, `parentThreadId` TEXT, PRIMARY KEY(`accountId`), FOREIGN KEY(`accountId`) REFERENCES `accounts`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerJid",
+            "columnName": "peerJid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "threadId",
+            "columnName": "threadId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "parentThreadId",
+            "columnName": "parentThreadId",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "accounts",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "message_reactions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `peerJid` TEXT NOT NULL, `senderBareJid` TEXT NOT NULL, `targetKey` TEXT NOT NULL, `localMessageId` TEXT, `wireTargetId` TEXT NOT NULL, `emojis` TEXT NOT NULL, `updatedAtMs` INTEGER NOT NULL, `revision` INTEGER NOT NULL DEFAULT 1, PRIMARY KEY(`accountId`, `peerJid`, `senderBareJid`, `targetKey`), FOREIGN KEY(`accountId`) REFERENCES `accounts`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerJid",
+            "columnName": "peerJid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "senderBareJid",
+            "columnName": "senderBareJid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "targetKey",
+            "columnName": "targetKey",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localMessageId",
+            "columnName": "localMessageId",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "wireTargetId",
+            "columnName": "wireTargetId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "emojis",
+            "columnName": "emojis",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "updatedAtMs",
+            "columnName": "updatedAtMs",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "revision",
+            "columnName": "revision",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "1"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId",
+            "peerJid",
+            "senderBareJid",
+            "targetKey"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_message_reactions_accountId_peerJid",
+            "unique": false,
+            "columnNames": [
+              "accountId",
+              "peerJid"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_message_reactions_accountId_peerJid` ON `${TABLE_NAME}` (`accountId`, `peerJid`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "accounts",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "shared_threads",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `peerJid` TEXT NOT NULL, `messageKind` TEXT NOT NULL, `threadId` TEXT NOT NULL, `authority` TEXT NOT NULL, `incarnation` TEXT NOT NULL, `title` TEXT NOT NULL, `revision` INTEGER NOT NULL, `archived` INTEGER NOT NULL, `canModify` INTEGER NOT NULL, `retired` INTEGER NOT NULL, PRIMARY KEY(`accountId`, `peerJid`, `messageKind`, `threadId`), FOREIGN KEY(`accountId`) REFERENCES `accounts`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerJid",
+            "columnName": "peerJid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "messageKind",
+            "columnName": "messageKind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "threadId",
+            "columnName": "threadId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authority",
+            "columnName": "authority",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "incarnation",
+            "columnName": "incarnation",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "revision",
+            "columnName": "revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "archived",
+            "columnName": "archived",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "canModify",
+            "columnName": "canModify",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "retired",
+            "columnName": "retired",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId",
+            "peerJid",
+            "messageKind",
+            "threadId"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "accounts",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "thread_directory_intents",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`accountId` TEXT NOT NULL, `peerJid` TEXT NOT NULL, `messageKind` TEXT NOT NULL, `authority` TEXT NOT NULL, `incarnation` TEXT NOT NULL, `threadId` TEXT NOT NULL, `operationId` TEXT NOT NULL, `revision` INTEGER NOT NULL, `title` TEXT, `archived` INTEGER, PRIMARY KEY(`accountId`, `peerJid`, `messageKind`), FOREIGN KEY(`accountId`) REFERENCES `accounts`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "accountId",
+            "columnName": "accountId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "peerJid",
+            "columnName": "peerJid",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "messageKind",
+            "columnName": "messageKind",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "authority",
+            "columnName": "authority",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "incarnation",
+            "columnName": "incarnation",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "threadId",
+            "columnName": "threadId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "operationId",
+            "columnName": "operationId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "revision",
+            "columnName": "revision",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "archived",
+            "columnName": "archived",
+            "affinity": "INTEGER"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "accountId",
+            "peerJid",
+            "messageKind"
+          ]
+        },
+        "foreignKeys": [
+          {
+            "table": "accounts",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "accountId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      }
+    ],
+    "views": [
+      {
+        "viewName": "thread_destinations",
+        "createSql": "CREATE VIEW `${VIEW_NAME}` AS SELECT s.accountId, s.peerJid, s.messageKind, s.threadId, s.title,\n      s.authority, s.incarnation, s.revision, s.archived, s.canModify, s.retired, l.title AS localAlias\n    FROM shared_threads AS s LEFT JOIN message_thread_titles AS l\n      ON l.accountId = s.accountId AND l.peerJid = s.peerJid AND l.messageKind = s.messageKind AND l.threadId = s.threadId\n    UNION ALL\n    SELECT l.accountId, l.peerJid, l.messageKind, l.threadId, l.title,\n      NULL AS authority, NULL AS incarnation, 0 AS revision, 0 AS archived, 0 AS canModify, 0 AS retired, l.title AS localAlias\n    FROM message_thread_titles AS l WHERE NOT EXISTS (\n      SELECT 1 FROM shared_threads AS s WHERE s.accountId = l.accountId AND s.peerJid = l.peerJid\n        AND s.messageKind = l.messageKind AND s.threadId = l.threadId)"
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '5e8e901ae2a87582117fb5276a3c5e9b')"
+    ]
+  }
+}

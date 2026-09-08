@@ -109,7 +109,11 @@ class MainActivity : ComponentActivity() {
                 AppPaletteAuthority((application as NemaApplication).appearanceRepository)
             }
             NemaTheme(themeAuthority.palette) {
-                AccountConnectionScreen(
+                val app = application as NemaApplication
+                val startup by app.databaseStartup.collectAsState()
+                if (startup != DatabaseStartup.READY) {
+                    DatabaseStartupScreen(startup, { app.resetDatabaseAndContinue() }, { app.retryDatabaseStartup() }, ::finish)
+                } else AccountConnectionScreen(
                     restoreChatRouteOnStart = restoreChatRoute,
                     activityResumed = activityResumed.value,
                     themeAuthority = themeAuthority,
