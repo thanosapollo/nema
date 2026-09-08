@@ -7,7 +7,7 @@ import org.thanosapollo.nema.account.*
 import org.thanosapollo.nema.xmpp.transport.AccountId
 
 @org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
-@org.robolectric.annotation.Config(sdk = [34], application = android.app.Application::class)
+@org.robolectric.annotation.Config(sdk = [26, 34], application = android.app.Application::class)
 class OnionIdentityTest {
     @Test fun strictV3ChecksumVersionAndCanonicalIdentity() {
         assertEquals(VALID_ONION, canonicalOnionIdentity(VALID_ONION.uppercase(java.util.Locale.ROOT)))

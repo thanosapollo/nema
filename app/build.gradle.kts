@@ -69,6 +69,12 @@ room {
     schemaDirectory("$projectDir/schemas")
 }
 
+// JVM tests otherwise accept duplicate classes/resources that Android cannot package.
+// Use AGP's checks on the app runtime (not Robolectric's separate dependency graph).
+tasks.matching { it.name == "testDebugUnitTest" }.configureEach {
+    dependsOn("checkDebugDuplicateClasses", "mergeDebugJavaResource")
+}
+
 configurations.configureEach {
     exclude(group = "xpp3", module = "xpp3")
 }
@@ -78,7 +84,11 @@ dependencies {
     implementation("androidx.room:room-ktx:2.8.4")
     kapt("androidx.room:room-compiler:2.8.4")
 
-    implementation("org.igniterealtime.smack:smack-android:4.4.8")
+    implementation("org.igniterealtime.smack:smack-android:4.4.8") {
+        // Nema does not implement OpenPGP. Its unused PGPainless 0.1 stack brings
+        // bcprov-jdk15on alongside our SHA3 provider; do not mix those families.
+        exclude(group = "org.igniterealtime.smack", module = "smack-openpgp")
+    }
     implementation("org.igniterealtime.smack:smack-tcp:4.4.8")
     implementation("org.igniterealtime.smack:smack-im:4.4.8")
     implementation("org.igniterealtime.smack:smack-extensions:4.4.8")
