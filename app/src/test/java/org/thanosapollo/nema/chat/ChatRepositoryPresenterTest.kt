@@ -2421,6 +2421,8 @@ class ChatRepositoryPresenterTest {
                 DraftSnapshot(DirectConversationKey(ACCOUNT, PEER), "answer", 1, reply = reply),
             ).await(),
         )
+        // Draft persistence does not await the independently persisted route.
+        withTimeout(5_000) { repository.observeRoute(ACCOUNT).first { it == ChatRoute(PEER) } }
         first.close()
         var sent: DraftSnapshot? = null
         val restored = DirectChatPresenter(
@@ -2431,7 +2433,9 @@ class ChatRepositoryPresenterTest {
             restoreRouteOnStart = true,
         )
 
-        val state = restored.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == PEER && it.draft == "answer" }
+        val state = withTimeout(5_000) {
+            restored.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == PEER && it.draft == "answer" }
+        }
         assertEquals(reply, state.draftReply)
         assertTrue(
             restored.sendDraft(

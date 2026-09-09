@@ -2631,10 +2631,9 @@ class ConversationContentTest {
     }
 
     @Test
-    fun pendingThreadSendDisablesNormalSendForSameRevision() {
+    fun heldSendDisablesAnotherSendForSameRevision() {
         val threadResult = CompletableDeferred<Boolean>()
         var normalSends = 0
-        var threadSends = 0
         composeRule.setContent {
             MaterialTheme {
                 ConversationContent(
@@ -2645,10 +2644,6 @@ class ConversationContentTest {
                     onDraftChange = { CompletableDeferred(true) },
                     onSend = {
                         normalSends += 1
-                        CompletableDeferred(true)
-                    },
-                    onSendAsNewThread = {
-                        threadSends += 1
                         threadResult
                     },
                 )
@@ -2661,8 +2656,7 @@ class ConversationContentTest {
         composeRule.onNodeWithContentDescription("Send").performTouchInput { click() }
         composeRule.waitForIdle()
 
-        assertEquals(1, threadSends)
-        assertEquals(0, normalSends)
+        assertEquals(1, normalSends)
     }
 
     @Test
@@ -2790,7 +2784,7 @@ class ConversationContentTest {
     }
 
     @Test
-    fun longPressSendOffersExplicitSendAsThreadAction() {
+    fun holdingSendUsesOrdinaryActionWithoutHiddenNavigation() {
         var threaded: DraftSnapshot? = null
         composeRule.setContent {
             MaterialTheme {
@@ -2800,8 +2794,7 @@ class ConversationContentTest {
                     onSelectPeer = { true },
                     onCloseConversation = {},
                     onDraftChange = { CompletableDeferred(true) },
-                    onSend = { CompletableDeferred(true) },
-                    onSendAsNewThread = { snapshot ->
+                    onSend = { snapshot ->
                         threaded = snapshot
                         CompletableDeferred(true)
                     },

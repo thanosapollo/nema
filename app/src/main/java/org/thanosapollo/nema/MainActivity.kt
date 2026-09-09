@@ -368,9 +368,11 @@ private fun AccountConnectionScreen(
     val connectionState by application.sessionRuntime.state.collectAsState()
     val archiveState by application.sessionRuntime.archiveState.collectAsState()
     // Distinguish the first Room emission (including no account) from loading.
-    val resolvedAccount by remember(application) {
+    // Capture one composition snapshot: the effect's loading guard and account
+    // decision must not mix a newer delegated read with the older derived account.
+    val resolvedAccount = remember(application) {
         application.sessionRuntime.activeAccount.map { ResolvedNotificationAccount(it) }
-    }.collectAsState(initial = null)
+    }.collectAsState(initial = null).value
     val activeAccount = resolvedAccount?.account
     val configuredAccounts by application.sessionRuntime.configuredAccounts.collectAsState(initial = emptyList())
     val updateState by application.updates.state.collectAsState()
@@ -549,7 +551,6 @@ private fun AccountConnectionScreen(
                             onMarkVisibleRead = presenter::markVisibleConversationRead,
                             onDraftChange = presenter::updateDraft,
                             onSend = presenter::sendDraft,
-                            onSendAsNewThread = presenter::sendDraftAsNewThread,
                             onAcknowledgeCompletedSends = presenter::acknowledgeCompletedSends,
                             onStartNewThread = presenter::startNewThread,
                             onContinueThread = presenter::continueThread,

@@ -393,6 +393,11 @@ class UploadDraftRetentionTest {
                 "account" -> {
                     runBlocking { replacement.selectPeer(fixture.peer) }
                     composeRule.runOnIdle { active.value = replacement }
+                    // Compose idle does not settle the replacement presenter's Room queries.
+                    composeRule.waitUntil {
+                        replacement.state.value.contentStatus == ChatContentStatus.Ready &&
+                            DirectConversationKey("replacement", fixture.peer) in owner.composerStates.value
+                    }
                 }
             }
             if (route == "peer" || route == "thread" || route == "second") {

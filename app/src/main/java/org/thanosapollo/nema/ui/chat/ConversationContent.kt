@@ -226,6 +226,17 @@ internal fun threadRouteRevealStart(
     }
 }
 
+/** Home remains composed, but a visible conversation owns its complete hit-test plane. */
+private fun Modifier.ownConversationTouches(): Modifier = pointerInput(Unit) {
+    awaitPointerEventScope {
+        while (true) {
+            // This highest-z, non-sharing pointer node excludes Home from the hit-test chain.
+            // Observe without consuming so descendant drag/selection detectors retain all passes.
+            awaitPointerEvent()
+        }
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun ConversationContent(
@@ -237,7 +248,6 @@ fun ConversationContent(
     onMarkVisibleRead: suspend (VisibleReadRequest) -> Boolean = { true },
     onDraftChange: (DraftSnapshot) -> Deferred<Boolean>,
     onSend: (DraftSnapshot) -> Deferred<Boolean>,
-    onSendAsNewThread: (DraftSnapshot) -> Deferred<Boolean> = { CompletableDeferred(false) },
     onAcknowledgeCompletedSends: (Set<PendingSendIdentity>) -> Unit = {},
     onStartNewThread: suspend () -> Boolean = { false },
     onContinueThread: suspend (ThreadRef) -> Boolean = { false },
@@ -321,702 +331,700 @@ fun ConversationContent(
                     )
                     .then(if (selectedPeer != null) Modifier.clearAndSetSemantics { } else Modifier),
             )
-            if (selectedPeer != null && state.contentStatus != ChatContentStatus.Ready) {
-                val close = { if (state.selectedThread != null) onCloseThread() else onCloseConversation() }
-                BackHandler { close() }
-                Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
-                    .pointerInput(Unit) {
-                        awaitPointerEventScope {
-                            while (true) {
-                                // Main pass reaches children first, preserving the Back button.
-                                awaitPointerEvent().changes.forEach { it.consume() }
-                            }
-                        }
-                    }) {
-                    TopAppBar(
-                        modifier = Modifier.height(64.dp).testTag("conversation-top-bar"),
-                        title = {
-                            Column {
-                                Text(selectedPeer, style = MaterialTheme.typography.titleMedium,
-                                    maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                state.selectedThread?.let {
-                                    Text("Thread ${it.id.value}", style = MaterialTheme.typography.labelSmall,
-                                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                }
-                            }
-                        },
-                        navigationIcon = { TextButton(onClick = { close() }) { Text("Back") } },
-                        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
-                        windowInsets = WindowInsets(0, 0, 0, 0),
-                    )
-                    if (state.contentStatus == ChatContentStatus.Failed) {
-                        Text("Unable to load conversation")
-                    } else {
-                        org.thanosapollo.nema.ui.LoadingContent("Loading conversation", Modifier.weight(1f))
-                    }
-                }
-            }
-            if (selectedPeer != null && state.contentStatus == ChatContentStatus.Ready) {
-                val conversationKey = DirectConversationKey(
-                    state.accountId,
-                    selectedPeer,
-                    state.selectedThread,
-                )
-                venueByConversation[conversationKey] = venue
-                val peerKey = conversationKey.copy(thread = null)
-                val peerLabel = state.selectedPeerLabel ?: state.selectedPeer.orEmpty()
-                val conversationInfo = venue.toConversationInfo(
-                    address = selectedPeer,
-                    localNickname = state.selectedPeerLocalNickname,
-                    remoteProfileName = state.selectedPeerDisplayName,
-                )
-                val infoTitle = when (conversationInfo) {
-                    is ConversationInfo.DirectContact -> "Contact info"
-                    is ConversationInfo.Room -> "Room info"
-                }
-                val openInfoDescription = when (conversationInfo) {
-                    is ConversationInfo.DirectContact -> "Open contact info"
-                    is ConversationInfo.Room -> "Open room info"
-                }
-                var showPeerProfile by rememberSaveable(
-                    peerKey.accountId,
-                    peerKey.canonicalBarePeer,
-                ) { mutableStateOf(false) }
-                var backProgress by remember { mutableFloatStateOf(0f) }
-                val layoutDirection = LocalLayoutDirection.current
-                var previousConversationKey by remember { mutableStateOf(conversationKey) }
-                val routeRevealStart = remember(conversationKey, layoutDirection) {
-                    threadRouteRevealStart(
-                        threadRouteRevealDirection(previousConversationKey, conversationKey),
-                        layoutDirection,
-                    )
-                }
-                val routeRevealProgress = remember(conversationKey, layoutDirection) {
-                    Animatable(if (routeRevealStart.durationMillis == 0) 1f else 0f)
-                }
-                LaunchedEffect(state.selectedPeer, state.selectedThread) {
-                    backProgress = 0f
-                }
-                LaunchedEffect(conversationKey, layoutDirection) {
-                    previousConversationKey = conversationKey
-                    if (routeRevealStart.durationMillis > 0) {
-                        routeRevealProgress.animateTo(
-                            1f,
-                            animationSpec = tween(routeRevealStart.durationMillis),
-                        )
-                    }
-                }
-                BackHandler(enabled = showPeerProfile) { showPeerProfile = false }
-                BackHandler(enabled = !showPeerProfile && state.selectedThread != null) {
-                    onCloseThread()
-                }
-                PredictiveBackHandler(enabled = !showPeerProfile && state.selectedThread == null) { events ->
-                    try {
-                        events.collect { event ->
-                            backProgress = event.progress
-                        }
-                        backProgress = 0f
-                        onCloseConversation()
-                    } catch (cancelled: CancellationException) {
-                        backProgress = 0f
-                        throw cancelled
-                    }
-                }
-                if (showPeerProfile) {
-                    ConversationInfoContent(
-                        key = peerKey,
-                        blockingSession = blockingSession,
-                        label = peerLabel,
-                        info = conversationInfo,
-                        photoBytes = state.selectedPeerPhotoBytes,
-                        recentThreads = state.recentThreads,
-                        onBack = { showPeerProfile = false },
-                        onSaveNickname = onSavePeerNickname,
-                        onLoadBlocking = onLoadPeerBlocking,
-                        onSetBlocked = onSetPeerBlocked,
-                        isCurrentBlockingOwner = { session, key ->
-                            currentBlockingSession == session &&
-                                currentConversationKey?.copy(thread = null) == key
-                        },
-                        onSharePeer = onSharePeer,
-                        onOpenThread = { thread ->
-                            scope.launch {
-                                if (onContinueThread(thread)) showPeerProfile = false
-                            }
-                        },
-                        onRenameThread = onRenameThread,
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(MaterialTheme.colorScheme.background),
-                    )
-                } else {
-                val status = quietConnectionStatus(connectionStatus)
-                var actionsOpen by remember { mutableStateOf(false) }
-                if (conversationKey !in composerStates) {
-                    composerStates += conversationKey to ComposerState(
-                        conversationKey,
-                        state.draft,
-                        0L,
-                        reply = state.draftReply,
-                        attachmentUrl = state.draftAttachmentUrl,
-                        attachmentName = state.draftAttachmentName,
-                        attachmentMime = state.draftAttachmentMime,
-                        attachmentSize = state.draftAttachmentSize,
-                    )
-                }
-                val composer = composerStates.getValue(conversationKey)
-                fun setComposer(next: ComposerState) {
-                    if (next.key == composer.key && next.revision != composer.revision) {
-                        failedSendIdentities = failedSendIdentities.filterNot { it.key == next.key }.toSet()
-                    }
-                    composerStates += conversationKey to next
-                }
-                val composerFocus = remember(conversationKey) { FocusRequester() }
-                var latestFocusRequest by remember(conversationKey) { mutableStateOf(0L) }
-                LaunchedEffect(conversationKey, completedSendSnapshots) {
-                    val completions = completedSendSnapshots.filterKeys { it.key == conversationKey }
-                    if (completions.isEmpty()) return@LaunchedEffect
-                    latestFocusRequest += 1
-                    setComposer(completions.values.fold(composer) { current, snapshot ->
-                        current.clearAfterSend(snapshot, venue)
-                    })
-                    completedSendSnapshots = completedSendSnapshots - completions.keys
-                    pendingSendIdentities = pendingSendIdentities - completions.keys
-                    failedSendIdentities = failedSendIdentities - completions.keys
-                    onAcknowledgeCompletedSends(completions.keys)
-                }
-                val keyboard = LocalSoftwareKeyboardController.current
-                val resolver = LocalContext.current.contentResolver
-                fun pickAttachment() = composerOwner.launchFilePicker { uri ->
-                    if (uri != null) composerOwner.scope.launch {
-                        val uploaded = try {
-                            val mime = resolver.getType(uri)
-                            val name = slotFilename(uri.lastPathSegment?.substringAfterLast('/') ?: "file", mime)
-                            val bytes = withContext(Dispatchers.IO) {
-                                resolver.openInputStream(uri)?.use { it.readBytes() }
-                            } ?: return@launch
-                            if (!isActive) return@launch
-                            onUploadFile(name, mime, bytes)
-                        } catch (cancelled: CancellationException) {
-                            throw cancelled
-                        } catch (_: Exception) {
-                            null
-                        } ?: return@launch
-                        if (!isActive) return@launch
-                        val current = composerOwner.composerStates.value[conversationKey] ?: return@launch
-                        val next = if (current.correction == null) {
-                            current.copy(
-                                attachmentUrl = uploaded.url, attachmentName = uploaded.name,
-                                attachmentMime = uploaded.mime, attachmentSize = uploaded.size,
-                                revision = current.revision + 1,
-                                ordinaryRevision = current.ordinaryRevision + 1,
-                            )
-                        } else {
-                            current.copy(
-                                correctionBackup = requireNotNull(current.correctionBackup).copy(
-                                    attachmentUrl = uploaded.url, attachmentName = uploaded.name,
-                                    attachmentMime = uploaded.mime, attachmentSize = uploaded.size,
-                                ),
-                                ordinaryRevision = current.ordinaryRevision + 1,
-                            )
-                        }
-                        if (next.revision != current.revision) {
-                            failedSendIdentities = failedSendIdentities.filterNot { it.key == conversationKey }.toSet()
-                        }
-                        composerOwner.saveOrdinary(next, venue, onDraftChange)
-                    }
-                }
-                var focusComposerWhenReady by remember { mutableStateOf(false) }
-                LaunchedEffect(conversationKey, focusComposerWhenReady) {
-                    if (focusComposerWhenReady) {
-                        composerFocus.requestFocus()
-                        keyboard?.show()
-                        focusComposerWhenReady = false
-                    }
-                }
-                fun updateComposer(next: ComposerState) {
-                    val edited = if (next.correction == null) {
-                        next.copy(ordinaryRevision = next.ordinaryRevision + 1)
-                    } else next
-                    setComposer(edited)
-                    if (edited.correction == null) composerOwner.saveOrdinary(edited, venue, onDraftChange)
-                }
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .graphicsLayer {
-                            val revealProgress = routeRevealProgress.value
-                            translationX = size.width * (
-                                backProgress + routeRevealStart.offsetFraction * (1f - revealProgress)
-                            )
-                            scaleX = routeRevealStart.scale + (1f - routeRevealStart.scale) * revealProgress
-                            scaleY = scaleX
-                        }
-                        .background(
-                            MaterialTheme.colorScheme.background.copy(
-                                alpha = if (backgroundUri == null) 1f else 0.88f,
-                            ),
-                        ),
-                ) {
-                    TopAppBar(
-                        modifier = Modifier
-                            .height(64.dp)
-                            .testTag("conversation-top-bar"),
-                        title = {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable(role = Role.Button) { showPeerProfile = true }
-                                    .semantics { contentDescription = openInfoDescription },
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                PeerAvatar(
-                                    label = peerLabel,
-                                    photoBytes = state.selectedPeerPhotoBytes,
-                                    size = 36.dp,
-                                    modifier = Modifier.padding(end = 8.dp),
-                                )
-                                Column(Modifier.weight(1f)) {
-                                    Text(
-                                        peerLabel,
-                                        style = MaterialTheme.typography.titleMedium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                    when {
-                                        status != null -> Text(
-                                            requireNotNull(status),
-                                            style = MaterialTheme.typography.labelSmall,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                        state.selectedThread == null && venue is ConversationVenue.Room -> Text(
-                                            roomSubtitle(venue.subject, venue.occupantCount),
-                                            style = MaterialTheme.typography.labelSmall,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
-                                        )
-                                    }
-                                }
-                            }
-                        },
-                        navigationIcon = {
-                            IconButton(
-                                onClick = if (state.selectedThread == null) {
-                                    onCloseConversation
-                                } else {
-                                    onCloseThread
-                                },
-                            ) {
-                                Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                    contentDescription = if (state.selectedThread == null) {
-                                        "Back"
-                                    } else {
-                                        "Back to conversation"
-                                    },
-                                )
-                            }
-                        },
-                        actions = {
-                            IconButton(
-                                onClick = { onVideoCall?.invoke() },
-                                enabled = onVideoCall != null,
-                            ) {
-                                Icon(VideoCallIcon, contentDescription = "Video call")
-                            }
-                            IconButton(
-                                onClick = { onVoiceCall?.invoke() },
-                                enabled = onVoiceCall != null,
-                            ) {
-                                Icon(Icons.Filled.Call, contentDescription = "Voice call")
-                            }
-                            IconButton(onClick = { actionsOpen = true }) {
-                                Icon(Icons.Filled.MoreVert, contentDescription = "Conversation actions")
-                            }
-                            DropdownMenu(
-                                expanded = actionsOpen,
-                                onDismissRequest = { actionsOpen = false },
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text(infoTitle) },
-                                    onClick = {
-                                        actionsOpen = false
-                                        showPeerProfile = true
-                                    },
-                                )
-                            }
-                        },
-                        colors = TopAppBarDefaults.topAppBarColors(
-                            containerColor = MaterialTheme.colorScheme.surface,
-                        ),
-                        windowInsets = WindowInsets(0, 0, 0, 0),
-                    )
-                    ThreadSwitcher(
-                        occurrence = state.routeOccurrence,
-                        selected = state.selectedThread,
-                        threads = state.recentThreads,
-                        mainUnreadCount = state.mainUnreadCount,
-                        onSelect = onSelectThreadDestination,
-                        onCreate = onCreateNamedThread,
-                        onCreateShared = onCreateSharedNamedThread,
-                        onRename = onRenameNamedThread,
-                        directory = directoryView,
-                        onRefresh = onRefreshNamedThreads,
-                        onArchive = onArchiveNamedThread,
-                        onRetry = onRetryDirectoryChange,
-                        onKeepCurrent = onKeepCurrentDirectory,
-                    )
-                    key(conversationKey, state.routeOccurrence) {
-                        val editActionsEnabled = !composer.ordinarySaveUnconfirmed &&
-                            pendingSendIdentities.none { it.key == conversationKey }
-                        MessageTimeline(
-                            messages = state.messages,
-                            accountId = state.accountId,
-                            routeOccurrence = state.routeOccurrence,
-                            onMarkVisibleRead = onMarkVisibleRead,
-                            venue = venue,
-                            editActionsEnabled = editActionsEnabled,
-                            readReceiptsEnabled = readReceiptsEnabled,
-                            activityResumed = activityResumed,
-                            typingLabel = state.typingLabel,
-                            onMessageDisplayed = onMessageDisplayed,
-                            onReact = onReact,
-                            latestFocusRequest = latestFocusRequest,
-                            initialViewport = timelineViewports[conversationKey],
-                            onViewportChanged = { anchor ->
-                                timelineViewports[conversationKey] = anchor
-                            },
-                            onContinueThread = { thread -> scope.launch { onContinueThread(thread) } },
-                            onUseAttachment = onUseAttachment,
-                            isAttachmentCached = isAttachmentCached,
-                            onLoadInlineImage = onLoadInlineImage,
-                            onReply = { message ->
-                                val reference = requireNotNull(message.replyReferenceId)
-                                val base = composer.cancelCorrection()
-                                updateComposer(
-                                    base.copy(
-                                        reply = DraftReply(
-                                            id = reference,
-                                            to = message.senderJid,
-                                            body = message.body,
-                                            senderLabel = message.senderLabel(),
-                                        ),
-                                        revision = base.revision + 1,
-                                    ),
-                                )
-                                focusComposerWhenReady = true
-                            },
-                            onQuote = { message ->
-                                val base = composer.cancelCorrection()
-                                val quote = message.manualQuote()
-                                val answer = base.body.takeIf(String::isNotBlank)
-                                updateComposer(
-                                    base.copy(
-                                        body = buildString {
-                                            append(quote).append("\n\n")
-                                            if (answer != null) append(answer)
-                                        },
-                                        revision = base.revision + 1,
-                                    ),
-                                )
-                                focusComposerWhenReady = true
-                            },
-                            onEdit = edit@{ message ->
-                                if (!editActionsEnabled) return@edit
-                                val target = requireNotNull(
-                                    message.correctionTargetOrNull(venue),
-                                )
-                                setComposer(composer.beginCorrection(target, message.body))
-                                focusComposerWhenReady = true
-                            },
-                            onReplyAsThread = { message ->
-                                setComposer(composer.cancelCorrection())
-                                scope.launch {
-                                    val opened = onStartThreadFrom(message)
-                                    if (opened) focusComposerWhenReady = true
-                                }
-                            },
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(horizontal = 16.dp, vertical = 4.dp),
-                        )
-                    }
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .navigationBarsPadding()
-                            .imePadding()
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        IconButton(
-                            onClick = { pickAttachment() },
-                            enabled = composer.correction == null,
-                            modifier = Modifier.semantics { contentDescription = "Attach file" },
-                        ) {
-                            Icon(Icons.Filled.Add, contentDescription = null)
-                        }
-                        fun sendWith(action: (DraftSnapshot) -> Deferred<Boolean>) {
-                            val snapshot = composer.toDraftSnapshot(venue)
-                            val identity = PendingSendIdentity(snapshot.key, snapshot.composerRevision)
-                            fun markFailed() {
-                                val current = composerStates[snapshot.key]
-                                    ?: composer.takeIf { it.key == snapshot.key }
-                                val retainedVenue = venueByConversation[snapshot.key] ?: return
-                                if (current?.toDraftSnapshot(retainedVenue) == snapshot) {
-                                    failedSendIdentities += identity
-                                }
-                            }
-                            if (identity in pendingSendIdentities) return
-                            pendingSendIdentities += identity
-                            val send = try {
-                                action(snapshot)
-                            } catch (cancelled: CancellationException) {
-                                pendingSendIdentities -= identity
-                                throw cancelled
-                            } catch (_: Exception) {
-                                pendingSendIdentities -= identity
-                                markFailed()
-                                return
-                            }
-                            composerOwner.scope.launch {
-                                val applied = try {
-                                    send.await()
-                                } catch (cancelled: CancellationException) {
-                                    pendingSendIdentities -= identity
-                                    throw cancelled
-                                } catch (_: Exception) {
-                                    false
-                                }
-                                if (applied) {
-                                    composerOwner.completeSend(snapshot, venue)
-                                } else {
-                                    pendingSendIdentities -= identity
-                                    markFailed()
-                                }
-                            }
-                        }
-                        val draftSaveIsError = composer.ordinarySaveUnconfirmed && conversationKey !in pendingDraftAttempts
-                        val sendIsError = PendingSendIdentity(conversationKey, composer.revision) in failedSendIdentities
-                        Surface(
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("message-composer-container")
-                                .semantics {
-                                    if (sendIsError) error("Message not sent")
-                                },
-                            shape = RoundedCornerShape(22.dp),
-                            tonalElevation = 1.dp,
-                        ) {
-                            Column {
-                                composer.correction?.let {
-                                    Surface(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .testTag("composer-edit-preview"),
-                                        color = MaterialTheme.colorScheme.surfaceVariant,
-                                        shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.padding(start = 16.dp, end = 4.dp, top = 4.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                        ) {
-                                            Text(
-                                                "Editing message",
-                                                modifier = Modifier.weight(1f),
-                                                style = MaterialTheme.typography.labelMedium,
-                                            )
-                                            TextButton(onClick = { setComposer(composer.cancelCorrection()) }) {
-                                                Text("Cancel")
-                                            }
+            if (selectedPeer != null) {
+                Box(Modifier.fillMaxSize().ownConversationTouches()) {
+                    if (state.contentStatus != ChatContentStatus.Ready) {
+                        val close = { if (state.selectedThread != null) onCloseThread() else onCloseConversation() }
+                        BackHandler { close() }
+                        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+                            TopAppBar(
+                                modifier = Modifier.height(64.dp).testTag("conversation-top-bar"),
+                                title = {
+                                    Column {
+                                        Text(selectedPeer, style = MaterialTheme.typography.titleMedium,
+                                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        state.selectedThread?.let {
+                                            Text("Thread ${it.id.value}", style = MaterialTheme.typography.labelSmall,
+                                                maxLines = 1, overflow = TextOverflow.Ellipsis)
                                         }
                                     }
+                                },
+                                navigationIcon = { TextButton(onClick = { close() }) { Text("Back") } },
+                                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
+                                windowInsets = WindowInsets(0, 0, 0, 0),
+                            )
+                            if (state.contentStatus == ChatContentStatus.Failed) {
+                                Text("Unable to load conversation")
+                            } else {
+                                org.thanosapollo.nema.ui.LoadingContent("Loading conversation", Modifier.weight(1f))
+                            }
+                        }
+                    }
+                    if (state.contentStatus == ChatContentStatus.Ready) {
+                        val conversationKey = DirectConversationKey(
+                            state.accountId,
+                            selectedPeer,
+                            state.selectedThread,
+                        )
+                        venueByConversation[conversationKey] = venue
+                        val peerKey = conversationKey.copy(thread = null)
+                        val peerLabel = state.selectedPeerLabel ?: state.selectedPeer.orEmpty()
+                        val conversationInfo = venue.toConversationInfo(
+                            address = selectedPeer,
+                            localNickname = state.selectedPeerLocalNickname,
+                            remoteProfileName = state.selectedPeerDisplayName,
+                        )
+                        val infoTitle = when (conversationInfo) {
+                            is ConversationInfo.DirectContact -> "Contact info"
+                            is ConversationInfo.Room -> "Room info"
+                        }
+                        val openInfoDescription = when (conversationInfo) {
+                            is ConversationInfo.DirectContact -> "Open contact info"
+                            is ConversationInfo.Room -> "Open room info"
+                        }
+                        var showPeerProfile by rememberSaveable(
+                            peerKey.accountId,
+                            peerKey.canonicalBarePeer,
+                        ) { mutableStateOf(false) }
+                        var backProgress by remember { mutableFloatStateOf(0f) }
+                        val layoutDirection = LocalLayoutDirection.current
+                        var previousConversationKey by remember { mutableStateOf(conversationKey) }
+                        val routeRevealStart = remember(conversationKey, layoutDirection) {
+                            threadRouteRevealStart(
+                                threadRouteRevealDirection(previousConversationKey, conversationKey),
+                                layoutDirection,
+                            )
+                        }
+                        val routeRevealProgress = remember(conversationKey, layoutDirection) {
+                            Animatable(if (routeRevealStart.durationMillis == 0) 1f else 0f)
+                        }
+                        LaunchedEffect(state.selectedPeer, state.selectedThread) {
+                            backProgress = 0f
+                        }
+                        LaunchedEffect(conversationKey, layoutDirection) {
+                            previousConversationKey = conversationKey
+                            if (routeRevealStart.durationMillis > 0) {
+                                routeRevealProgress.animateTo(
+                                    1f,
+                                    animationSpec = tween(routeRevealStart.durationMillis),
+                                )
+                            }
+                        }
+                        BackHandler(enabled = showPeerProfile) { showPeerProfile = false }
+                        BackHandler(enabled = !showPeerProfile && state.selectedThread != null) {
+                            onCloseThread()
+                        }
+                        PredictiveBackHandler(enabled = !showPeerProfile && state.selectedThread == null) { events ->
+                            try {
+                                events.collect { event ->
+                                    backProgress = event.progress
                                 }
-                                composer.reply?.let { reply ->
-                                    Surface(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .testTag("composer-reply-preview"),
-                                        color = MaterialTheme.colorScheme.surfaceVariant,
-                                        shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
-                                    ) {
+                                backProgress = 0f
+                                onCloseConversation()
+                            } catch (cancelled: CancellationException) {
+                                backProgress = 0f
+                                throw cancelled
+                            }
+                        }
+                        if (showPeerProfile) {
+                            ConversationInfoContent(
+                                key = peerKey,
+                                blockingSession = blockingSession,
+                                label = peerLabel,
+                                info = conversationInfo,
+                                photoBytes = state.selectedPeerPhotoBytes,
+                                recentThreads = state.recentThreads,
+                                onBack = { showPeerProfile = false },
+                                onSaveNickname = onSavePeerNickname,
+                                onLoadBlocking = onLoadPeerBlocking,
+                                onSetBlocked = onSetPeerBlocked,
+                                isCurrentBlockingOwner = { session, key ->
+                                    currentBlockingSession == session &&
+                                        currentConversationKey?.copy(thread = null) == key
+                                },
+                                onSharePeer = onSharePeer,
+                                onOpenThread = { thread ->
+                                    scope.launch {
+                                        if (onContinueThread(thread)) showPeerProfile = false
+                                    }
+                                },
+                                onRenameThread = onRenameThread,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .background(MaterialTheme.colorScheme.background),
+                            )
+                        } else {
+                            val status = quietConnectionStatus(connectionStatus)
+                            var actionsOpen by remember { mutableStateOf(false) }
+                            if (conversationKey !in composerStates) {
+                                composerStates += conversationKey to ComposerState(
+                                    conversationKey,
+                                    state.draft,
+                                    0L,
+                                    reply = state.draftReply,
+                                    attachmentUrl = state.draftAttachmentUrl,
+                                    attachmentName = state.draftAttachmentName,
+                                    attachmentMime = state.draftAttachmentMime,
+                                    attachmentSize = state.draftAttachmentSize,
+                                )
+                            }
+                            val composer = composerStates.getValue(conversationKey)
+                            fun setComposer(next: ComposerState) {
+                                if (next.key == composer.key && next.revision != composer.revision) {
+                                    failedSendIdentities = failedSendIdentities.filterNot { it.key == next.key }.toSet()
+                                }
+                                composerStates += conversationKey to next
+                            }
+                            val composerFocus = remember(conversationKey) { FocusRequester() }
+                            val effectOwner = ConversationEffectOwner(conversationKey, state.routeOccurrence)
+                            var latestFocusRequest by remember(effectOwner) { mutableStateOf(0L) }
+                            LaunchedEffect(effectOwner, completedSendSnapshots) {
+                                val completions = completedSendSnapshots.filterKeys { it.key == conversationKey }
+                                if (completions.isEmpty()) return@LaunchedEffect
+                                if (completions.keys.any { ownsSendViewport(composerOwner.sendEffectOwners[it], effectOwner) }) {
+                                    latestFocusRequest += 1
+                                }
+                                completions.keys.forEach { composerOwner.sendEffectOwners.remove(it) }
+                                setComposer(completions.values.fold(composer) { current, snapshot ->
+                                    current.clearAfterSend(snapshot, venue)
+                                })
+                                completedSendSnapshots = completedSendSnapshots - completions.keys
+                                pendingSendIdentities = pendingSendIdentities - completions.keys
+                                failedSendIdentities = failedSendIdentities - completions.keys
+                                onAcknowledgeCompletedSends(completions.keys)
+                            }
+                            val keyboard = LocalSoftwareKeyboardController.current
+                            val resolver = LocalContext.current.contentResolver
+                            fun pickAttachment() = composerOwner.launchFilePicker { uri ->
+                                if (uri != null) composerOwner.scope.launch {
+                                    val uploaded = try {
+                                        val mime = resolver.getType(uri)
+                                        val name = slotFilename(uri.lastPathSegment?.substringAfterLast('/') ?: "file", mime)
+                                        val bytes = withContext(Dispatchers.IO) {
+                                            resolver.openInputStream(uri)?.use { it.readBytes() }
+                                        } ?: return@launch
+                                        if (!isActive) return@launch
+                                        onUploadFile(name, mime, bytes)
+                                    } catch (cancelled: CancellationException) {
+                                        throw cancelled
+                                    } catch (_: Exception) {
+                                        null
+                                    } ?: return@launch
+                                    if (!isActive) return@launch
+                                    val current = composerOwner.composerStates.value[conversationKey] ?: return@launch
+                                    val next = if (current.correction == null) {
+                                        current.copy(
+                                            attachmentUrl = uploaded.url, attachmentName = uploaded.name,
+                                            attachmentMime = uploaded.mime, attachmentSize = uploaded.size,
+                                            revision = current.revision + 1,
+                                            ordinaryRevision = current.ordinaryRevision + 1,
+                                        )
+                                    } else {
+                                        current.copy(
+                                            correctionBackup = requireNotNull(current.correctionBackup).copy(
+                                                attachmentUrl = uploaded.url, attachmentName = uploaded.name,
+                                                attachmentMime = uploaded.mime, attachmentSize = uploaded.size,
+                                            ),
+                                            ordinaryRevision = current.ordinaryRevision + 1,
+                                        )
+                                    }
+                                    if (next.revision != current.revision) {
+                                        failedSendIdentities = failedSendIdentities.filterNot { it.key == conversationKey }.toSet()
+                                    }
+                                    composerOwner.saveOrdinary(next, venue, onDraftChange)
+                                }
+                            }
+                            var focusComposerWhenReady by remember { mutableStateOf(false) }
+                            LaunchedEffect(conversationKey, focusComposerWhenReady) {
+                                if (focusComposerWhenReady) {
+                                    composerFocus.requestFocus()
+                                    keyboard?.show()
+                                    focusComposerWhenReady = false
+                                }
+                            }
+                            fun updateComposer(next: ComposerState) {
+                                val edited = if (next.correction == null) {
+                                    next.copy(ordinaryRevision = next.ordinaryRevision + 1)
+                                } else next
+                                setComposer(edited)
+                                if (edited.correction == null) composerOwner.saveOrdinary(edited, venue, onDraftChange)
+                            }
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .graphicsLayer {
+                                        val revealProgress = routeRevealProgress.value
+                                        translationX = size.width * (
+                                            backProgress + routeRevealStart.offsetFraction * (1f - revealProgress)
+                                        )
+                                        scaleX = routeRevealStart.scale + (1f - routeRevealStart.scale) * revealProgress
+                                        scaleY = scaleX
+                                    }
+                                    .background(
+                                        MaterialTheme.colorScheme.background.copy(
+                                            alpha = if (backgroundUri == null) 1f else 0.88f,
+                                        ),
+                                    ),
+                            ) {
+                                TopAppBar(
+                                    modifier = Modifier
+                                        .height(64.dp)
+                                        .testTag("conversation-top-bar"),
+                                    title = {
                                         Row(
-                                            modifier = Modifier.padding(start = 16.dp, end = 4.dp, top = 4.dp),
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable(role = Role.Button) { showPeerProfile = true }
+                                                .semantics { contentDescription = openInfoDescription },
                                             verticalAlignment = Alignment.CenterVertically,
                                         ) {
+                                            PeerAvatar(
+                                                label = peerLabel,
+                                                photoBytes = state.selectedPeerPhotoBytes,
+                                                size = 36.dp,
+                                                modifier = Modifier.padding(end = 8.dp),
+                                            )
                                             Column(Modifier.weight(1f)) {
                                                 Text(
-                                                    "Reply to ${reply.senderLabel}",
-                                                    style = MaterialTheme.typography.labelMedium,
-                                                )
-                                                Text(
-                                                    reply.body,
-                                                    style = MaterialTheme.typography.bodySmall,
+                                                    peerLabel,
+                                                    style = MaterialTheme.typography.titleMedium,
                                                     maxLines = 1,
                                                     overflow = TextOverflow.Ellipsis,
                                                 )
+                                                when {
+                                                    status != null -> Text(
+                                                        requireNotNull(status),
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                    )
+                                                    state.selectedThread == null && venue is ConversationVenue.Room -> Text(
+                                                        roomSubtitle(venue.subject, venue.occupantCount),
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                        maxLines = 1,
+                                                        overflow = TextOverflow.Ellipsis,
+                                                    )
+                                                }
                                             }
-                                            TextButton(
+                                        }
+                                    },
+                                    navigationIcon = {
+                                        IconButton(
+                                            onClick = if (state.selectedThread == null) {
+                                                onCloseConversation
+                                            } else {
+                                                onCloseThread
+                                            },
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                                                contentDescription = if (state.selectedThread == null) {
+                                                    "Back"
+                                                } else {
+                                                    "Back to conversation"
+                                                },
+                                            )
+                                        }
+                                    },
+                                    actions = {
+                                        IconButton(
+                                            onClick = { onVideoCall?.invoke() },
+                                            enabled = onVideoCall != null,
+                                        ) {
+                                            Icon(VideoCallIcon, contentDescription = "Video call")
+                                        }
+                                        IconButton(
+                                            onClick = { onVoiceCall?.invoke() },
+                                            enabled = onVoiceCall != null,
+                                        ) {
+                                            Icon(Icons.Filled.Call, contentDescription = "Voice call")
+                                        }
+                                        IconButton(onClick = { actionsOpen = true }) {
+                                            Icon(Icons.Filled.MoreVert, contentDescription = "Conversation actions")
+                                        }
+                                        DropdownMenu(
+                                            expanded = actionsOpen,
+                                            onDismissRequest = { actionsOpen = false },
+                                        ) {
+                                            DropdownMenuItem(
+                                                text = { Text(infoTitle) },
                                                 onClick = {
+                                                    actionsOpen = false
+                                                    showPeerProfile = true
+                                                },
+                                            )
+                                        }
+                                    },
+                                    colors = TopAppBarDefaults.topAppBarColors(
+                                        containerColor = MaterialTheme.colorScheme.surface,
+                                    ),
+                                    windowInsets = WindowInsets(0, 0, 0, 0),
+                                )
+                                ThreadSwitcher(
+                                    occurrence = state.routeOccurrence,
+                                    selected = state.selectedThread,
+                                    threads = state.recentThreads,
+                                    mainUnreadCount = state.mainUnreadCount,
+                                    onSelect = onSelectThreadDestination,
+                                    onCreate = onCreateNamedThread,
+                                    onCreateShared = onCreateSharedNamedThread,
+                                    onRename = onRenameNamedThread,
+                                    directory = directoryView,
+                                    onRefresh = onRefreshNamedThreads,
+                                    onArchive = onArchiveNamedThread,
+                                    onRetry = onRetryDirectoryChange,
+                                    onKeepCurrent = onKeepCurrentDirectory,
+                                )
+                                key(conversationKey, state.routeOccurrence) {
+                                    val editActionsEnabled = !composer.ordinarySaveUnconfirmed &&
+                                        pendingSendIdentities.none { it.key == conversationKey }
+                                    MessageTimeline(
+                                        messages = state.messages,
+                                        accountId = state.accountId,
+                                        routeOccurrence = state.routeOccurrence,
+                                        onMarkVisibleRead = onMarkVisibleRead,
+                                        venue = venue,
+                                        editActionsEnabled = editActionsEnabled,
+                                        readReceiptsEnabled = readReceiptsEnabled,
+                                        activityResumed = activityResumed,
+                                        typingLabel = state.typingLabel,
+                                        onMessageDisplayed = onMessageDisplayed,
+                                        onReact = onReact,
+                                        latestFocusRequest = latestFocusRequest,
+                                        initialViewport = timelineViewports[conversationKey],
+                                        onViewportChanged = { anchor ->
+                                            timelineViewports[conversationKey] = anchor
+                                        },
+                                        onContinueThread = { thread -> scope.launch { onContinueThread(thread) } },
+                                        onUseAttachment = onUseAttachment,
+                                        isAttachmentCached = isAttachmentCached,
+                                        onLoadInlineImage = onLoadInlineImage,
+                                        onReply = { message ->
+                                            val reference = requireNotNull(message.replyReferenceId)
+                                            val base = composer.cancelCorrection()
+                                            updateComposer(
+                                                base.copy(
+                                                    reply = DraftReply(
+                                                        id = reference,
+                                                        to = message.senderJid,
+                                                        body = message.body,
+                                                        senderLabel = message.senderLabel(),
+                                                    ),
+                                                    revision = base.revision + 1,
+                                                ),
+                                            )
+                                            focusComposerWhenReady = true
+                                        },
+                                        onQuote = { message ->
+                                            val base = composer.cancelCorrection()
+                                            val quote = message.manualQuote()
+                                            val answer = base.body.takeIf(String::isNotBlank)
+                                            updateComposer(
+                                                base.copy(
+                                                    body = buildString {
+                                                        append(quote).append("\n\n")
+                                                        if (answer != null) append(answer)
+                                                    },
+                                                    revision = base.revision + 1,
+                                                ),
+                                            )
+                                            focusComposerWhenReady = true
+                                        },
+                                        onEdit = edit@{ message ->
+                                            if (!editActionsEnabled) return@edit
+                                            val target = requireNotNull(
+                                                message.correctionTargetOrNull(venue),
+                                            )
+                                            setComposer(composer.beginCorrection(target, message.body))
+                                            focusComposerWhenReady = true
+                                        },
+                                        onReplyAsThread = { message ->
+                                            setComposer(composer.cancelCorrection())
+                                            scope.launch {
+                                                val opened = onStartThreadFrom(message)
+                                                if (opened) focusComposerWhenReady = true
+                                            }
+                                        },
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                                    )
+                                }
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .navigationBarsPadding()
+                                        .imePadding()
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    IconButton(
+                                        onClick = { pickAttachment() },
+                                        enabled = composer.correction == null,
+                                        modifier = Modifier.semantics { contentDescription = "Attach file" },
+                                    ) {
+                                        Icon(Icons.Filled.Add, contentDescription = null)
+                                    }
+                                    fun sendWith(action: (DraftSnapshot) -> Deferred<Boolean>) {
+                                        val snapshot = composer.toDraftSnapshot(venue)
+                                        val identity = PendingSendIdentity(snapshot.key, snapshot.composerRevision)
+                                        fun markFailed() {
+                                            composerOwner.sendEffectOwners.remove(identity)
+                                            val current = composerStates[snapshot.key]
+                                                ?: composer.takeIf { it.key == snapshot.key }
+                                            val retainedVenue = venueByConversation[snapshot.key] ?: return
+                                            if (current?.toDraftSnapshot(retainedVenue) == snapshot) {
+                                                failedSendIdentities += identity
+                                            }
+                                        }
+                                        if (identity in pendingSendIdentities) return
+                                        pendingSendIdentities += identity
+                                        composerOwner.sendEffectOwners[identity] = effectOwner
+                                        val send = try {
+                                            action(snapshot)
+                                        } catch (cancelled: CancellationException) {
+                                            pendingSendIdentities -= identity
+                                            composerOwner.sendEffectOwners.remove(identity)
+                                            throw cancelled
+                                        } catch (_: Exception) {
+                                            pendingSendIdentities -= identity
+                                            markFailed()
+                                            return
+                                        }
+                                        composerOwner.scope.launch {
+                                            val applied = try {
+                                                send.await()
+                                            } catch (cancelled: CancellationException) {
+                                                pendingSendIdentities -= identity
+                                                composerOwner.sendEffectOwners.remove(identity)
+                                                throw cancelled
+                                            } catch (_: Exception) {
+                                                false
+                                            }
+                                            if (applied) {
+                                                composerOwner.completeSend(snapshot, venue)
+                                            } else {
+                                                pendingSendIdentities -= identity
+                                                markFailed()
+                                            }
+                                        }
+                                    }
+                                    val draftSaveIsError = composer.ordinarySaveUnconfirmed && conversationKey !in pendingDraftAttempts
+                                    val sendIsError = PendingSendIdentity(conversationKey, composer.revision) in failedSendIdentities
+                                    Surface(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .testTag("message-composer-container")
+                                            .semantics {
+                                                if (sendIsError) error("Message not sent")
+                                            },
+                                        shape = RoundedCornerShape(22.dp),
+                                        tonalElevation = 1.dp,
+                                    ) {
+                                        Column {
+                                            composer.correction?.let {
+                                                Surface(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .testTag("composer-edit-preview"),
+                                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                                    shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier.padding(start = 16.dp, end = 4.dp, top = 4.dp),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                    ) {
+                                                        Text(
+                                                            "Editing message",
+                                                            modifier = Modifier.weight(1f),
+                                                            style = MaterialTheme.typography.labelMedium,
+                                                        )
+                                                        TextButton(onClick = { setComposer(composer.cancelCorrection()) }) {
+                                                            Text("Cancel")
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            composer.reply?.let { reply ->
+                                                Surface(
+                                                    modifier = Modifier
+                                                        .fillMaxWidth()
+                                                        .testTag("composer-reply-preview"),
+                                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                                    shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp),
+                                                ) {
+                                                    Row(
+                                                        modifier = Modifier.padding(start = 16.dp, end = 4.dp, top = 4.dp),
+                                                        verticalAlignment = Alignment.CenterVertically,
+                                                    ) {
+                                                        Column(Modifier.weight(1f)) {
+                                                            Text(
+                                                                "Reply to ${reply.senderLabel}",
+                                                                style = MaterialTheme.typography.labelMedium,
+                                                            )
+                                                            Text(
+                                                                reply.body,
+                                                                style = MaterialTheme.typography.bodySmall,
+                                                                maxLines = 1,
+                                                                overflow = TextOverflow.Ellipsis,
+                                                            )
+                                                        }
+                                                        TextButton(
+                                                            onClick = {
+                                                                updateComposer(
+                                                                    composer.copy(
+                                                                        reply = null,
+                                                                        revision = composer.revision + 1,
+                                                                    ),
+                                                                )
+                                                            },
+                                                        ) { Text("Cancel") }
+                                                    }
+                                                }
+                                            }
+                                            if (composer.attachmentUrl != null) {
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth()
+                                                        .testTag("composer-attachment-preview")
+                                                        .padding(start = 16.dp, end = 4.dp, top = 4.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                ) {
+                                                    Column(Modifier.weight(1f).semantics(mergeDescendants = true) {}) {
+                                                        Text(
+                                                            composer.attachmentName?.takeIf(String::isNotBlank) ?: "Attached file",
+                                                            style = MaterialTheme.typography.labelMedium,
+                                                            maxLines = 2,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                        )
+                                                        Text(
+                                                            composer.attachmentMime?.takeIf(String::isNotBlank) ?: "File",
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                        )
+                                                    }
+                                                    TextButton(
+                                                        modifier = Modifier.heightIn(min = 48.dp)
+                                                            .semantics { contentDescription = "Remove attachment" },
+                                                        onClick = {
+                                                            updateComposer(composer.copy(
+                                                                attachmentUrl = null,
+                                                                attachmentName = null,
+                                                                attachmentMime = null,
+                                                                attachmentSize = null,
+                                                                revision = composer.revision + 1,
+                                                            ))
+                                                        },
+                                                    ) { Text("Remove") }
+                                                }
+                                            }
+                                            BasicTextField(
+                                                value = composer.body,
+                                                onValueChange = {
                                                     updateComposer(
                                                         composer.copy(
-                                                            reply = null,
+                                                            body = it,
                                                             revision = composer.revision + 1,
                                                         ),
                                                     )
                                                 },
-                                            ) { Text("Cancel") }
-                                        }
-                                    }
-                                }
-                                if (composer.attachmentUrl != null) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth()
-                                            .testTag("composer-attachment-preview")
-                                            .padding(start = 16.dp, end = 4.dp, top = 4.dp),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                    ) {
-                                        Column(Modifier.weight(1f).semantics(mergeDescendants = true) {}) {
-                                            Text(
-                                                composer.attachmentName?.takeIf(String::isNotBlank) ?: "Attached file",
-                                                style = MaterialTheme.typography.labelMedium,
-                                                maxLines = 2,
-                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .heightIn(min = 44.dp)
+                                                    .focusRequester(composerFocus)
+                                                    .testTag("message-composer")
+                                                    .semantics {
+                                                        when {
+                                                            sendIsError -> error("Message not sent")
+                                                            draftSaveIsError -> error("Draft not saved")
+                                                        }
+                                                    },
+                                                textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                                    color = MaterialTheme.colorScheme.onSurface,
+                                                ),
+                                                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                                                maxLines = 5,
+                                                decorationBox = { innerTextField ->
+                                                    Box(
+                                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                                                        contentAlignment = Alignment.CenterStart,
+                                                    ) {
+                                                        if (composer.body.isEmpty()) {
+                                                            Text(
+                                                                "Message ${destinationTitle(state.selectedThread, state.recentThreads)}",
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                style = MaterialTheme.typography.bodyLarge,
+                                                            )
+                                                        }
+                                                        innerTextField()
+                                                    }
+                                                },
                                             )
-                                            Text(
-                                                composer.attachmentMime?.takeIf(String::isNotBlank) ?: "File",
-                                                style = MaterialTheme.typography.bodySmall,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis,
-                                            )
-                                        }
-                                        TextButton(
-                                            modifier = Modifier.heightIn(min = 48.dp)
-                                                .semantics { contentDescription = "Remove attachment" },
-                                            onClick = {
-                                                updateComposer(composer.copy(
-                                                    attachmentUrl = null,
-                                                    attachmentName = null,
-                                                    attachmentMime = null,
-                                                    attachmentSize = null,
-                                                    revision = composer.revision + 1,
-                                                ))
-                                            },
-                                        ) { Text("Remove") }
-                                    }
-                                }
-                                BasicTextField(
-                                    value = composer.body,
-                                    onValueChange = {
-                                        updateComposer(
-                                            composer.copy(
-                                                body = it,
-                                                revision = composer.revision + 1,
-                                            ),
-                                        )
-                                    },
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .heightIn(min = 44.dp)
-                                        .focusRequester(composerFocus)
-                                        .testTag("message-composer")
-                                        .semantics {
-                                            when {
-                                                sendIsError -> error("Message not sent")
-                                                draftSaveIsError -> error("Draft not saved")
-                                            }
-                                        },
-                                    textStyle = MaterialTheme.typography.bodyLarge.copy(
-                                        color = MaterialTheme.colorScheme.onSurface,
-                                    ),
-                                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                                    maxLines = 5,
-                                    decorationBox = { innerTextField ->
-                                        Box(
-                                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                                            contentAlignment = Alignment.CenterStart,
-                                        ) {
-                                            if (composer.body.isEmpty()) {
+                                            if (sendIsError) {
                                                 Text(
-                                                    "Message ${destinationTitle(state.selectedThread, state.recentThreads)}",
-                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                    style = MaterialTheme.typography.bodyLarge,
+                                                    "Message not sent",
+                                                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 4.dp),
+                                                    color = MaterialTheme.colorScheme.error,
+                                                    style = MaterialTheme.typography.bodySmall,
                                                 )
                                             }
-                                            innerTextField()
+                                            if (draftSaveIsError) {
+                                                Text(
+                                                    "Draft not saved",
+                                                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 4.dp),
+                                                    color = MaterialTheme.colorScheme.error,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                )
+                                            }
                                         }
-                                    },
-                                )
-                                if (sendIsError) {
-                                    Text(
-                                        "Message not sent",
-                                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 4.dp),
-                                        color = MaterialTheme.colorScheme.error,
-                                        style = MaterialTheme.typography.bodySmall,
-                                    )
-                                }
-                                if (draftSaveIsError) {
-                                    Text(
-                                        "Draft not saved",
-                                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 4.dp),
-                                        color = MaterialTheme.colorScheme.error,
-                                        style = MaterialTheme.typography.bodySmall,
-                                    )
-                                }
-                            }
-                        }
-                        Box {
-                            val sendEnabled =
-                                (composer.body.isNotBlank() || composer.attachmentUrl != null) &&
-                                    (composer.correction?.let { composer.body != it.originalBody } ?: true) &&
-                                    PendingSendIdentity(conversationKey, composer.revision) !in pendingSendIdentities
-                            Box(
-                                modifier = Modifier
-                                    .size(48.dp)
-                                    .combinedClickable(
-                                        enabled = sendEnabled,
-                                        role = Role.Button,
-                                        onLongClickLabel = "Send as thread",
-                                        onClick = { sendWith(onSend) },
-                                        onLongClick = if (conversationKey.thread == null && composer.correction == null) {
-                                            { sendWith(onSendAsNewThread) }
-                                        } else {
-                                            null
-                                        },
-                                    )
-                                    .semantics { contentDescription = "Send" },
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Surface(
-                                    modifier = Modifier.size(40.dp),
-                                    shape = CircleShape,
-                                    color = if (sendEnabled) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        MaterialTheme.colorScheme.surfaceVariant
-                                    },
-                                    contentColor = if (sendEnabled) {
-                                        MaterialTheme.colorScheme.onPrimary
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    },
-                                ) {
-                                    Box(
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentAlignment = Alignment.Center,
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.AutoMirrored.Filled.Send,
-                                            contentDescription = null,
-                                        )
+                                    }
+                                    Box {
+                                        val sendEnabled =
+                                            (composer.body.isNotBlank() || composer.attachmentUrl != null) &&
+                                                (composer.correction?.let { composer.body != it.originalBody } ?: true) &&
+                                                PendingSendIdentity(conversationKey, composer.revision) !in pendingSendIdentities
+                                        Box(
+                                            modifier = Modifier
+                                                .size(48.dp)
+                                                .clickable(
+                                                    enabled = sendEnabled,
+                                                    role = Role.Button,
+                                                    onClick = { sendWith(onSend) },
+                                                )
+                                                .semantics { contentDescription = "Send" },
+                                            contentAlignment = Alignment.Center,
+                                        ) {
+                                            Surface(
+                                                modifier = Modifier.size(40.dp),
+                                                shape = CircleShape,
+                                                color = if (sendEnabled) {
+                                                    MaterialTheme.colorScheme.primary
+                                                } else {
+                                                    MaterialTheme.colorScheme.surfaceVariant
+                                                },
+                                                contentColor = if (sendEnabled) {
+                                                    MaterialTheme.colorScheme.onPrimary
+                                                } else {
+                                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                                },
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier.fillMaxSize(),
+                                                    contentAlignment = Alignment.Center,
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.AutoMirrored.Filled.Send,
+                                                        contentDescription = null,
+                                                    )
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
                 }
             }
         }
@@ -1542,6 +1550,7 @@ class ComposerOwner internal constructor(internal val scope: kotlinx.coroutines.
     internal val failedSendIdentities = mutableStateOf(emptySet<PendingSendIdentity>())
     internal val pendingDraftAttempts = mutableStateOf(emptyMap<DirectConversationKey, Any>())
     internal val venueByConversation = mutableMapOf<DirectConversationKey, ConversationVenue>()
+    internal val sendEffectOwners = mutableMapOf<PendingSendIdentity, ConversationEffectOwner>()
 
     internal fun completeSend(snapshot: DraftSnapshot, venue: ConversationVenue) {
         val identity = PendingSendIdentity(snapshot.key, snapshot.composerRevision)
@@ -1867,57 +1876,6 @@ internal fun composerStateSaver(
     },
 )
 
-data class TimelineViewportAnchor(
-    val messageId: String,
-    val offset: Int,
-    val fallbackIndex: Int,
-)
-
-internal class TimelineViewportStore(private val capacity: Int = 32) {
-    init {
-        require(capacity > 0) { "Viewport capacity must be positive" }
-    }
-
-    private val anchors = object : LinkedHashMap<DirectConversationKey, TimelineViewportAnchor>(
-        capacity,
-        0.75f,
-        true,
-    ) {
-        override fun removeEldestEntry(
-            eldest: MutableMap.MutableEntry<DirectConversationKey, TimelineViewportAnchor>?,
-        ): Boolean = size > capacity
-    }
-
-    val size: Int
-        get() = anchors.size
-
-    operator fun get(key: DirectConversationKey): TimelineViewportAnchor? = anchors[key]
-
-    operator fun set(key: DirectConversationKey, anchor: TimelineViewportAnchor) {
-        anchors[key] = anchor
-    }
-}
-
-internal fun restoredTimelineIndex(
-    messages: List<TimelineMessage>,
-    anchor: TimelineViewportAnchor,
-): Int {
-    require(messages.isNotEmpty()) { "Cannot restore an empty timeline" }
-    val exact = messages.asReversed().indexOfFirst { it.id == anchor.messageId }
-    return if (exact >= 0) exact else anchor.fallbackIndex.coerceIn(0, messages.lastIndex)
-}
-
-internal fun timelineMessageIndex(listIndex: Int, typingPresent: Boolean, messageCount: Int): Int {
-    if (messageCount <= 0) return 0
-    val offset = if (typingPresent) 1 else 0
-    return (listIndex - offset).coerceIn(0, messageCount - 1)
-}
-
-internal fun timelineListIndex(messageIndex: Int, typingPresent: Boolean): Int {
-    if (!typingPresent) return messageIndex
-    return if (messageIndex == 0) 0 else messageIndex + 1
-}
-
 internal fun displayedMarkerCandidates(
     messages: List<TimelineMessage>,
     visibleMessageIds: Set<String>,
@@ -2026,11 +1984,8 @@ internal fun MessageTimeline(
             val anchor = requireNotNull(initialViewport)
             // This composition exists only for Ready, including an authoritative empty result.
             if (currentMessages.value.isNotEmpty()) {
-                val index = timelineListIndex(
-                    restoredTimelineIndex(currentMessages.value, anchor),
-                    typingLabel != null,
-                )
-                listState.scrollToItem(index, anchor.offset)
+                val target = restoredTimelineTarget(currentMessages.value, anchor, typingLabel != null)
+                listState.scrollToItem(target.index, target.offset)
             }
             viewportRestored = true
         }
