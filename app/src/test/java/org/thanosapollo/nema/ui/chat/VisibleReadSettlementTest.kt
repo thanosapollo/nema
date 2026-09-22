@@ -83,6 +83,8 @@ class VisibleReadSettlementTest {
             val entered = CompletableDeferred<Job>()
             val writerEntered = CompletableDeferred<Unit>()
             val release = CompletableDeferred<Unit>()
+            val owner = p.javaClass.getDeclaredField("presenterJob").apply { isAccessible = true }.get(p) as Job
+            val existingChildren = owner.children.toSet()
             compose.setContent {
                 val state by p.state.collectAsState()
                 MaterialTheme {
@@ -111,7 +113,11 @@ class VisibleReadSettlementTest {
                 compose.runOnIdle { resumed.value = true }
                 compose.waitForIdle()
                 compose.waitUntil(5_000) { entered.isCompleted }
-                compose.waitForIdle() // callback reached production admission and suspended on Room
+                // Callback entry is before off-Main preparation, not an admission fence.
+                // Wait for the actual presenter-owned async write while Room's writer is held.
+                compose.waitUntil(5_000) {
+                    owner.children.any { it is kotlinx.coroutines.Deferred<*> && it !in existingChildren && it.isActive }
+                }
                 val caller = runBlocking { entered.await() }
                 assertTrue(caller.isActive)
                 compose.runOnIdle {

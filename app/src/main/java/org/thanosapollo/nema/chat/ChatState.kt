@@ -16,6 +16,8 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -223,7 +225,8 @@ class VisibleReadRequest(
 ) {
     val messageIds: Set<String> = messageIds.toSet()
     // Chronological, route-projected snapshot at layout observation, not dispatch time.
-    val observedTimelineIds: List<String> = observedTimelineIds.toList()
+    val observedTimelineIds: List<String> =
+        if (observedTimelineIds is TimelineReadSnapshot) observedTimelineIds else observedTimelineIds.toList()
 }
 
 data class DirectChatState(
@@ -1045,33 +1048,51 @@ class DirectChatPresenter(
     }
 
     suspend fun markVisibleConversationRead(request: VisibleReadRequest): Boolean {
-        val admitted = synchronized(selectedRoute) {
-            val snapshot = state.value
-            val peer = request.occurrence.route?.peerJid ?: return false
-            if (request.accountId != account.id.value || snapshot.accountId != request.accountId ||
-                selectedRoute.value != request.occurrence || snapshot.routeOccurrence != request.occurrence ||
-                snapshot.contentStatus != ChatContentStatus.Ready
-            ) return false
-            val rendered = snapshot.messages.mapTo(hashSetOf()) { it.id }
-            val boundary = request.observedTimelineIds.indexOfLast {
-                it in request.messageIds && it in rendered
+        val peer = request.occurrence.route?.peerJid ?: return false
+        val caller = currentCoroutineContext()
+        fun owns(snapshot: DirectChatState): Boolean =
+            presenterJob.isActive && request.accountId == account.id.value && snapshot.accountId == request.accountId &&
+                selectedRoute.value == request.occurrence && snapshot.routeOccurrence == request.occurrence &&
+                snapshot.contentStatus == ChatContentStatus.Ready
+
+        while (true) {
+            val messages = synchronized(selectedRoute) {
+                val snapshot = state.value
+                if (!owns(snapshot)) return false
+                snapshot.messages
             }
-            peer to request.observedTimelineIds.take(boundary + 1).filter { it in rendered }
+            val ids = withContext(Dispatchers.Default) {
+                val rendered = messages.mapTo(hashSetOf()) { it.id }
+                val boundary = request.observedTimelineIds.indexOfLast {
+                    it in request.messageIds && it in rendered
+                }
+                request.observedTimelineIds.take(boundary + 1).filter { it in rendered }
+            }
+            val write = synchronized(selectedRoute) {
+                val snapshot = state.value
+                if (!owns(snapshot)) return false
+                // A same-occurrence edit can remove/reproject rows while preparation is suspended.
+                // Recompute against that membership without admitting later observation IDs.
+                if (snapshot.messages !== messages) null
+                else {
+                    if (ids.isEmpty()) return false
+                    // The final cancellation check linearizes admission. From here the presenter
+                    // owns persistence, independently of subsequent effect disposal or navigation.
+                    caller.ensureActive()
+                    presenterScope.async(Dispatchers.IO) {
+                        try {
+                            repository.markMessagesRead(request.accountId, peer, ids)
+                            true
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            false
+                        }
+                    }
+                }
+            }
+            if (write != null) return write.await()
         }
-        if (admitted.second.isEmpty()) return false
-        // The effect may disappear after admission; only presenter retirement cancels this write.
-        // Keep the exact admitted account, peer and IDs, never a later route projection.
-        return presenterScope.async {
-            try {
-                repository.markMessagesRead(request.accountId, admitted.first, admitted.second)
-                true
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                // Leave failed rows unread and report failure to any remaining caller.
-                false
-            }
-        }.await()
     }
 
     suspend fun joinRoom(value: String): Boolean {

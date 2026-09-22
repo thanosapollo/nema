@@ -1,10 +1,11 @@
 package org.thanosapollo.nema.ui.chat
 
 import org.thanosapollo.nema.chat.TimelineMessage
+import org.thanosapollo.nema.chat.TimelineReadSnapshot
 
 /** Snapshot-owned lookup: layout changes must visit visible rows, not the entire history. */
 internal class TimelineReadIndex(messages: List<TimelineMessage>) {
-    val orderedIds: List<String> = messages.map { it.id }
+    val orderedIds: List<String> = TimelineReadSnapshot(messages)
     private val membership = orderedIds.toHashSet()
     private val markers = messages.withIndex().filter {
         val message = it.value
