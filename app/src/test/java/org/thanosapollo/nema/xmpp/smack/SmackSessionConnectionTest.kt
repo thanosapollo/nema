@@ -55,6 +55,44 @@ import org.jxmpp.jid.impl.JidCreate
 @Config(sdk = [34], application = Application::class)
 class SmackSessionConnectionTest {
     @Test
+    fun `group send enters only with current membership while direct is independent`() = runBlocking {
+        SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
+        val transport = RecordingXmppConnection()
+        val session = session(transport)
+        val first = attempt(1)
+        session.updateAttempt(first)
+        val registry = session.privateField("roomStableIdAuthorities") as RoomStableIdAuthorityRegistry
+        val room = "room@conference.example.org"
+        val group = org.thanosapollo.nema.xmpp.transport.OutgoingMessageEnvelope(
+            ACCOUNT_ID, first.generation, 1, "operation", "origin", room, "body", null,
+            kind = org.thanosapollo.nema.thread.MessageKind.GROUPCHAT,
+        )
+        var entries = 0
+        suspend fun rejected(message: org.thanosapollo.nema.xmpp.transport.OutgoingMessageEnvelope) {
+            val before = entries
+            val sent = transport.events.toList()
+            assertTrue(runCatching { session.send(message) { entries++ } }.exceptionOrNull() is SendNotAttemptedException)
+            assertEquals(before, entries)
+            assertEquals(sent, transport.events.toList())
+        }
+        rejected(group)
+        val joining = requireNotNull(registry.beginJoin(first, room))
+        rejected(group) // A join in flight is not membership.
+        session.send(group.copy(recipient = PEER, kind = org.thanosapollo.nema.thread.MessageKind.CHAT)) { entries++ }
+        assertTrue(registry.publish(joining, stableIds = false, occupantIds = false))
+        session.send(group) { entries++ } // No feature capability is required.
+        assertEquals(listOf("message:chat", "message:groupchat"), transport.events.toList())
+        registry.revoke(joining)
+        rejected(group)
+        val rejoined = requireNotNull(registry.beginJoin(first, room))
+        assertTrue(registry.publish(rejoined, stableIds = false, occupantIds = false))
+        session.updateAttempt(attempt(2))
+        rejected(group)
+        rejected(group.copy(generation = attempt(2).generation))
+        assertEquals(2, entries)
+    }
+
+    @Test
     fun `connection lifecycle routes every terminal path to roster retirement`() {
         listOf<(SmackSessionConnection) -> Unit>(
             { it.updateAttempt(attempt(2)) },
@@ -549,6 +587,10 @@ class SmackSessionConnectionTest {
         override fun throwNotConnectedExceptionIfAppropriate() = Unit
 
         override fun sendStanzaInternal(packet: Stanza) {
+            if (packet is Message) {
+                events += "message:${packet.type}"
+                return
+            }
             val request = packet as IQ
             val response = when (request) {
                 is DiscoverInfo -> {

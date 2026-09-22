@@ -414,7 +414,9 @@ internal class SmackSessionConnection(
                 attempt == null ||
                 attempt.accountId != message.accountId ||
                 attempt.generation != message.generation ||
-                !isUsable
+                !isUsable ||
+                (message.kind == MessageKind.GROUPCHAT &&
+                    roomStableIdAuthorities.snapshot(attempt, message.recipient) == null)
             ) {
                 throw SendNotAttemptedException()
             }

@@ -723,7 +723,10 @@ class DirectChatPresenter(
     private var ensuredPeerJids: Set<String> = emptySet()
     private val routeReady = CompletableDeferred<Unit>()
     private val routeGeneration = AtomicInteger(0)
-    private val joinedRooms = mutableSetOf<String>()
+    private class RoomJoins(val connection: Any?) {
+        val joined = mutableSetOf<String>()
+        val inFlight = mutableSetOf<String>()
+    }
     private val selectedRoute = MutableStateFlow(ChatRouteOccurrence(null, 0))
     private val directory = MutableStateFlow(DirectoryView(DirectoryMode.CHECKING))
     val directoryState: StateFlow<DirectoryView> get() = directory
@@ -940,10 +943,35 @@ class DirectChatPresenter(
             routeReady.complete(Unit)
         }
         presenterScope.launch {
-            state.collect { snapshot ->
-                val peer = snapshot.selectedPeer ?: return@collect
-                if (snapshot.contentStatus != ChatContentStatus.Ready) return@collect
-                if (snapshot.selectedPeerGroupChat) joinSelectedRoom(peer)
+            var joins: RoomJoins? = null
+            combine(
+                state.filter { it.contentStatus == ChatContentStatus.Ready }
+                    .map { it.routeOccurrence to it.selectedPeerGroupChat }.distinctUntilChanged(),
+                directoryConnection.distinctUntilChanged(),
+            ) { route, connection -> route to connection }.collect { (route, connection) ->
+                val current = joins?.takeIf { it.connection == connection }
+                    ?: RoomJoins(connection).also { joins = it }
+                val peer = route.first.route?.peerJid ?: return@collect
+                if (!route.second) return@collect
+                // Retry only on a new route occurrence or connection, not on drafts,
+                // room-view updates, or other presentation emissions after failure.
+                if (synchronized(current) { peer !in current.joined && current.inFlight.add(peer) }) {
+                    presenterScope.launch {
+                        var joined = false
+                        try {
+                            joined = joinMuc(peer)
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            // A failed join remains retryable on explicit entry/reconnect.
+                        } finally {
+                            synchronized(current) {
+                                current.inFlight.remove(peer)
+                                if (joined) current.joined.add(peer)
+                            }
+                        }
+                    }
+                }
             }
         }
         presenterScope.launch {
@@ -1007,13 +1035,8 @@ class DirectChatPresenter(
         selectRoute(ChatRoute(canonical))
         presenterScope.launch {
             repository.markRoom(account.id.value, canonical)
-            joinSelectedRoom(canonical)
         }
         return true
-    }
-
-    private suspend fun joinSelectedRoom(peer: String) {
-        if (synchronized(joinedRooms) { joinedRooms.add(peer) }) joinMuc(peer)
     }
 
     fun closeConversation() {

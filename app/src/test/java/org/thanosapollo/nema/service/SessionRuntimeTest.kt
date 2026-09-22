@@ -1005,7 +1005,7 @@ class SessionRuntimeTest {
         assertEquals(ConnectionCommandOutcome.RUNNING, runtime.activate(second.id))
         connections.created.last().archiveSupported = true
         release.complete(Unit)
-        assertTrue(pending.await())
+        assertFalse(pending.await())
         runCurrent()
         assertTrue(connections.created.all { it.publishedBookmarks.isEmpty() })
         assertTrue(connections.created.all { connection ->
@@ -2294,6 +2294,93 @@ class SessionRuntimeTest {
         assertEquals("Shared cached", database.sharedThreadDao().rows(f.account.id.value, REACTION_PEER, MessageKind.CHAT).single().title)
     }
 
+    @Test
+    fun `presenter offline join retries after runtime reconnect`() = runTest {
+        val f = connectedRuntime(backgroundScope, "offline-muc")
+        f.runtime.stop()
+        val results = kotlinx.coroutines.channels.Channel<Boolean>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        val presenter = DirectChatPresenter(
+            f.account, ChatRepository(database), backgroundScope, { _, _ -> true },
+            directoryConnection = f.runtime.state,
+            joinMuc = { f.runtime.joinMuc(it).also { result -> results.send(result) } },
+        )
+        try {
+            presenter.joinRoom(REACTION_ROOM)
+            assertFalse(results.receive())
+            assertTrue(f.connection.joinedRooms.isEmpty())
+            assertEquals(ConnectionCommandOutcome.RUNNING, f.runtime.connectActive())
+            // Connecting may independently produce an offline false result. Only
+            // the new Connected owner can satisfy the selected-room entry.
+            while (!results.receive()) Unit
+            assertEquals(REACTION_ROOM, f.connections.created.last().joinedRooms.single().first)
+        } finally { presenter.close(); f.runtime.stop() }
+    }
+
+    @Test
+    fun `delayed room join keeps outbox pending sends direct and wakes room once`() = queuedRoomJoin("success")
+
+    @Test
+    fun `failed room join keeps outbox pending until explicit retry`() = queuedRoomJoin("false")
+
+    @Test
+    fun `cancelled room join keeps outbox pending until explicit retry`() = queuedRoomJoin("cancel")
+
+    private fun queuedRoomJoin(outcome: String) = runTest {
+        val f = connectedRuntime(backgroundScope, "queued-muc")
+        val release = CompletableDeferred<Unit>()
+        f.connection.requireRoomMembership = true
+        f.connection.nextJoinGate = release
+        fun intent(id: String, kind: MessageKind) = OutboundIntent(
+            accountId = f.account.id.value, operationId = id, localMessageId = id,
+            originId = id, peerJid = if (kind == MessageKind.GROUPCHAT) REACTION_ROOM else REACTION_PEER,
+            senderJid = f.account.bareJid.value, messageKind = kind, threadId = null,
+            parentThreadId = null, body = id,
+        )
+        suspend fun awaitStatus(id: String, expected: OutboxStatus) {
+            val peer = if (id == "room-pending") REACTION_ROOM else REACTION_PEER
+            database.messageDao().observeDirectTimeline(f.account.id.value, peer).first { rows ->
+                rows.any { it.operationId == id && it.outboxStatus == expected.name }
+            }
+        }
+        try {
+            f.store.compose(intent("room-pending", MessageKind.GROUPCHAT))
+            f.store.compose(intent("direct-pending", MessageKind.CHAT))
+            val join = async { f.runtime.joinMuc(REACTION_ROOM) }
+            f.connection.joined.await()
+            // A new local compose is the ordinary dispatch wake.
+            val draft = org.thanosapollo.nema.chat.DraftSnapshot(
+                org.thanosapollo.nema.chat.DirectConversationKey(f.account.id.value, REACTION_PEER), "wake", 1,
+            )
+            assertTrue(f.runtime.enqueueDirect(f.account, draft))
+            awaitStatus("direct-pending", OutboxStatus.UNCERTAIN)
+            awaitStatus("room-pending", OutboxStatus.PENDING)
+            assertFalse(f.connection.sentMessages.any { it.kind == MessageKind.GROUPCHAT })
+            when (outcome) {
+                "cancel" -> join.cancelAndJoin()
+                "false" -> {
+                    f.connection.nextJoinResult = false
+                    release.complete(Unit)
+                    assertFalse(join.await())
+                }
+                else -> {
+                    release.complete(Unit)
+                    assertTrue(join.await())
+                }
+            }
+            if (outcome != "success") {
+                runCurrent()
+                assertEquals(OutboxStatus.PENDING, f.store.outbox(f.account.id.value, "room-pending")?.status)
+                assertFalse(f.connection.sentMessages.any { it.kind == MessageKind.GROUPCHAT })
+                assertTrue(f.runtime.joinMuc(REACTION_ROOM))
+            }
+            awaitStatus("room-pending", OutboxStatus.UNCERTAIN)
+            assertEquals(1, f.connection.sentMessages.count { it.operationId == "room-pending" })
+            assertTrue(f.runtime.joinMuc(REACTION_ROOM))
+            runCurrent()
+            assertEquals(1, f.connection.sentMessages.count { it.operationId == "room-pending" })
+        } finally { release.complete(Unit); f.runtime.stop() }
+    }
+
     private suspend fun connectedRuntime(
         scope: CoroutineScope, id: String, clock: () -> Long = { REACTION_NOW },
     ): RuntimeFixture {
@@ -2611,6 +2698,7 @@ class SessionRuntimeTest {
         val joinedRooms = mutableListOf<Triple<String, String?, String?>>()
         val joined = CompletableDeferred<Unit>()
         var nextJoinGate: CompletableDeferred<Unit>? = null
+        var nextJoinResult = true
         val published = CompletableDeferred<Unit>()
         val roomArchiveRequested = CompletableDeferred<Unit>()
         val repairRooms = mutableSetOf<String>()
@@ -2655,7 +2743,16 @@ class SessionRuntimeTest {
             repairRegistry.begin(attempt)
         }
 
-        override suspend fun send(message: OutgoingMessageEnvelope, entered: () -> Unit) = entered()
+        var requireRoomMembership = false
+        val sentMessages = mutableListOf<OutgoingMessageEnvelope>()
+        override suspend fun send(message: OutgoingMessageEnvelope, entered: () -> Unit) {
+            if (requireRoomMembership && message.kind == MessageKind.GROUPCHAT &&
+                repairRegistry.snapshot(attemptIdentity, message.recipient) == null) {
+                throw org.thanosapollo.nema.xmpp.transport.SendNotAttemptedException()
+            }
+            entered()
+            sentMessages += message
+        }
 
         override suspend fun sendSignal(signal: OutgoingMessageSignal) {
             sentSignals += signal
@@ -2691,6 +2788,10 @@ class SessionRuntimeTest {
             val gate = nextJoinGate
             nextJoinGate = null
             gate?.await()
+            if (!nextJoinResult) {
+                nextJoinResult = true
+                return false
+            }
             synchronized(repairGate) {
                 val lease = requireNotNull(repairRegistry.beginJoin(attemptIdentity, roomJid))
                 repairRegistry.publish(lease, stableIds = false, occupantIds = false, mamV2 = roomJid in repairRooms)

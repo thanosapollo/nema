@@ -482,6 +482,10 @@ class SessionRuntime(
             false
         }
         if (joined && controller.lifecycle.value.dispatchLease() == lease) {
+            // Membership, not authentication, admits queued room messages. This wake
+            // is independent of archive repair/discovery and never retries UNCERTAIN.
+            val observation = controller.lifecycle.value
+            if (observation.dispatchLease() == lease) launchDispatch(lease, observation)
             val repair = try {
                 controller.roomRepairAuthorization(lease, roomJid)
             } catch (cancelled: CancellationException) {
@@ -515,7 +519,7 @@ class SessionRuntime(
                 persistJoinedRoomBookmark(lease, roomJid, nick, password)
             }
         }
-        return joined
+        return joined && controller.lifecycle.value.dispatchLease() == lease
     }
 
     private suspend fun persistJoinedRoomBookmark(
