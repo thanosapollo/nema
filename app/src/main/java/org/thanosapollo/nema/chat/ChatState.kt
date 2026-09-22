@@ -379,6 +379,7 @@ data class DraftSnapshot(
 internal data class ConversationTimeline(
     val messages: List<TimelineMessage>,
     val mainUnreadCount: Int,
+    val recentThreads: List<RecentThread>,
 )
 
 class ChatRepository(database: NemaDatabase) {
@@ -483,7 +484,10 @@ class ChatRepository(database: NemaDatabase) {
             .groupBy({ it.first }, { it.second })
         val timeline = chronologicalTimelineRows(rows)
             .map { row -> row.toPresentation(aliasesByMessage[row.localMessageId].orEmpty()) }
-            .let { messages -> messages.map { it.withReplyPresentation(messages) } }
+            .let { messages ->
+                val replies = ReplyIndex(messages)
+                messages.map { it.withReplyPresentation(replies) }
+            }
             .map { message ->
                 val group = reactionsByMessage[message.id].orEmpty()
                 message.copy(
@@ -497,10 +501,11 @@ class ChatRepository(database: NemaDatabase) {
                 )
             }
         val kind = if (peer?.room == true) MessageKind.GROUPCHAT else MessageKind.CHAT
+        val threads = ThreadIndex(timeline)
         val namedIds = named.filter { it.messageKind == kind }.mapTo(hashSetOf()) { it.threadId }
         // Main activity uses exactly the same visible membership as Main read admission,
         // not a peer-wide total minus named counts (which would include hidden children).
-        val main = (if (peer?.room == true) timeline else timeline.projectThreads(null)).filterNot {
+        val main = (if (peer?.room == true) timeline else timeline.projectThreads(null, threads)).filterNot {
             (if (it.groupChat) MessageKind.GROUPCHAT else MessageKind.CHAT) == kind &&
                 it.thread?.id?.value in namedIds
         }
@@ -513,10 +518,10 @@ class ChatRepository(database: NemaDatabase) {
             key.thread == null -> main
             peer?.room == true -> timeline.filterByThread(key.thread)
             // Naming keeps exact bodies, but must not remove links to existing child history.
-            key.thread.id.value in namedIds -> timeline.projectThreads(key.thread).filterByThread(key.thread)
-            else -> timeline.projectThreads(key.thread)
+            key.thread.id.value in namedIds -> timeline.projectThreads(key.thread, threads).filterByThread(key.thread)
+            else -> timeline.projectThreads(key.thread, threads)
         }
-        return ConversationTimeline(selected, unread)
+        return ConversationTimeline(selected, unread, timeline.recentThreads(named, threads))
     }
 
     fun observeCurrentSession(accountId: String, peerJid: String): Flow<ThreadRef?> =
@@ -529,20 +534,8 @@ class ChatRepository(database: NemaDatabase) {
     suspend fun ensureCurrentSession(accountId: String, peerJid: String): ThreadRef =
         messages.ensureDirectThreadSession(accountId, peerJid)
 
-    fun observeRecentThreads(accountId: String, peerJid: String): Flow<List<RecentThread>> = combine(
-        dao.observeDirectTimeline(accountId, peerJid),
-        dao.observeDirectReplyAliases(accountId, peerJid),
-        dao.observeNamedThreads(accountId, peerJid),
-    ) { rows, aliases, titles ->
-        val aliasesByMessage = aliases
-            .filter { it.messageId != null }
-            .groupBy(TrustedIdentityAliasEntity::messageId, TrustedIdentityAliasEntity::value)
-            .mapValues { it.value.toSet() }
-        chronologicalTimelineRows(rows)
-            .map { row -> row.toPresentation(aliasesByMessage[row.localMessageId].orEmpty()) }
-            .let { messages -> messages.map { it.withReplyPresentation(messages) } }
-            .recentThreads(titles)
-    }.flowOn(Dispatchers.Default)
+    fun observeRecentThreads(accountId: String, peerJid: String): Flow<List<RecentThread>> =
+        observeConversationTimeline(DirectConversationKey(accountId, peerJid)).map { it.recentThreads }
 
     suspend fun renameThread(
         accountId: String,
@@ -818,9 +811,8 @@ class DirectChatPresenter(
                     repository.observeConversationTimeline(DirectConversationKey(account.id.value, route.peerJid, route.thread)),
                     repository.observePeer(account.id.value, route.peerJid),
                     repository.observeCurrentSession(account.id.value, route.peerJid),
-                    repository.observeRecentThreads(account.id.value, route.peerJid),
-                ) { timeline, peer, session, recent ->
-                    LocalConversation(subscription, timeline.messages, peer, session, recent, timeline.mainUnreadCount, ChatContentStatus.Ready)
+                ) { timeline, peer, session ->
+                    LocalConversation(subscription, timeline.messages, peer, session, timeline.recentThreads, timeline.mainUnreadCount, ChatContentStatus.Ready)
                 })
             }.retryWhen { failure, _ ->
                 if (failure is CancellationException) throw failure
@@ -830,7 +822,7 @@ class DirectChatPresenter(
                 selectedRoute.first { it != failedAt && it.route == route }
                 true
             }
-        }.stateIn(presenterScope, SharingStarted.Eagerly, null)
+        }.stateInReadModel(presenterScope, null)
 
     private val selectedConversation = selectedRoute.flatMapLatest { occurrence ->
         val route = occurrence.route
@@ -843,7 +835,7 @@ class DirectChatPresenter(
                 emit(emptySelection(occurrence, ChatContentStatus.Loading))
                 emitAll(
                     combine(
-                        localConversation.mapNotNull { it }.filter { it.subscription == subscription },
+                        localConversation.mapNotNull { it.value }.filter { it.subscription == subscription },
                         repository.observeStoredDraft(key),
                         observeRoom(route.peerJid).onStart { emit(null) },
                         observeTyping(route.peerJid).onStart { emit(emptyList()) },
@@ -1435,22 +1427,17 @@ private fun List<TimelineMessage>.filterByThread(thread: ThreadRef?): List<Timel
         filter { it.thread == thread }
     }
 
-private data class ResolvedThread(
+internal data class ResolvedThread(
     val thread: ThreadRef,
     val root: TimelineMessage,
     val members: List<TimelineMessage>,
 )
 
-private fun List<TimelineMessage>.projectThreads(
+internal fun List<TimelineMessage>.projectThreads(
     selected: ThreadRef?,
+    threads: ThreadIndex,
 ): List<TimelineMessage> {
-    val resolved = asSequence()
-        .filter { !it.groupChat }
-        .mapNotNull(TimelineMessage::thread)
-        .filter { it.parentId != null }
-        .distinct()
-        .mapNotNull(::resolveThread)
-        .toList()
+    val resolved = threads.resolved.values
     val visible = if (selected == null) {
         val hidden = resolved.flatMap(ResolvedThread::members).mapTo(mutableSetOf(), TimelineMessage::id)
         filterNot { it.id in hidden }
@@ -1476,27 +1463,33 @@ private fun List<TimelineMessage>.projectThreads(
     }
 }
 
-private fun List<TimelineMessage>.resolveThread(
-    thread: ThreadRef,
-): ResolvedThread? {
-    val members = filter { it.thread == thread && !it.groupChat }
-    if (members.isEmpty()) return null
-    val memberIds = members.mapTo(hashSetOf(), TimelineMessage::id)
-    val externalRoot = members.firstNotNullOfOrNull { member ->
-        member.resolveReplyTarget(this)?.takeIf { candidate ->
-            !candidate.groupChat &&
-                candidate.id !in memberIds &&
-                (candidate.thread?.id == thread.parentId ||
-                    (candidate.thread == null && thread.parentId != null))
+// One grouping and one reply index per immutable history, shared by Main, the
+// selected thread and recent threads. Full ThreadRef (including parent) is the key.
+internal class ThreadIndex(timeline: List<TimelineMessage>) {
+    val resolved: Map<ThreadRef, ResolvedThread>
+
+    init {
+        val replies = ReplyIndex(timeline)
+        val membersByThread = timeline.filter { !it.groupChat && it.thread?.parentId != null }
+            .groupBy { requireNotNull(it.thread) }
+        resolved = membersByThread.mapValues { (thread, members) ->
+            val memberIds = members.mapTo(hashSetOf(), TimelineMessage::id)
+            val externalRoot = members.firstNotNullOfOrNull { member ->
+                replies.resolve(member)?.takeIf { candidate ->
+                    !candidate.groupChat && candidate.id !in memberIds &&
+                        (candidate.thread?.id == thread.parentId ||
+                            (candidate.thread == null && thread.parentId != null))
+                }
+            }
+            ResolvedThread(thread, externalRoot ?: members.first(),
+                if (externalRoot == null) members.drop(1) else members)
         }
     }
-    val root = externalRoot ?: members.first()
-    val replies = if (externalRoot == null) members.drop(1) else members
-    return ResolvedThread(thread, root, replies)
 }
 
-private fun List<TimelineMessage>.recentThreads(
+internal fun List<TimelineMessage>.recentThreads(
     titles: List<NamedThreadRow>,
+    threads: ThreadIndex,
 ): List<RecentThread> {
     val customTitles = titles.associateBy { it.messageKind to it.threadId }
     val history = withIndex()
@@ -1509,7 +1502,7 @@ private fun List<TimelineMessage>.recentThreads(
             val (kind, thread) = key
             val members = indexed.map { it.value }
             val resolved = if (kind == MessageKind.CHAT && thread.parentId != null) {
-                resolveThread(thread)
+                threads.resolved[thread]
             } else {
                 null
             }
@@ -1548,21 +1541,44 @@ private fun String.threadTitlePreview(): String {
     return normalized.substring(0, normalized.offsetByCodePoints(0, codePoints))
 }
 
-private fun TimelineMessage.resolveReplyTarget(timeline: List<TimelineMessage>): TimelineMessage? {
-    val reference = replyToId ?: return null
-    val candidates = timeline.filter {
-        it.replyReferenceId == reference || reference in it.replyReferenceIds
+// A null map value records ambiguity, rather than choosing a first/last match.
+// Author-qualified indexes bound lookups even when many senders reuse one wire ID.
+internal class ReplyIndex(timeline: List<TimelineMessage>) {
+    private val unqualified = hashMapOf<String, TimelineMessage?>()
+    private val direct = hashMapOf<Pair<String, String>, TimelineMessage?>()
+    private val muc = hashMapOf<Pair<String, String>, TimelineMessage?>()
+
+    init {
+        for (message in timeline) {
+            val references = message.replyReferenceIds + listOfNotNull(message.replyReferenceId)
+            for (reference in references) {
+                unqualified.addCandidate(reference, message)
+                if (message.groupChat) muc.addCandidate(reference to message.senderJid, message)
+                else direct.addCandidate(reference to message.senderJid.substringBefore('/'), message)
+            }
+        }
     }
-    return if (replyToJid == null) {
-        candidates.singleOrNull()
-    } else {
-        candidates.filter { it.matchesReplyAuthor(requireNotNull(replyToJid)) }.singleOrNull()
+
+    fun resolve(message: TimelineMessage): TimelineMessage? {
+        val reference = message.replyToId ?: return null
+        val author = message.replyToJid ?: return unqualified[reference]
+        val directKey = reference to author.substringBefore('/')
+        val mucKey = reference to author
+        return when {
+            direct.containsKey(directKey) && muc.containsKey(mucKey) -> null
+            direct.containsKey(directKey) -> direct[directKey]
+            else -> muc[mucKey]
+        }
+    }
+
+    private fun <K> MutableMap<K, TimelineMessage?>.addCandidate(key: K, message: TimelineMessage) {
+        this[key] = if (containsKey(key)) null else message
     }
 }
 
-private fun TimelineMessage.withReplyPresentation(timeline: List<TimelineMessage>): TimelineMessage {
+private fun TimelineMessage.withReplyPresentation(replies: ReplyIndex): TimelineMessage {
     if (replyToId == null) return this
-    val target = resolveReplyTarget(timeline)
+    val target = replies.resolve(this)
     val fallback = replyFallbackBody?.toFallbackPreview()
     val previewBody = target?.body ?: fallback?.body ?: return this
     val sender = target?.senderJid?.replySenderLabel()
@@ -1570,12 +1586,6 @@ private fun TimelineMessage.withReplyPresentation(timeline: List<TimelineMessage
         ?: replyToJid?.replySenderLabel()
         ?: "message"
     return copy(reply = MessageReplyPresentation(sender, previewBody))
-}
-
-private fun TimelineMessage.matchesReplyAuthor(expected: String): Boolean = if (groupChat) {
-    senderJid == expected
-} else {
-    senderJid.substringBefore('/') == expected.substringBefore('/')
 }
 
 private data class FallbackReplyPreview(val senderLabel: String?, val body: String)

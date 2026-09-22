@@ -109,9 +109,11 @@ class ChatRepositoryPresenterTest {
         MessageStore(database).ingest(incoming(ACCOUNT, "local", "already on disk"))
         database.close()
         val aliasQueries = java.util.concurrent.atomic.AtomicInteger()
+        val timelineQueries = java.util.concurrent.atomic.AtomicInteger()
         database = Room.databaseBuilder(context, NemaDatabase::class.java, databaseName)
             .setQueryCallback({ sql, _ ->
-                if (sql.contains("FROM trusted_identity_aliases AS alias")) aliasQueries.incrementAndGet()
+                if (sql.trimStart().startsWith("SELECT alias.*") && sql.contains("FROM trusted_identity_aliases AS alias")) aliasQueries.incrementAndGet()
+                if (sql.contains("END AS replyReferenceId") && sql.contains("AS conversationArchiveOrdinal")) timelineQueries.incrementAndGet()
             }, java.util.concurrent.Executor { it.run() }).build()
         val repository = ChatRepository(database)
         val presenter = DirectChatPresenter(accountConfiguration(ACCOUNT, SELF), repository, scope, { _, _ -> true })
@@ -119,7 +121,8 @@ class ChatRepositoryPresenterTest {
             presenter.selectPeer(PEER)
             val first = withTimeout(5_000) { presenter.state.first { it.messages.isNotEmpty() } }
             val queries = aliasQueries.get()
-            assertTrue(queries > 0)
+            assertEquals("timeline and recent threads must share the alias subscription", 1, queries)
+            assertEquals("timeline and recent threads must share the history subscription", 1, timelineQueries.get())
             presenter.closeConversation()
             withTimeout(5_000) { presenter.state.first { it.selectedPeer == null } }
             repository.saveDraft(DirectConversationKey(ACCOUNT, PEER), "changed while closed")
@@ -130,6 +133,7 @@ class ChatRepositoryPresenterTest {
             assertEquals("changed while closed", reopened.draft)
             assertEquals("local", reopened.messages.single().id)
             assertEquals("reopening must not restart peer timeline/alias queries", queries, aliasQueries.get())
+            assertEquals("reopening must retain the history subscription", 1, timelineQueries.get())
             MessageStore(database).ingest(incoming(ACCOUNT, "new", "invalidation"))
             withTimeout(5_000) { presenter.state.first { it.messages.size == 2 } }
             assertTrue(aliasQueries.get() > queries)

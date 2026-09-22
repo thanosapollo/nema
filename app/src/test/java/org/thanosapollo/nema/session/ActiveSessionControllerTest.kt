@@ -38,6 +38,30 @@ import org.thanosapollo.nema.xmpp.transport.SendNotAttemptedException
 @OptIn(ExperimentalCoroutinesApi::class)
 class ActiveSessionControllerTest {
     @Test
+    fun `connection notification exposes matching lifecycle authority before consumers refresh`() = runTest {
+        val controller = ActiveSessionController(this, FakeFactory(), retryWait = {})
+        val observations = mutableListOf<Pair<ConnectionState, SessionLifecycleObservation>>()
+        // A resumed consumer may run before the publishing thread continues. This is
+        // the lease read used by directory refresh on each connection notification.
+        val collector = backgroundScope.launch(Dispatchers.Unconfined) {
+            controller.state.collect { observations += it to controller.lifecycle.value }
+        }
+        controller.start(account("first"), "secret".toCharArray())
+        controller.stop()
+        controller.start(account("first"), "secret".toCharArray())
+        val connected = observations.filter { it.first is ConnectionState.Connected }
+        assertEquals(2, connected.size)
+        connected.forEach { (state, lifecycle) ->
+            state as ConnectionState.Connected
+            assertEquals(state, lifecycle.state)
+            assertEquals(state.generation, lifecycle.dispatchLease()?.identity?.generation)
+        }
+        observations.forEach { (state, lifecycle) -> assertEquals(state, lifecycle.state) }
+        collector.cancelAndJoin()
+        controller.stop()
+    }
+
+    @Test
     fun `HTTP downloads cannot cross account switch or retired generation`() = runTest {
         val factory = FakeFactory()
         val controller = ActiveSessionController(this, factory, retryWait = {})
