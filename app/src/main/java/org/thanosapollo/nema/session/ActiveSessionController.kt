@@ -1129,12 +1129,15 @@ internal class ActiveSessionController(
     ) {
         // Connecting starts a new generation; Connected keeps events received during login.
         if (state !is ConnectionState.Connected) retireEphemeral()
-        mutableState.value = state
+        // Publish command authority before notifying consumers that can immediately
+        // refresh it. Otherwise Connected can be consumed with a Connecting lease
+        // and leave the directory OFFLINE until some unrelated state changes.
         mutableLifecycle.value = SessionLifecycleObservation(
             state,
             lifecycleEpoch.takeIf { it > 0 }?.let(LifecycleEpoch::require),
             owner,
         )
+        mutableState.value = state
     }
 
     private fun owns(owner: OwnedSession, attempt: SessionAttemptIdentity? = null): Boolean {

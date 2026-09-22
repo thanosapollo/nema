@@ -96,9 +96,25 @@ class SharedRenameAuthorityTest {
         presenter = DirectChatPresenter(account, repository, scope, runtime::enqueueDirect,
             directoryConnection = runtime.state, refreshDirectory = runtime::refreshThreadDirectory,
             changeDirectory = runtime::changeThreadDirectory)
+        val notificationRefreshes = kotlinx.coroutines.channels.Channel<DirectoryView>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        // Consume the notification immediately, before its publisher continues.
+        // Directory refresh must see the new lease, not a still-Connecting lifecycle.
+        scope.launch(Dispatchers.Unconfined) {
+            runtime.state.collect { connection ->
+                if (connection is ConnectionState.Connected && connection.generation.value > 1) {
+                    notificationRefreshes.send(runtime.refreshThreadDirectory(account, peer, kind))
+                }
+            }
+        }
         suspend fun connect(): ConnectionState.Connected {
             runtime.connectActive()
-            return withTimeout(5_000) { runtime.state.first { it is ConnectionState.Connected } as ConnectionState.Connected }
+            val connection = withTimeout(5_000) { runtime.state.first { it is ConnectionState.Connected } as ConnectionState.Connected }
+            if (connection.generation.value > 1) {
+                val refreshed = withTimeout(5_000) { notificationRefreshes.receive() }
+                assertEquals("Refresh consuming reconnect must see its lifecycle lease", DirectoryMode.SHARED, refreshed.mode)
+                assertEquals(connection.generation.value, refreshed.context?.generation)
+            }
+            return connection
         }
         suspend fun ready() = withTimeout(5_000) { presenter.state.first {
             it.selectedPeer == peer && it.contentStatus == ChatContentStatus.Ready && it.recentThreads.any { entry -> entry.shared != null }
