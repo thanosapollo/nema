@@ -31,6 +31,7 @@ internal class MucArchiveIntegrationTest : ReactionStoreTestFixture() {
     private val key = ArchiveCursorKey(ACCOUNT, ROOM, ROOM)
     private lateinit var socket: ArchiveSocket
     private lateinit var session: SmackSessionConnection
+    private lateinit var registry: RoomStableIdAuthorityRegistry
     private val requests = mutableListOf<ArchivePageRequest>()
 
     @Before fun transport() {
@@ -41,7 +42,7 @@ internal class MucArchiveIntegrationTest : ReactionStoreTestFixture() {
         session = SmackSessionConnection(socket, "account", SELF, event = {})
         session.updateAttempt(attempt)
         val field = session.javaClass.getDeclaredField("roomStableIdAuthorities").apply { isAccessible = true }
-        val registry = field.get(session) as RoomStableIdAuthorityRegistry
+        registry = field.get(session) as RoomStableIdAuthorityRegistry
         val lease = requireNotNull(registry.beginJoin(attempt, ROOM))
         check(registry.publish(lease, true, true, "self", true))
     }
@@ -54,6 +55,36 @@ internal class MucArchiveIntegrationTest : ReactionStoreTestFixture() {
         sync.synchronize(identity, ROOM, ROOM) { true }
         assertTrue(sync.state.value.toString(), sync.state.value is ArchiveSyncState.Ready)
     }
+    @Test fun roomQueryRequiresCurrentMembershipAndRoomMamBeforeNetworkEntry() = runBlocking {
+        for (mode in listOf("absent", "unsupported", "generation")) {
+            registry.retireAll()
+            registry.begin(attempt)
+            if (mode == "unsupported") {
+                val lease = requireNotNull(registry.beginJoin(attempt, ROOM))
+                check(registry.publish(lease, true, true, "self", false))
+            }
+            val request = ArchivePageRequest(attempt.accountId,
+                if (mode == "generation") ConnectionGeneration.require(99) else attempt.generation,
+                ROOM, ROOM, ArchivePageDirection.BOOTSTRAP, null, 50)
+            assertTrue(mode, runCatching { session.queryArchive(request) }.exceptionOrNull() is SendNotAttemptedException)
+            assertEquals(mode, 0, socket.queries)
+        }
+    }
+
+    @Test fun nativeRoomQueryRejectsReplacedMembershipBeforePublishingPage() = runBlocking {
+        socket.pages.add(listOf("root"))
+        socket.beforeFin = {
+            val lease = requireNotNull(registry.beginJoin(attempt, ROOM))
+            check(registry.publish(lease, true, true, "self", true))
+        }
+        val synchronizer = sync()
+        synchronizer.synchronize(identity, ROOM, ROOM) { true }
+        assertTrue(synchronizer.state.value is ArchiveSyncState.RetryableError)
+        assertEquals(1, socket.queries)
+        assertTrue(store.messages(ACCOUNT).isEmpty())
+        assertNull(store.archiveCursor(key))
+    }
+
     private fun reopen() {
         database.close()
         database = NemaDatabase.create(context, databaseName)
@@ -150,6 +181,8 @@ internal class MucArchiveIntegrationTest : ReactionStoreTestFixture() {
     private inner class ArchiveSocket : XMPPTCPConnection(XMPPTCPConnectionConfiguration.builder()
         .setXmppDomain(JidCreate.domainBareFrom("example.org")).setUsernameAndPassword("account", null).build()) {
         val pages = ArrayDeque<List<String>>()
+        var queries = 0
+        var beforeFin: () -> Unit = {}
         var expired = false
         var wrongRoom = false
         var actor = "occupant"
@@ -161,6 +194,8 @@ internal class MucArchiveIntegrationTest : ReactionStoreTestFixture() {
         override fun throwNotConnectedExceptionIfAppropriate() = Unit
         override fun sendStanzaInternal(packet: Stanza) {
             val query = packet as MamQueryIQ
+            queries++
+            assertEquals(ROOM, query.to.toString())
             val ids = pages.removeFirst()
             val accepted = if (expired) ids.filter { it == "boundary" } else ids
             for (id in ids) {
@@ -174,6 +209,7 @@ internal class MucArchiveIntegrationTest : ReactionStoreTestFixture() {
                         "<result xmlns='urn:xmpp:mam:2' queryid='$qid' id='uid-$id'><forwarded xmlns='urn:xmpp:forward:0'>" +
                         "<delay xmlns='urn:xmpp:delay' stamp='2026-01-01T00:00:00Z'/>$inner</forwarded></result></message>"))
             }
+            beforeFin()
             processStanza(PacketParserUtils.parseStanza(
                 "<iq xmlns='jabber:client' from='$ROOM' to='$SELF/test' id='${query.stanzaId}' type='result'>" +
                     "<fin xmlns='urn:xmpp:mam:2' complete='true' stable='true'><set xmlns='http://jabber.org/protocol/rsm'>" +

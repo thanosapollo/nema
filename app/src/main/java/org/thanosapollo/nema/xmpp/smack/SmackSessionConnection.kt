@@ -491,7 +491,16 @@ internal class SmackSessionConnection(
     }
 
     override suspend fun queryArchive(request: ArchivePageRequest): ArchivePageEnvelope =
-        runInterruptible(Dispatchers.IO) {
+        queryArchiveWithAuthorization(request, if (request.scope == ACCOUNT_ARCHIVE_SCOPE) null else
+            roomArchiveAuthorization(request.scope) ?: throw SendNotAttemptedException())
+
+    override suspend fun queryArchive(
+        request: ArchivePageRequest, authorization: org.thanosapollo.nema.session.RoomArchiveAuthorization,
+    ): ArchivePageEnvelope = queryArchiveWithAuthorization(request, authorization)
+
+    private suspend fun queryArchiveWithAuthorization(
+        request: ArchivePageRequest, authorization: org.thanosapollo.nema.session.RoomArchiveAuthorization?,
+    ): ArchivePageEnvelope = runInterruptible(Dispatchers.IO) {
             val archiveJid = if (request.scope == ACCOUNT_ARCHIVE_SCOPE) {
                 require(request.archiveAuthority == expectedBareJid) { "Unexpected archive authority" }
                 expectedBareJid
@@ -502,10 +511,18 @@ internal class SmackSessionConnection(
             val (attempt, roomFacts) = synchronized(entryGate) {
                 requireExactAttemptLocked(request.accountId, request.generation)
                 val current = requireNotNull(connectionListener.currentAttempt())
+                // Preserve the caller's incarnation across controller/IO waits; never
+                // silently replace it with a newly joined membership of the same room.
+                if (request.scope != ACCOUNT_ARCHIVE_SCOPE &&
+                    (authorization == null || authorization.attempt != current ||
+                        authorization.room != archiveJid || !authorization.admit())) {
+                    throw SendNotAttemptedException()
+                }
                 current to if (request.scope == ACCOUNT_ARCHIVE_SCOPE) {
                     null
                 } else {
                     copyRoomConsumerFacts(entryGate, roomStableIdAuthorities, current, archiveJid)
+                        ?.takeIf { it.mamV2 } ?: throw SendNotAttemptedException()
                 }
             }
             val trustStableIdsAtStart = if (request.scope == ACCOUNT_ARCHIVE_SCOPE) {
@@ -728,8 +745,8 @@ internal class SmackSessionConnection(
         )
     }
 
-    override fun roomRepairAuthorization(room: String): org.thanosapollo.nema.session.RoomRepairAuthorization? =
-        captureRoomRepairAuthorization(entryGate, roomStableIdAuthorities, room) {
+    override fun roomArchiveAuthorization(room: String): org.thanosapollo.nema.session.RoomArchiveAuthorization? =
+        captureRoomArchiveAuthorization(entryGate, roomStableIdAuthorities, room) {
             connectionListener.currentAttempt().takeIf { !revoked.get() && isUsable }
         }
 
@@ -1257,13 +1274,13 @@ internal fun copyRoomConsumerFacts(
     RoomConsumerFacts(snapshot.lease, snapshot.lease.authority.takeIf { snapshot.stableIds }, snapshot.occupantIds, snapshot.ownNick, snapshot.mamV2)
 }
 
-internal fun captureRoomRepairAuthorization(
+internal fun captureRoomArchiveAuthorization(
     entryGate: Any, registry: RoomStableIdAuthorityRegistry, room: String,
     currentAttempt: () -> SessionAttemptIdentity?,
-): org.thanosapollo.nema.session.RoomRepairAuthorization? = synchronized(entryGate) {
+): org.thanosapollo.nema.session.RoomArchiveAuthorization? = synchronized(entryGate) {
     val attempt = currentAttempt() ?: return@synchronized null
     val captured = registry.snapshot(attempt, room)?.takeIf { it.mamV2 } ?: return@synchronized null
-    org.thanosapollo.nema.session.RoomRepairAuthorization(attempt, captured.lease.authority) {
+    org.thanosapollo.nema.session.RoomArchiveAuthorization(attempt, captured.lease.authority, captured.stableIds) {
         synchronized(entryGate) {
             currentAttempt() == attempt && registry.snapshot(attempt, room)?.let {
                 it.lease == captured.lease && it.mamV2

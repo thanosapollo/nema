@@ -736,6 +736,194 @@ class SessionRuntimeTest {
         assertEquals(1, fixture.connection.disconnectCalls)
     }
 
+    @Test fun `room MAM uses joined room capability without personal MAM and commits history`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "room-only")
+        runCurrent()
+        val room = "history@conference.example.org"
+        val connection = fixture.connection
+        assertFalse(connection.archiveSupported)
+        connection.repairRooms += room
+        connection.roomArchiveResponse = { request -> roomHistoryPage(request) }
+        assertTrue(fixture.runtime.joinMuc(room))
+        connection.roomArchiveJob.await().join()
+        val request = connection.archiveRequests.single()
+        assertEquals(room, request.archiveAuthority)
+        assertEquals(room, request.scope)
+        val key = ArchiveCursorKey(fixture.account.id.value, room, room)
+        assertEquals("history-uid", fixture.store.archiveCursor(key)?.newestId)
+        assertEquals("room history", fixture.store.messages(fixture.account.id.value).single().body)
+    }
+
+    @Test fun `personal MAM never authorizes an unsupported room`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "personal-only")
+        runCurrent()
+        fixture.connection.archiveSupported = true
+        val room = "unsupported@conference.example.org"
+        assertTrue(fixture.runtime.joinMuc(room))
+        fixture.connection.published.await()
+        runCurrent()
+        assertTrue(fixture.connection.archiveRequests.none { it.scope == room })
+        assertNull(fixture.store.archiveCursor(ArchiveCursorKey(fixture.account.id.value, room, room)))
+    }
+
+    @Test fun `room archive response cannot commit after membership or generation replacement`() = runTest {
+        for (mode in listOf("membership", "rejoin", "attempt", "generation")) {
+            val fixture = connectedRuntime(backgroundScope, "stale-history-$mode")
+            runCurrent()
+            val room = "$mode@conference.example.org"
+            val connection = fixture.connection
+            connection.repairRooms += room
+            val release = CompletableDeferred<Unit>()
+            connection.roomArchiveResponse = { request ->
+                release.await()
+                roomHistoryPage(request)
+            }
+            assertTrue(fixture.runtime.joinMuc(room))
+            val job = connection.roomArchiveJob.await()
+            when (mode) {
+                "membership" -> connection.repairRegistry.retireAll()
+                "rejoin" -> {
+                    val lease = requireNotNull(connection.repairRegistry.beginJoin(connection.attemptIdentity, room))
+                    connection.repairRegistry.publish(lease, false, false, mamV2 = true)
+                }
+                "attempt" -> connection.updateAttempt(connection.attemptIdentity.copy(attempt = ConnectionAttempt.require(99)))
+                "generation" -> connection.updateAttempt(connection.attemptIdentity.copy(generation = ConnectionGeneration.require(99)))
+            }
+            release.complete(Unit)
+            job.join()
+            assertEquals(mode, 1, connection.archiveRequests.count { it.scope == room })
+            assertNull(fixture.store.archiveCursor(ArchiveCursorKey(fixture.account.id.value, room, room)))
+            assertTrue(fixture.store.messages(fixture.account.id.value).isEmpty())
+            fixture.runtime.serviceDestroyed()
+        }
+    }
+
+    @Test fun `room archive queued transaction rechecks membership before admission`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "queued-history")
+        runCurrent()
+        val room = "queued@conference.example.org"
+        val connection = fixture.connection
+        connection.repairRooms += room
+        val entered = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        val holding = CompletableDeferred<kotlinx.coroutines.Deferred<Unit>>()
+        connection.roomArchiveResponse = { request ->
+            holding.complete(async(Dispatchers.IO) {
+                database.withTransaction { entered.complete(Unit); release.await() }
+            })
+            entered.await()
+            roomHistoryPage(request)
+        }
+        assertTrue(fixture.runtime.joinMuc(room))
+        entered.await()
+        runCurrent()
+        val executor = database.transactionExecutor
+        val field = executor.javaClass.declaredFields.single {
+            java.util.Collection::class.java.isAssignableFrom(it.type)
+        }.apply { isAccessible = true }
+        try {
+            assertTrue(synchronized(executor) { (field.get(executor) as Collection<*>).isNotEmpty() })
+            connection.repairRegistry.retireAll()
+        } finally { release.complete(Unit); holding.await().await() }
+        connection.roomArchiveJob.await().join()
+        assertNull(fixture.store.archiveCursor(ArchiveCursorKey(fixture.account.id.value, room, room)))
+        assertTrue(fixture.store.messages(fixture.account.id.value).isEmpty())
+    }
+
+    @Test fun `service room query retains original membership through deferred native admission`() = runTest {
+        val fixture = connectedRuntime(backgroundScope, "deferred-native-history")
+        runCurrent()
+        val room = "deferred@conference.example.org"
+        val connection = fixture.connection
+        org.thanosapollo.nema.xmpp.smack.SmackAndroid.initialize(context)
+        org.thanosapollo.nema.xmpp.smack.installNemaMamResultProvider()
+        val socket = RoomHistorySocket(room)
+        val native = org.thanosapollo.nema.xmpp.smack.SmackSessionConnection(
+            socket, "account", "account@example.org", event = {},
+        )
+        native.updateAttempt(connection.attemptIdentity)
+        connection.repairRegistry = native.javaClass.getDeclaredField("roomStableIdAuthorities")
+            .apply { isAccessible = true }.get(native) as org.thanosapollo.nema.xmpp.smack.RoomStableIdAuthorityRegistry
+        connection.repairRooms += room
+        val entered = kotlinx.coroutines.channels.Channel<Pair<Job,
+            org.thanosapollo.nema.session.RoomArchiveAuthorization>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        val release = kotlinx.coroutines.channels.Channel<Unit>()
+        connection.authorizedRoomQuery = { request, authorization ->
+            // The actual service/controller call has selected L1. Hold before the
+            // production native method (including its IO dispatch) consumes it.
+            entered.send(requireNotNull(currentCoroutineContext()[Job]) to authorization)
+            release.receive()
+            native.queryArchive(request, authorization)
+        }
+        assertTrue(fixture.runtime.joinMuc(room))
+        val (oldJob, oldAuthorization) = entered.receive()
+        assertTrue(oldAuthorization.admit())
+        // A real second service join publishes L2 in the same attempt/generation.
+        assertTrue(fixture.runtime.joinMuc(room))
+        assertFalse(oldAuthorization.admit())
+        assertTrue(requireNotNull(native.roomArchiveAuthorization(room)).admit())
+        release.send(Unit)
+        oldJob.join()
+        // Fresh synchronization is serialized behind L1; hold it independently
+        // so the stale request's zero-wire and zero-durable effects are observable.
+        val (freshJob, freshAuthorization) = entered.receive()
+        assertEquals(0, socket.queries)
+        assertNull(fixture.store.archiveCursor(ArchiveCursorKey(fixture.account.id.value, room, room)))
+        assertTrue(fixture.store.messages(fixture.account.id.value).isEmpty())
+        release.send(Unit)
+        freshJob.join()
+        assertTrue(freshAuthorization.admit())
+        assertEquals(1, socket.queries)
+        assertEquals("history-uid", fixture.store.archiveCursor(
+            ArchiveCursorKey(fixture.account.id.value, room, room))?.newestId)
+        assertEquals("room history", fixture.store.messages(fixture.account.id.value).single().body)
+    }
+
+    private class RoomHistorySocket(private val room: String) : org.jivesoftware.smack.tcp.XMPPTCPConnection(
+        org.jivesoftware.smack.tcp.XMPPTCPConnectionConfiguration.builder()
+            .setXmppDomain(org.jxmpp.jid.impl.JidCreate.domainBareFrom("example.org"))
+            .setUsernameAndPassword("account", null).build(),
+    ) {
+        var queries = 0
+        init {
+            connected = true; authenticated = true
+            user = org.jxmpp.jid.impl.JidCreate.entityFullFrom("account@example.org/test")
+            replyTimeout = 3000
+        }
+        override fun throwNotConnectedExceptionIfAppropriate() = Unit
+        override fun sendStanzaInternal(packet: org.jivesoftware.smack.packet.Stanza) {
+            val query = packet as org.jivesoftware.smackx.mam.element.MamQueryIQ
+            queries++
+            assertEquals(room, query.to.toString())
+            processStanza(org.jivesoftware.smack.util.PacketParserUtils.parseStanza(
+                "<message xmlns='jabber:client' from='$room' to='account@example.org/test'>" +
+                    "<result xmlns='urn:xmpp:mam:2' queryid='${query.queryId}' id='history-uid'>" +
+                    "<forwarded xmlns='urn:xmpp:forward:0'><delay xmlns='urn:xmpp:delay' stamp='2026-01-01T00:00:00Z'/>" +
+                    "<message xmlns='jabber:client' from='$room/someone' type='groupchat'><body>room history</body>" +
+                    "</message></forwarded></result></message>",
+            ))
+            processStanza(org.jivesoftware.smack.util.PacketParserUtils.parseStanza(
+                "<iq xmlns='jabber:client' from='$room' to='account@example.org/test' id='${query.stanzaId}' type='result'>" +
+                    "<fin xmlns='urn:xmpp:mam:2' complete='true' stable='true'><set xmlns='http://jabber.org/protocol/rsm'>" +
+                    "<first index='0'>history-uid</first><last>history-uid</last><count>1</count></set></fin></iq>",
+            ))
+        }
+    }
+
+    private fun roomHistoryPage(request: org.thanosapollo.nema.xmpp.transport.ArchivePageRequest) =
+        org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope(
+            request, stable = true, complete = true, hasEarlier = false,
+            firstId = "history-uid", lastId = "history-uid",
+            messages = listOf(org.thanosapollo.nema.xmpp.transport.ArchiveMessageEnvelope(
+                "history-uid", IncomingMessageEnvelope(
+                    accountId = request.accountId, generation = request.generation,
+                    peer = request.scope, sender = "${request.scope}/someone", outbound = false,
+                    originId = null, body = "room history", thread = null, kind = MessageKind.GROUPCHAT,
+                    sentAtEpochMs = 1L, sentTimeSource = MessageTimeSource.MAM,
+                ),
+            )),
+        )
+
     private suspend fun seedRepairPair(account: String, room: String) {
         val dao = database.messageDao()
         dao.insertPeer(org.thanosapollo.nema.storage.PeerEntity(account, room))
@@ -768,7 +956,8 @@ class SessionRuntimeTest {
         assertEquals(ReconciliationRepairStatus.COMPLETE, receipt?.status)
         assertEquals(3, database.messageDao().messages(id).size)
         assertNull(database.accountDao().reconciliationState(id, "room-archive-uid-v1:${b.length}:$b"))
-        assertTrue(fixture.runtime.joinMuc(b)); assertEquals(b, fixture.connection.repairArchive.receive())
+        assertTrue(fixture.runtime.joinMuc(b)); runCurrent()
+        assertTrue(fixture.connection.archiveRequests.none { it.scope == b })
         assertEquals(3, database.messageDao().messages(id).size)
         assertNull(database.accountDao().reconciliationState(id, "room-archive-uid-v1:${b.length}:$b"))
         fixture.runtime.serviceDestroyed()
@@ -851,12 +1040,12 @@ class SessionRuntimeTest {
 
     @Test fun `admitted room repair completes after retirement without holding entry monitor`() = runTest {
         lateinit var connection: RecordingConnection
-        var reached = false
+        val reached = CompletableDeferred<Unit>()
         repairObserver = { boundary ->
             if (boundary == MessageWriteBoundary.AFTER_DEPENDENT_REPARENT) {
                 assertFalse(Thread.holdsLock(connection.repairGate))
                 connection.revoke()
-                reached = true
+                reached.complete(Unit)
             }
         }
         val fixture = connectedRuntime(backgroundScope, "accepted")
@@ -866,8 +1055,10 @@ class SessionRuntimeTest {
         seedRepairPair(fixture.account.id.value, room)
         connection.archiveSupported = true; connection.repairRooms += room
         assertTrue(fixture.runtime.joinMuc(room))
-        assertEquals(room, connection.repairArchive.receive())
-        assertTrue(reached)
+        reached.await()
+        database.withTransaction { }
+        runCurrent()
+        assertTrue(connection.archiveRequests.none { it.scope == room })
         assertEquals(1, database.messageDao().messages(fixture.account.id.value).size)
         assertEquals(ReconciliationRepairStatus.COMPLETE, database.accountDao().reconciliationState(
             fixture.account.id.value, "room-archive-uid-v1:${room.length}:$room")?.status)
@@ -1050,6 +1241,7 @@ class SessionRuntimeTest {
             executor.arm()
             assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
             val original = connections.created.single()
+            original.repairRooms += bookmark.roomJid
             // Only this database's peer transaction is held, after restoration's authority check.
             executor.entered.await()
             // The fake records the caller's Job at the first bookmark read; the controller
@@ -2701,14 +2893,28 @@ class SessionRuntimeTest {
         var nextJoinResult = true
         val published = CompletableDeferred<Unit>()
         val roomArchiveRequested = CompletableDeferred<Unit>()
+        val roomArchiveJob = CompletableDeferred<Job>()
+        var roomArchiveResponse: suspend (org.thanosapollo.nema.xmpp.transport.ArchivePageRequest) ->
+            org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope? = { null }
         val repairRooms = mutableSetOf<String>()
         val repairGate = Any()
-        val repairRegistry = org.thanosapollo.nema.xmpp.smack.RoomStableIdAuthorityRegistry()
+        var repairRegistry = org.thanosapollo.nema.xmpp.smack.RoomStableIdAuthorityRegistry()
         val repairArchive = kotlinx.coroutines.channels.Channel<String>(kotlinx.coroutines.channels.Channel.UNLIMITED)
-        override fun roomRepairAuthorization(room: String) =
-            org.thanosapollo.nema.xmpp.smack.captureRoomRepairAuthorization(repairGate, repairRegistry, room) {
+        override fun roomArchiveAuthorization(room: String) =
+            org.thanosapollo.nema.xmpp.smack.captureRoomArchiveAuthorization(repairGate, repairRegistry, room) {
                 attemptIdentity.takeIf { isUsable }
             }
+        var authorizedRoomQuery: (suspend (org.thanosapollo.nema.xmpp.transport.ArchivePageRequest,
+            org.thanosapollo.nema.session.RoomArchiveAuthorization) ->
+            org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope)? = null
+        override suspend fun queryArchive(
+            request: org.thanosapollo.nema.xmpp.transport.ArchivePageRequest,
+            authorization: org.thanosapollo.nema.session.RoomArchiveAuthorization,
+        ): org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope {
+            authorizedRoomQuery?.let { return it(request, authorization) }
+            if (!authorization.admit()) throw org.thanosapollo.nema.xmpp.transport.SendNotAttemptedException()
+            return queryArchive(request)
+        }
         var archiveSupported = false
         val archiveRequests = mutableListOf<org.thanosapollo.nema.xmpp.transport.ArchivePageRequest>()
         val sentTyping = mutableListOf<org.thanosapollo.nema.xmpp.transport.OutgoingChatState>()
@@ -2826,8 +3032,10 @@ class SessionRuntimeTest {
             org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope {
             archiveRequests += request
             if (request.scope != "ACCOUNT") {
+                roomArchiveJob.complete(requireNotNull(currentCoroutineContext()[Job]))
                 roomArchiveRequested.complete(Unit)
                 repairArchive.send(request.scope)
+                roomArchiveResponse(request)?.let { return it }
             }
             return org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope(
                 request, stable = true, complete = true, hasEarlier = false,

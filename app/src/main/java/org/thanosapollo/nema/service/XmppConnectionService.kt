@@ -71,6 +71,7 @@ import org.thanosapollo.nema.credentials.CredentialVault
 import org.thanosapollo.nema.session.ActiveSessionController
 import org.thanosapollo.nema.session.ConnectionState
 import org.thanosapollo.nema.session.DispatchLease
+import org.thanosapollo.nema.session.RoomArchiveAuthorization
 import org.thanosapollo.nema.session.SessionConnectionFactory
 import org.thanosapollo.nema.session.SessionFailureReason
 import org.thanosapollo.nema.session.SessionIdentity
@@ -83,6 +84,8 @@ import org.thanosapollo.nema.storage.RetryUncertainKey
 import org.thanosapollo.nema.thread.MessageKind
 import org.thanosapollo.nema.xmpp.smack.SmackSessionConnectionFactory
 import org.thanosapollo.nema.xmpp.transport.AccountId
+import org.thanosapollo.nema.xmpp.transport.CarbonCapabilityState
+import org.thanosapollo.nema.xmpp.transport.SessionCapabilities
 import org.thanosapollo.nema.xmpp.transport.SendNotAttemptedException
 import org.thanosapollo.nema.xmpp.blocking.PeerBlockingState
 import org.thanosapollo.nema.xmpp.blocking.PeerBlockingMutationResult
@@ -163,13 +166,20 @@ class SessionRuntime(
             }
         },
     )
-    private val roomArchive = ArchiveSynchronizer(
+    private val roomArchiveMutex = Mutex()
+    private fun roomArchive(authorization: RoomArchiveAuthorization) = ArchiveSynchronizer(
         store = messages,
-        discover = { controller.discoverCapabilities(it.accountId, it.generation) },
-        query = { controller.queryArchive(it) },
+        // The successful join already discovered this room. Never rediscover account
+        // MAM (or settle its stable-ID/Carbon gates) to authorize a room query.
+        discover = { SessionCapabilities(
+            mamV2 = authorization.admit(),
+            carbons = CarbonCapabilityState.UNSUPPORTED,
+            stableIds = authorization.stableIds,
+        ) },
+        query = { controller.queryArchive(it, authorization) },
         commit = { identity, page, isAuthoritative ->
             controller.commitIfConnected(identity, isAuthoritative) {
-                messages.applyArchivePage(page).also { applied ->
+                messages.applyArchivePage(page, isAuthoritative).also { applied ->
                     emitInsertedArchive(identity.accountId, applied.insertedInbound, page.direction)
                 }
             }
@@ -329,7 +339,6 @@ class SessionRuntime(
                 archiveJob?.cancelAndJoin()
                 archiveJob = null
                 archive.disconnected()
-                roomArchive.disconnected()
                 val lease = observation.dispatchLease() ?: return@collect
                 val authority = lookupArchiveAuthority(
                     identity = lease.identity,
@@ -486,16 +495,16 @@ class SessionRuntime(
             // is independent of archive repair/discovery and never retries UNCERTAIN.
             val observation = controller.lifecycle.value
             if (observation.dispatchLease() == lease) launchDispatch(lease, observation)
-            val repair = try {
-                controller.roomRepairAuthorization(lease, roomJid)
+            val authorization = try {
+                controller.roomArchiveAuthorization(lease, roomJid)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) { null }
             scope.launch {
                 try {
-                    if (repair != null) controller.commitIfConnected(lease.identity,
+                    if (authorization != null) controller.commitIfConnected(lease.identity,
                         { controller.lifecycle.value.dispatchLease() == lease }) {
-                        messages.attemptRoomArchiveRepair(lease.identity.accountId.value, repair.room, repair.admit)
+                        messages.attemptRoomArchiveRepair(lease.identity.accountId.value, authorization.room, authorization.admit)
                     }
                 } catch (cancelled: CancellationException) {
                     throw cancelled
@@ -503,14 +512,16 @@ class SessionRuntime(
                     // Repair (including its error receipt) must not suppress ordinary archive sync.
                 }
                 try {
-                    roomArchive.synchronize(
-                        identity = lease.identity,
-                        archiveAuthority = roomJid,
-                        scope = roomJid,
-                        isAuthoritative = {
-                            controller.lifecycle.value.dispatchLease() == lease
-                        },
-                    )
+                    if (authorization != null) roomArchiveMutex.withLock {
+                        roomArchive(authorization).synchronize(
+                            identity = lease.identity,
+                            archiveAuthority = authorization.room,
+                            scope = authorization.room,
+                            isAuthoritative = {
+                                controller.lifecycle.value.dispatchLease() == lease && authorization.admit()
+                            },
+                        )
+                    }
                 } catch (_: ArchiveStorageFailure) {
                     // Soft failure: live room traffic still works.
                 }

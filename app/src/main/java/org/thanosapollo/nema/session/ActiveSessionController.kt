@@ -143,9 +143,11 @@ sealed interface SessionEvent {
     }
 }
 
-class RoomRepairAuthorization internal constructor(
+/** Joined room discovery and revocable membership shared by repair and MAM sync. */
+class RoomArchiveAuthorization internal constructor(
     val attempt: SessionAttemptIdentity,
     val room: String,
+    val stableIds: Boolean,
     val admit: () -> Boolean,
 )
 
@@ -177,6 +179,9 @@ interface SessionConnection {
     ): SessionCapabilities = SessionCapabilities(false, CarbonCapabilityState.UNSUPPORTED, false)
     suspend fun queryArchive(request: ArchivePageRequest): ArchivePageEnvelope =
         throw UnsupportedOperationException("Archive queries are unsupported")
+    /** Implementations must validate the captured membership at native query admission. */
+    suspend fun queryArchive(request: ArchivePageRequest, authorization: RoomArchiveAuthorization): ArchivePageEnvelope =
+        throw UnsupportedOperationException("Authorized room archive queries are unsupported")
     // Call-time probes. Do not promote these into unused SessionCapabilities bits.
     suspend fun loadVCard(
         accountId: AccountId,
@@ -212,7 +217,7 @@ interface SessionConnection {
         nick: String? = null,
         password: String? = null,
     ): Boolean = false
-    fun roomRepairAuthorization(room: String): RoomRepairAuthorization? = null
+    fun roomArchiveAuthorization(room: String): RoomArchiveAuthorization? = null
     suspend fun bookmarkedRooms(
         accountId: AccountId,
         generation: ConnectionGeneration,
@@ -469,6 +474,13 @@ internal class ActiveSessionController(
         return target.queryArchive(request)
     }
 
+    internal suspend fun queryArchive(
+        request: ArchivePageRequest, authorization: RoomArchiveAuthorization,
+    ): ArchivePageEnvelope {
+        val target = exactConnection(request.accountId, request.generation)
+        return target.queryArchive(request, authorization)
+    }
+
     suspend fun loadVCard(
         accountId: AccountId,
         generation: ConnectionGeneration,
@@ -558,12 +570,13 @@ internal class ActiveSessionController(
         return target.publishRoomBookmark(accountId, generation, bookmark)
     }
 
-    internal suspend fun roomRepairAuthorization(lease: DispatchLease, room: String): RoomRepairAuthorization? {
+    internal suspend fun roomArchiveAuthorization(lease: DispatchLease, room: String): RoomArchiveAuthorization? {
         val target = exactConnection(lease.identity.accountId, lease.identity.generation)
         if (mutableLifecycle.value.dispatchLease() != lease) return null
-        return target.roomRepairAuthorization(room)?.takeIf {
+        return target.roomArchiveAuthorization(room)?.takeIf {
             it.attempt.accountId == lease.identity.accountId && it.attempt.generation == lease.identity.generation &&
-                it.attempt.epoch == lease.epoch && mutableLifecycle.value.dispatchLease() == lease
+                it.attempt.epoch == lease.epoch && it.room == room && it.admit() &&
+                mutableLifecycle.value.dispatchLease() == lease
         }
     }
 
