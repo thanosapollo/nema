@@ -2990,7 +2990,12 @@ class MessageStore private constructor(
         messageId: String,
     ): List<ArchiveMessagePositionEntity> = database.messageDao().archivePositions(accountId, messageId)
 
-    suspend fun applyArchivePage(page: ArchivePage): ArchivePageResult = database.withTransaction {
+    suspend fun applyArchivePage(
+        page: ArchivePage,
+        admit: () -> Boolean = { true },
+    ): ArchivePageResult = database.withTransaction {
+        // Membership can retire while this transaction waits behind another writer.
+        if (!admit()) throw ArchivePageRejectedException("Archive authority retired before admission")
         val dao = database.messageDao()
         val muc = MucCorrectionBatch(dao)
         require(dao.accountExists(page.key.accountId)) { "Unknown archive account" }
