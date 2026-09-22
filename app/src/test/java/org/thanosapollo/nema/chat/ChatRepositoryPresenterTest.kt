@@ -2740,6 +2740,94 @@ class ChatRepositoryPresenterTest {
         presenter.close()
     }
 
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun failedRoomJoinRetriesOnExplicitEntryAndReconnectButNotDraftEmissions() = runTest {
+        val room = "room@conference.example.org"
+        val connection = kotlinx.coroutines.flow.MutableStateFlow<Any?>("offline")
+        val attempts = kotlinx.coroutines.channels.Channel<Int>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        val releases = kotlinx.coroutines.channels.Channel<Boolean>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        var count = 0
+        val presenter = DirectChatPresenter(
+            accountConfiguration(ACCOUNT, SELF), ChatRepository(database), backgroundScope, { _, _ -> true },
+            directoryConnection = connection,
+            joinMuc = { attempts.send(++count); releases.receive() },
+        )
+        suspend fun draft(body: String) {
+            assertTrue(presenter.updateDraft(snapshot(ACCOUNT, room, body)).await())
+            presenter.state.first { it.draft == body }
+            runCurrent()
+        }
+        try {
+            presenter.joinRoom(room)
+            assertEquals(1, attempts.receive())
+            presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == room }
+            draft("in flight")
+            val previous = presenter.state.value.routeOccurrence
+            presenter.joinRoom(room)
+            presenter.state.first { it.routeOccurrence != previous && it.contentStatus == ChatContentStatus.Ready }
+            runCurrent()
+            assertTrue(attempts.tryReceive().isFailure)
+            releases.send(false)
+            runCurrent()
+            draft("failed")
+            assertTrue(attempts.tryReceive().isFailure)
+            presenter.joinRoom(room)
+            assertEquals(2, attempts.receive())
+            releases.send(true)
+            runCurrent()
+            presenter.joinRoom(room)
+            draft("joined")
+            assertTrue(attempts.tryReceive().isFailure)
+            connection.value = "connected-generation-2"
+            assertEquals(3, attempts.receive())
+            releases.send(false)
+            runCurrent()
+            draft("second failure")
+            assertTrue(attempts.tryReceive().isFailure)
+            connection.value = "connected-generation-3"
+            assertEquals(4, attempts.receive())
+            releases.send(true)
+            runCurrent()
+        } finally { presenter.close() }
+    }
+
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test
+    fun roomJoinExceptionAndCancellationCanRetryAndOldSuccessCannotSuppressNewConnection() = runTest {
+        val room = "room@conference.example.org"
+        val connection = kotlinx.coroutines.flow.MutableStateFlow<Any?>("generation-1")
+        val attempts = kotlinx.coroutines.channels.Channel<CompletableDeferred<Boolean>>(
+            kotlinx.coroutines.channels.Channel.UNLIMITED,
+        )
+        val presenter = DirectChatPresenter(
+            accountConfiguration(ACCOUNT, SELF), ChatRepository(database), backgroundScope, { _, _ -> true },
+            directoryConnection = connection,
+            joinMuc = { CompletableDeferred<Boolean>().also { attempts.send(it) }.await() },
+        )
+        try {
+            presenter.joinRoom(room)
+            val old = attempts.receive()
+            connection.value = "generation-2"
+            val current = attempts.receive()
+            old.complete(true)
+            current.completeExceptionally(IllegalStateException("join failed"))
+            runCurrent()
+            presenter.joinRoom(room)
+            val retry = attempts.receive()
+            retry.cancel()
+            runCurrent()
+            presenter.joinRoom(room)
+            attempts.receive().complete(true)
+            runCurrent()
+            val previous = presenter.state.value.routeOccurrence
+            presenter.joinRoom(room)
+            presenter.state.first { it.routeOccurrence != previous && it.contentStatus == ChatContentStatus.Ready }
+            runCurrent()
+            assertTrue(attempts.tryReceive().isFailure)
+        } finally { presenter.close() }
+    }
+
     @Test
     fun joiningTheSameRoomDoesNotStartArchiveSyncTwice() = runBlocking {
         var joins = 0

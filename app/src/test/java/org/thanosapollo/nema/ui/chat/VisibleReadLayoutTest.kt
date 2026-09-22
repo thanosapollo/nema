@@ -34,6 +34,71 @@ class VisibleReadLayoutTest {
     private fun row(id: String) = TimelineMessage(id, "peer@example.org", id, false, null, null, null)
 
     @Test
+    fun unchangedHistoryScrollDoesNotTraverseHistory() {
+        val source = (0 until 2_000).map { row("row-$it").copy(markable = true, markerTargetId = "wire-$it") }
+        var accesses = 0
+        val rows = object : AbstractList<TimelineMessage>() {
+            override val size: Int get() = source.size
+            override fun get(index: Int): TimelineMessage {
+                accesses++
+                return source[index]
+            }
+        }
+        val reads = mutableListOf<VisibleReadRequest>()
+        val displayed = mutableListOf<String>()
+        compose.setContent {
+            MaterialTheme {
+                MessageTimeline(rows, accountId = "account", routeOccurrence = occurrence,
+                    activityResumed = true, readReceiptsEnabled = true,
+                    onMarkVisibleRead = { reads.add(it); true },
+                    onMessageDisplayed = { displayed.add(it.id); true },
+                    typingLabel = "Typing", modifier = Modifier.height(300.dp))
+            }
+        }
+        compose.waitForIdle()
+        compose.waitUntil(5_000) { reads.isNotEmpty() }
+        val initialIds = reads.first().observedTimelineIds
+        compose.runOnIdle { accesses = 0 }
+        compose.onNodeWithTag("message-timeline").performScrollToIndex(50)
+        compose.waitForIdle()
+        compose.waitUntil(5_000) { reads.any { "row-1950" in it.messageIds } }
+        assertTrue("scroll accessed $accesses history rows", accesses < source.size)
+        assertTrue(reads.all { it.observedTimelineIds == initialIds })
+        assertTrue(displayed.contains("row-1950"))
+        assertFalse(displayed.contains("typing-indicator"))
+    }
+
+    @Test
+    fun historyOnlyReplacementUpdatesSnapshotWithoutAdmittingRead() {
+        val original = (0..80).map { row("row-$it") }
+        val rows = mutableStateOf(original)
+        val resumed = mutableStateOf(true)
+        val reads = mutableListOf<VisibleReadRequest>()
+        compose.setContent {
+            MaterialTheme {
+                MessageTimeline(rows.value, accountId = "account", routeOccurrence = occurrence,
+                    activityResumed = resumed.value, onMarkVisibleRead = { reads.add(it); true },
+                    modifier = Modifier.height(300.dp))
+            }
+        }
+        compose.waitForIdle()
+        compose.waitUntil(5_000) { reads.isNotEmpty() }
+        val before = reads.last()
+        val count = reads.size
+        compose.runOnIdle { rows.value = listOf(row("history-only")) + original }
+        compose.waitForIdle()
+        assertEquals("offscreen insertion must not trigger read", count, reads.size)
+        compose.runOnIdle { resumed.value = false }
+        compose.waitForIdle()
+        compose.runOnIdle { resumed.value = true }
+        compose.waitForIdle()
+        compose.waitUntil(5_000) { reads.size > count }
+        assertEquals(before.messageIds, reads.last().messageIds)
+        assertEquals(rows.value.map { it.id }, reads.last().observedTimelineIds)
+        assertEquals(original.map { it.id }, before.observedTimelineIds)
+    }
+
+    @Test
     fun foregroundLayoutAdmitsOnlyBubblesAndScrollPreservesOffscreenHoles() {
         val resumed = mutableStateOf(false)
         val rows = mutableStateOf((0..80).map { row("row-$it") })
