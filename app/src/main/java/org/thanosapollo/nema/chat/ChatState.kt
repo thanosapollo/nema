@@ -669,6 +669,7 @@ class DirectChatPresenter(
     private val retry: suspend (AccountConfiguration, RetryUncertainKey) -> Unit = { _, _ -> },
     private val ensurePeerIdentities: suspend (AccountId, Collection<String>) -> Unit = { _, _ -> },
     private val joinMuc: suspend (String) -> Boolean = { false },
+    private val loadOlder: suspend (AccountConfiguration, OlderHistoryScope, () -> Boolean) -> OlderHistoryStatus = { _, _, _ -> OlderHistoryStatus.Error },
     private val observeRoom: (String) -> Flow<RoomView?> = { flowOf(null) },
     private val observeTyping: (String) -> Flow<List<String>> = { flowOf(emptyList()) },
     private val observeRtt: (String) -> Flow<String?> = { flowOf(null) },
@@ -721,6 +722,46 @@ class DirectChatPresenter(
         val inFlight = mutableSetOf<String>()
     }
     private val selectedRoute = MutableStateFlow(ChatRouteOccurrence(null, 0))
+    private val olderHistory = MutableStateFlow(OlderHistoryState())
+    val olderHistoryState: StateFlow<OlderHistoryState> get() = olderHistory
+    private var olderConnection: Any? = null
+    private var olderAttempt: Any? = null
+
+    suspend fun loadOlderHistory(origin: ChatRouteOccurrence) {
+        val attempt = Any()
+        val target: OlderHistoryScope
+        synchronized(selectedRoute) {
+            val snapshot = state.value
+            if (!presenterJob.isActive || selectedRoute.value != origin || snapshot.routeOccurrence != origin ||
+                snapshot.contentStatus != ChatContentStatus.Ready || origin.route == null) return
+            val previous = olderHistory.value
+            if (previous.occurrence == origin && previous.status in setOf(OlderHistoryStatus.Pending, OlderHistoryStatus.Exhausted)) return
+            target = if (snapshot.selectedPeerGroupChat) OlderHistoryScope.Room(origin.route.peerJid) else OlderHistoryScope.Personal
+            olderAttempt = attempt
+            olderHistory.value = OlderHistoryState(origin, OlderHistoryStatus.Pending)
+        }
+        val current = { synchronized(selectedRoute) {
+            presenterJob.isActive && selectedRoute.value == origin && olderAttempt === attempt
+        } }
+        try {
+            val result = loadOlder(account, target, current)
+            synchronized(selectedRoute) {
+                if (current()) olderHistory.value = OlderHistoryState(origin, result)
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            synchronized(selectedRoute) {
+                if (current()) olderHistory.value = OlderHistoryState(origin, OlderHistoryStatus.Error)
+            }
+        } finally {
+            synchronized(selectedRoute) {
+                if (current() && olderHistory.value.status == OlderHistoryStatus.Pending)
+                    olderHistory.value = OlderHistoryState(origin, OlderHistoryStatus.Error)
+            }
+        }
+    }
+
     private val directory = MutableStateFlow(DirectoryView(DirectoryMode.CHECKING))
     val directoryState: StateFlow<DirectoryView> get() = directory
 
@@ -915,6 +956,17 @@ class DirectChatPresenter(
     )
 
     init {
+        presenterScope.launch {
+            directoryConnection.collect { connection ->
+                synchronized(selectedRoute) {
+                    if (olderConnection != connection) {
+                        olderConnection = connection
+                        olderAttempt = null
+                        olderHistory.value = OlderHistoryState()
+                    }
+                }
+            }
+        }
         presenterScope.launch {
             combine(state.map { Triple(it.routeOccurrence, it.contentStatus, it.selectedPeerGroupChat) }.distinctUntilChanged(), directoryConnection) { route, connection -> route to connection }
                 .collectLatest { (route, _) ->

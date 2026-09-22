@@ -44,6 +44,9 @@ import org.thanosapollo.nema.MainActivity
 import org.thanosapollo.nema.R
 import org.thanosapollo.nema.account.AccountConfiguration
 import org.thanosapollo.nema.chat.ArchiveStorageFailure
+import org.thanosapollo.nema.chat.OlderHistoryScope
+import org.thanosapollo.nema.chat.OlderHistoryStatus
+import org.thanosapollo.nema.storage.ArchiveCursorKey
 import org.thanosapollo.nema.chat.ArchiveSynchronizer
 import org.thanosapollo.nema.chat.ArchiveSyncState
 import org.thanosapollo.nema.chat.LiveMessageAdapter
@@ -160,7 +163,7 @@ class SessionRuntime(
         query = { controller.queryArchive(it) },
         commit = { identity, page, isAuthoritative ->
             controller.commitIfConnected(identity, isAuthoritative) {
-                messages.applyArchivePage(page).also { applied ->
+                messages.applyArchivePage(page, isAuthoritative).also { applied ->
                     emitInsertedArchive(identity.accountId, applied.insertedInbound, page.direction)
                 }
             }
@@ -733,6 +736,44 @@ class SessionRuntime(
                 failure.identity.generation,
                 observation,
             )
+        }
+    }
+
+    /** One explicit page. Durable cursors, not the visible thread, own archive position. */
+    suspend fun loadOlderHistory(
+        account: AccountConfiguration,
+        target: OlderHistoryScope,
+        isCurrent: () -> Boolean,
+    ): OlderHistoryStatus {
+        val error = OlderHistoryStatus.Error
+        val observation = controller.lifecycle.value
+        val lease = observation.dispatchLease() ?: return error
+        if (lease.identity.accountId != account.id || !isCurrent()) return error
+        val authorization = when (target) {
+            is OlderHistoryScope.Room ->
+                controller.roomArchiveAuthorization(lease, target.jid) ?: return error
+            OlderHistoryScope.Personal -> null
+        }
+        val authority = authorization?.room ?: messages.accountBareJid(account.id.value) ?: return error
+        val archiveScope = authorization?.room ?: org.thanosapollo.nema.xmpp.transport.ACCOUNT_ARCHIVE_SCOPE
+        val current = { isCurrent() && controller.lifecycle.value == observation && (authorization?.admit() != false) }
+        val key = ArchiveCursorKey(account.id.value, authority, archiveScope)
+        suspend fun page(): OlderHistoryStatus {
+            if (!current()) return error
+            val cursor = messages.archiveCursor(key) ?: return error
+            if (!cursor.hasEarlier) return OlderHistoryStatus.Exhausted
+            val synchronizer = authorization?.let(::roomArchive) ?: archive
+            if (!synchronizer.backfillOnePage(lease.identity, authority, archiveScope, current) || !current()) return error
+            return if (messages.archiveCursor(key)?.hasEarlier == false)
+                OlderHistoryStatus.Exhausted
+            else OlderHistoryStatus.Available
+        }
+        return try {
+            if (authorization != null) roomArchiveMutex.withLock { page() } else page()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            error
         }
     }
 

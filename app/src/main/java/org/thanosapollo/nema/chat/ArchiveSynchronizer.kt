@@ -231,8 +231,17 @@ class ArchiveSynchronizer(
         scope: String,
         isAuthoritative: () -> Boolean,
     ): Boolean {
-        val ready = mutableState.value as? ArchiveSyncState.Ready ?: return false
-        if (ready.identity != identity) return false
+        // Explicit backfill retries use the same persisted cursor, including on a
+        // fresh membership-scoped room synchronizer. No catch-up loop is started.
+        if (!isAuthoritative()) return false
+        val ready = when (val current = mutableState.value) {
+            is ArchiveSyncState.Ready -> current.takeIf { it.identity == identity }
+            is ArchiveSyncState.RetryableError -> current.capabilities
+                ?.takeIf { current.identity == identity }?.let { ArchiveSyncState.Ready(identity, it) }
+            is ArchiveSyncState.Idle -> discover(identity).takeIf { it.mamV2 }
+                ?.let { ArchiveSyncState.Ready(identity, it) }
+            else -> null
+        } ?: return false
         val key = ArchiveCursorKey(identity.accountId.value, archiveAuthority, scope)
         val cursor = storage(identity) { store.archiveCursor(key) } ?: return false
         if (!cursor.hasEarlier || cursor.oldestId == null || !isAuthoritative()) return false
@@ -245,21 +254,27 @@ class ArchiveSynchronizer(
             boundaryId = cursor.oldestId,
             pageSize = PAGE_SIZE,
         )
-        mutableState.value = ArchiveSyncState.Syncing(identity, ready.capabilities, request.direction)
-        val page = queryPage(identity, ready.capabilities, request, isAuthoritative) ?: return false
-        if (!isAuthoritative()) return false
-        val result = commitPage(identity, ready.capabilities, page, isAuthoritative) ?: return false
-        if (!isAuthoritative()) return false
-        mutableState.value = if (result.status == ArchivePageStatus.APPLIED) {
-            ArchiveSyncState.Ready(identity, ready.capabilities)
-        } else {
-            ArchiveSyncState.RetryableError(
-                identity,
-                ready.capabilities,
-                requireNotNull(result.cursor.retryableError),
-            )
+        val syncing = ArchiveSyncState.Syncing(identity, ready.capabilities, request.direction)
+        mutableState.value = syncing
+        try {
+            val page = queryPage(identity, ready.capabilities, request, isAuthoritative) ?: return false
+            if (!isAuthoritative()) return false
+            val result = commitPage(identity, ready.capabilities, page, isAuthoritative) ?: return false
+            if (!isAuthoritative()) return false
+            mutableState.value = if (result.status == ArchivePageStatus.APPLIED) {
+                ArchiveSyncState.Ready(identity, ready.capabilities)
+            } else {
+                ArchiveSyncState.RetryableError(
+                    identity,
+                    ready.capabilities,
+                    requireNotNull(result.cursor.retryableError),
+                )
+            }
+            return result.status == ArchivePageStatus.APPLIED
+        } finally {
+            // Cancellation/route retirement must not strand the shared synchronizer.
+            if (mutableState.value === syncing) mutableState.value = ready
         }
-        return result.status == ArchivePageStatus.APPLIED
     }
 
     fun disconnected() {

@@ -879,6 +879,156 @@ class SessionRuntimeTest {
         assertEquals("room history", fixture.store.messages(fixture.account.id.value).single().body)
     }
 
+    @Test fun `presenter direct older action crosses native MAM and exceeds bootstrap`() = olderHistoryJourney(false)
+
+    @Test fun `presenter room older action crosses native MAM without personal MAM`() = olderHistoryJourney(true)
+
+    @Test fun `direct older empty page settles exhaustion`() = olderHistoryJourney(false, empty = true)
+    @Test fun `room older empty page settles exhaustion`() = olderHistoryJourney(true, empty = true)
+    @Test fun `direct older response cannot commit after session retirement`() = olderHistoryJourney(false, retire = true)
+    @Test fun `room older response cannot commit after session retirement`() = olderHistoryJourney(true, retire = true)
+
+    private fun olderHistoryJourney(room: Boolean, empty: Boolean = false, retire: Boolean = false) = runTest {
+        val owner = account("account")
+        val peer = if (room) "history@conference.example.org" else "peer@example.org"
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val store = MessageStore(database)
+        accounts.save(owner); accounts.activate(owner.id)
+        credentials.store(owner.id, "secret".toCharArray())
+        org.thanosapollo.nema.xmpp.smack.SmackAndroid.initialize(context)
+        org.thanosapollo.nema.xmpp.smack.installNemaMamResultProvider()
+        val socket = OlderHistorySocket(if (room) peer else owner.bareJid.value, peer, room)
+        val native = org.thanosapollo.nema.xmpp.smack.SmackSessionConnection(socket, "account", "account@example.org", event = {})
+        val entered = kotlinx.coroutines.channels.Channel<Unit>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+        val release = kotlinx.coroutines.channels.Channel<Unit>()
+        var hold = false
+        var fail = false
+        val factory = SessionConnectionFactory { configuration, _, event ->
+            val connection = RecordingConnection(configuration.id, null, null, event)
+            connection.archiveSupported = !room
+            connection.repairRegistry = native.javaClass.getDeclaredField("roomStableIdAuthorities")
+                .apply { isAccessible = true }.get(native) as org.thanosapollo.nema.xmpp.smack.RoomStableIdAuthorityRegistry
+            if (room) connection.repairRooms += peer
+            object : SessionConnection by connection {
+                override suspend fun connect(credential: CharArray, attempt: SessionAttemptIdentity) {
+                    native.updateAttempt(attempt)
+                    connection.connect(credential, attempt)
+                }
+                suspend fun gate(request: org.thanosapollo.nema.xmpp.transport.ArchivePageRequest) {
+                    if (request.direction == org.thanosapollo.nema.xmpp.transport.ArchivePageDirection.BEFORE) {
+                        entered.send(Unit)
+                        if (hold) release.receive()
+                        if (fail) throw java.io.IOException("scripted older failure")
+                    }
+                }
+                override suspend fun queryArchive(request: org.thanosapollo.nema.xmpp.transport.ArchivePageRequest): org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope {
+                    gate(request)
+                    return native.queryArchive(request)
+                }
+                override suspend fun queryArchive(request: org.thanosapollo.nema.xmpp.transport.ArchivePageRequest,
+                    authorization: org.thanosapollo.nema.session.RoomArchiveAuthorization): org.thanosapollo.nema.xmpp.transport.ArchivePageEnvelope {
+                    gate(request)
+                    return native.queryArchive(request, authorization)
+                }
+            }
+        }
+        val runtime = SessionRuntime(accounts, credentials, store, PeerIdentityStore(database.messageDao()), backgroundScope, factory)
+        assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
+        if (room) assertTrue(runtime.joinMuc(peer))
+        val presenter = DirectChatPresenter(owner, ChatRepository(database), backgroundScope, { _, _ -> true },
+            loadOlder = runtime::loadOlderHistory, directoryConnection = runtime.state)
+        try {
+            presenter.selectPeer(peer)
+            val initial = presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.messages.size == 50 }
+            assertEquals((26..75).map { "history-$it" }, initial.messages.map { it.body })
+            val origin = initial.routeOccurrence
+            hold = true; fail = true
+            val first = async { presenter.loadOlderHistory(origin) }
+            entered.receive()
+            assertEquals(org.thanosapollo.nema.chat.OlderHistoryStatus.Pending, presenter.olderHistoryState.value.status)
+            presenter.loadOlderHistory(origin)
+            assertEquals(1, socket.queries)
+            release.send(Unit); first.await()
+            assertEquals(org.thanosapollo.nema.chat.OlderHistoryStatus.Error, presenter.olderHistoryState.value.status)
+            // Retire a held request: same peer reopened is a different occurrence.
+            fail = false
+            val stale = async { presenter.loadOlderHistory(origin) }
+            entered.receive()
+            presenter.closeConversation(); presenter.selectPeer(peer)
+            val replacement = presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.routeOccurrence != origin && it.selectedPeer == peer }
+            release.send(Unit); stale.await()
+            assertEquals(50, store.messages(owner.id.value).size)
+            // Cancellation is recoverable at the same action boundary.
+            val cancelled = async { presenter.loadOlderHistory(replacement.routeOccurrence) }
+            entered.receive()
+            cancelled.cancelAndJoin()
+            assertEquals(org.thanosapollo.nema.chat.OlderHistoryStatus.Error, presenter.olderHistoryState.value.status)
+            if (retire) {
+                val retired = async { presenter.loadOlderHistory(replacement.routeOccurrence) }
+                entered.receive()
+                runtime.stop()
+                runCurrent()
+                release.send(Unit); retired.await()
+                assertEquals(50, store.messages(owner.id.value).size)
+                assertEquals(org.thanosapollo.nema.chat.OlderHistoryState(), presenter.olderHistoryState.value)
+                return@runTest
+            }
+            hold = false
+            socket.emptyOlder = empty
+            presenter.loadOlderHistory(replacement.routeOccurrence)
+            val expected = if (empty) 26..75 else 1..75
+            val complete = presenter.state.first { it.messages.size == expected.count() }
+            assertEquals(expected.map { "history-$it" }, complete.messages.map { it.body })
+            assertEquals(org.thanosapollo.nema.chat.OlderHistoryStatus.Exhausted, presenter.olderHistoryState.value.status)
+            val count = socket.queries
+            presenter.loadOlderHistory(replacement.routeOccurrence)
+            assertEquals(count, socket.queries)
+            val key = ArchiveCursorKey(owner.id.value, if (room) peer else owner.bareJid.value, if (room) peer else "ACCOUNT")
+            val cursor = requireNotNull(store.archiveCursor(key))
+            assertEquals(if (empty) "m26" else "m1", cursor.oldestId); assertEquals("m75", cursor.newestId)
+            assertFalse(cursor.hasEarlier)
+            assertEquals(expected.count(), complete.messages.map { it.id }.toSet().size)
+        } finally { presenter.close() }
+    }
+
+    private class OlderHistorySocket(private val authority: String, private val peer: String, private val room: Boolean) : org.jivesoftware.smack.tcp.XMPPTCPConnection(
+        org.jivesoftware.smack.tcp.XMPPTCPConnectionConfiguration.builder()
+            .setXmppDomain(org.jxmpp.jid.impl.JidCreate.domainBareFrom("example.org"))
+            .setUsernameAndPassword("account", null).build(),
+    ) {
+        var queries = 0
+        var emptyOlder = false
+        init { connected = true; authenticated = true
+            user = org.jxmpp.jid.impl.JidCreate.entityFullFrom("account@example.org/test"); replyTimeout = 3000 }
+        override fun throwNotConnectedExceptionIfAppropriate() = Unit
+        override fun sendStanzaInternal(packet: org.jivesoftware.smack.packet.Stanza) {
+            val query = packet as org.jivesoftware.smackx.mam.element.MamQueryIQ
+            queries++
+            val xml = query.toXML().toString()
+            assertTrue(xml, xml.contains("<max>50</max>"))
+            if (room) assertEquals(authority, query.to.toString())
+            val older = xml.contains("<before>m26</before>")
+            val range = if (older && emptyOlder) IntRange.EMPTY else if (older) 1..25 else 26..75
+            range.forEach { n ->
+                val stamp = java.time.Instant.ofEpochSecond(1767225600L + n).toString()
+                processStanza(org.jivesoftware.smack.util.PacketParserUtils.parseStanza(
+                    "<message xmlns='jabber:client' from='$authority' to='account@example.org/test'>" +
+                        "<result xmlns='urn:xmpp:mam:2' queryid='${query.queryId}' id='m$n'>" +
+                        "<forwarded xmlns='urn:xmpp:forward:0'><delay xmlns='urn:xmpp:delay' stamp='$stamp'/>" +
+                        "<message xmlns='jabber:client' id='wire$n' from='$peer${if (room) "/someone" else ""}' to='account@example.org' type='${if (room) "groupchat" else "chat"}'><body>history-$n</body>" +
+                        "</message></forwarded></result></message>",
+                ))
+            }
+            processStanza(org.jivesoftware.smack.util.PacketParserUtils.parseStanza(
+                "<iq xmlns='jabber:client' from='$authority' to='account@example.org/test' id='${query.stanzaId}' type='result'>" +
+                    "<fin xmlns='urn:xmpp:mam:2' complete='true' stable='true'><set xmlns='http://jabber.org/protocol/rsm'>" +
+                    (if (range.isEmpty()) "" else "<first index='${if (older) 0 else 25}'>m${range.first}</first><last>m${range.last}</last>") +
+                    "<count>75</count></set></fin></iq>",
+            ))
+        }
+    }
+
     private class RoomHistorySocket(private val room: String) : org.jivesoftware.smack.tcp.XMPPTCPConnection(
         org.jivesoftware.smack.tcp.XMPPTCPConnectionConfiguration.builder()
             .setXmppDomain(org.jxmpp.jid.impl.JidCreate.domainBareFrom("example.org"))

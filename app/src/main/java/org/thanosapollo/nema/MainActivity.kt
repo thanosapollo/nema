@@ -424,6 +424,7 @@ private fun AccountConnectionScreen(
                 retry = application.sessionRuntime::retryUncertain,
                 ensurePeerIdentities = application.sessionRuntime::ensurePeerIdentities,
                 joinMuc = application.sessionRuntime::joinMuc,
+                loadOlder = application.sessionRuntime::loadOlderHistory,
                 observeRoom = { peer -> application.sessionRuntime.rooms.observe(account.id.value, peer) },
                 observeTyping = { peer -> application.sessionRuntime.chatStates.observe(account.id.value, peer) },
                 observeRtt = { peer -> application.sessionRuntime.realTimeText.observe(account.id.value, peer) },
@@ -442,6 +443,7 @@ private fun AccountConnectionScreen(
             File(context.cacheDir, "attachments/${org.thanosapollo.nema.xmpp.httpupload.attachmentCacheKey(account.id.value)}")
         }
         val directoryView by presenter.directoryState.collectAsState()
+        val olderHistory by presenter.olderHistoryState.collectAsState()
         fun selectDestination(next: PrimaryDestination) {
             destination = selectSessionDestination(next, presenter::closeConversation)
         }
@@ -543,6 +545,8 @@ private fun AccountConnectionScreen(
                     PrimaryDestination.HOME -> {
                         ConversationContent(
                             state = chatState,
+                            olderHistory = olderHistory,
+                            onLoadOlder = presenter::loadOlderHistory,
                             composerOwner = composerOwner,
                             connectionStatus = privacySafeStatus(connectionState),
                             onSelectPeer = presenter::selectPeer,

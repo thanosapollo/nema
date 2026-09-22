@@ -140,6 +140,8 @@ import org.thanosapollo.nema.chat.DeliveryPresentation
 import org.thanosapollo.nema.chat.ChatRouteOccurrence
 import org.thanosapollo.nema.chat.VisibleReadRequest
 import org.thanosapollo.nema.chat.ChatContentStatus
+import org.thanosapollo.nema.chat.OlderHistoryState
+import org.thanosapollo.nema.chat.OlderHistoryStatus
 import org.thanosapollo.nema.chat.DirectChatState
 import org.thanosapollo.nema.chat.DirectConversationKey
 import org.thanosapollo.nema.chat.DraftCorrection
@@ -288,6 +290,8 @@ fun ConversationContent(
     onReact: suspend (TimelineMessage, String) -> Boolean = { _, _ -> false },
     modifier: Modifier = Modifier,
     composerOwner: ComposerOwner = rememberComposerOwner(state.accountId),
+    olderHistory: OlderHistoryState = OlderHistoryState(),
+    onLoadOlder: suspend (ChatRouteOccurrence) -> Unit = {},
 ) {
     val venue = state.conversationVenue()
     key(state.accountId) {
@@ -680,6 +684,9 @@ fun ConversationContent(
                                         pendingSendIdentities.none { it.key == conversationKey }
                                     MessageTimeline(
                                         messages = state.messages,
+                                        olderHistoryStatus = olderHistory.takeIf { it.occurrence == state.routeOccurrence }?.status
+                                            ?: OlderHistoryStatus.Available,
+                                        onLoadOlder = { onLoadOlder(state.routeOccurrence) },
                                         accountId = state.accountId,
                                         routeOccurrence = state.routeOccurrence,
                                         onMarkVisibleRead = onMarkVisibleRead,
@@ -1915,6 +1922,8 @@ internal fun canReact(conversationIsGroupChat: Boolean, message: TimelineMessage
 @Composable
 internal fun MessageTimeline(
     messages: List<TimelineMessage>,
+    olderHistoryStatus: OlderHistoryStatus? = null,
+    onLoadOlder: suspend () -> Unit = {},
     accountId: String = "",
     routeOccurrence: ChatRouteOccurrence = ChatRouteOccurrence(null, 0),
     onMarkVisibleRead: suspend (VisibleReadRequest) -> Boolean = { true },
@@ -2363,6 +2372,23 @@ internal fun MessageTimeline(
                                 )
                             }
                         }
+                    }
+                }
+            }
+            if (olderHistoryStatus != null) {
+                item(key = "older-history", contentType = "older-history") {
+                    TextButton(
+                        onClick = { scope.launch { onLoadOlder() } },
+                        enabled = olderHistoryStatus != OlderHistoryStatus.Pending &&
+                            olderHistoryStatus != OlderHistoryStatus.Exhausted,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("load-older-history"),
+                    ) {
+                        Text(when (olderHistoryStatus) {
+                            OlderHistoryStatus.Pending -> "Loading older messages…"
+                            OlderHistoryStatus.Error -> "Could not load older messages · Retry"
+                            OlderHistoryStatus.Exhausted -> "Beginning of archive"
+                            else -> "Load older messages"
+                        })
                     }
                 }
             }

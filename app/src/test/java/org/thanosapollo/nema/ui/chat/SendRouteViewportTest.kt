@@ -222,6 +222,93 @@ class SendRouteViewportTest {
         }
     }
 
+    @Test fun olderHistoryControlRetainsMessagePixelAnchorAndExposesRetryAndExhaustion() {
+        val initial = state(messages(25, 75))
+        val shown = mutableStateOf(initial)
+        val history = mutableStateOf(OlderHistoryState(initial.routeOccurrence))
+        val release = CompletableDeferred<Unit>()
+        var calls = 0
+        compose.setContent {
+            MaterialTheme {
+                ConversationContent(shown.value, "Connected", { true }, onCloseConversation = {},
+                    onDraftChange = { CompletableDeferred(true) }, onSend = { CompletableDeferred(true) },
+                    olderHistory = history.value, onLoadOlder = { origin ->
+                        assertEquals(initial.routeOccurrence, origin)
+                        calls++
+                        history.value = OlderHistoryState(origin, OlderHistoryStatus.Pending)
+                        if (calls == 1) {
+                            history.value = OlderHistoryState(origin, OlderHistoryStatus.Error)
+                        } else {
+                            release.await()
+                            shown.value = initial.copy(messages = messages(0, 75))
+                            history.value = OlderHistoryState(origin, OlderHistoryStatus.Exhausted)
+                        }
+                    })
+            }
+        }
+        compose.onNodeWithTag("message-timeline").performScrollToIndex(50)
+        compose.onNodeWithTag("load-older-history").performClick()
+        compose.onNodeWithText("Could not load older messages · Retry").assertExists()
+        compose.onNodeWithTag("load-older-history").performClick()
+        compose.onNodeWithText("Loading older messages…").assertExists()
+        compose.onNodeWithTag("load-older-history").assertIsNotEnabled()
+        val before = compose.onNodeWithTag("message-bubble-message-25").fetchSemanticsNode().boundsInRoot
+        compose.runOnIdle { release.complete(Unit) }
+        compose.waitForIdle()
+        assertEquals(before, compose.onNodeWithTag("message-bubble-message-25").fetchSemanticsNode().boundsInRoot)
+        assertEquals(2, calls)
+        compose.onNodeWithTag("message-timeline").performScrollToIndex(75)
+        compose.onNodeWithText("Beginning of archive").assertExists()
+        compose.onNodeWithTag("load-older-history").assertIsNotEnabled()
+    }
+
+    @Test fun directOlderControlInvokesPresenterWithPersonalScope() = olderControlPresenter(false)
+    @Test fun roomOlderControlInvokesPresenterWithRoomScope() = olderControlPresenter(true)
+
+    private fun olderControlPresenter(room: Boolean) {
+        RoutePresentationFixture().use { fixture ->
+            if (room) runBlocking { fixture.repository.markRoom(fixture.account, fixture.peer) }
+            val entered = CompletableDeferred<OlderHistoryScope>()
+            val release = CompletableDeferred<Unit>()
+            val presenter = DirectChatPresenter(
+                org.thanosapollo.nema.account.AccountConfiguration.create(
+                    org.thanosapollo.nema.xmpp.transport.AccountId.require(fixture.account),
+                    "${fixture.account}@example.org", fixture.account, null, "example.org", null),
+                fixture.repository, fixture.scope, { _, _ -> true },
+                loadOlder = { account, target, current ->
+                    assertEquals(fixture.account, account.id.value)
+                    assertTrue(current())
+                    entered.complete(target)
+                    release.await()
+                    assertFalse(current())
+                    OlderHistoryStatus.Exhausted
+                },
+            )
+            fixture.presenters += presenter
+            runBlocking { presenter.selectPeer(fixture.peer) }
+            compose.setContent {
+                val state by presenter.state.collectAsState()
+                val older by presenter.olderHistoryState.collectAsState()
+                MaterialTheme {
+                    ConversationContent(state, "Connected", presenter::selectPeer,
+                        onCloseConversation = presenter::closeConversation,
+                        onDraftChange = presenter::updateDraft, onSend = presenter::sendDraft,
+                        olderHistory = older, onLoadOlder = presenter::loadOlderHistory)
+                }
+            }
+            compose.waitUntil { presenter.state.value.contentStatus == ChatContentStatus.Ready && presenter.state.value.selectedPeerGroupChat == room }
+            compose.onNodeWithTag("load-older-history").performClick()
+            assertEquals(if (room) OlderHistoryScope.Room(fixture.peer) else OlderHistoryScope.Personal, runBlocking { entered.await() })
+            compose.onNodeWithTag("load-older-history").assertIsNotEnabled()
+            compose.runOnIdle { presenter.closeConversation() }
+            runBlocking { presenter.selectPeer(fixture.other) }
+            compose.waitUntil { presenter.state.value.selectedPeer == fixture.other && presenter.state.value.contentStatus == ChatContentStatus.Ready }
+            compose.runOnIdle { release.complete(Unit) }
+            compose.onNodeWithText("Load older messages").assertExists()
+            compose.onNodeWithTag("load-older-history").assertIsEnabled()
+        }
+    }
+
     private fun scroll(tag: String): Float = compose.onNodeWithTag(tag).fetchSemanticsNode()
         .config[SemanticsProperties.VerticalScrollAxisRange].value()
 
