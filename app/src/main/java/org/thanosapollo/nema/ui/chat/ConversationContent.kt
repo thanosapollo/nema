@@ -1882,16 +1882,9 @@ internal fun displayedMarkerCandidates(
     enabled: Boolean,
     resumed: Boolean,
     venue: ConversationVenue,
-): List<TimelineMessage> {
-    if (!enabled || !resumed || venue is ConversationVenue.Room || visibleMessageIds.isEmpty()) return emptyList()
-    return messages.filter { message ->
-        message.id in visibleMessageIds &&
-            !message.outgoing &&
-            !message.groupChat &&
-            message.markable &&
-            !message.markerTargetId.isNullOrEmpty()
-    }
-}
+): List<TimelineMessage> = TimelineReadIndex(messages).displayedMarkerCandidates(
+    visibleMessageIds, enabled, resumed, venue,
+)
 
 internal fun TimelineMessage.correctionTargetOrNull(venue: ConversationVenue): DraftCorrection? {
     val referenceId = correctionReferenceId?.takeIf(String::isNotEmpty) ?: return null
@@ -1971,14 +1964,9 @@ internal fun MessageTimeline(
         mutableStateOf(messages, referentialEqualityPolicy())
     }
     currentMessages.value = messages
+    val readIndex by remember { derivedStateOf { TimelineReadIndex(currentMessages.value) } }
+    val currentReadIndex by rememberUpdatedState(readIndex)
     val latestId = messages.lastOrNull()?.id
-    var markerSignature = 0
-    for (message in messages) {
-        if (message.markable) {
-            markerSignature = 31 * markerSignature + message.id.hashCode()
-            markerSignature = 31 * markerSignature + (message.markerTargetId?.hashCode() ?: 0)
-        }
-    }
     LaunchedEffect(initialViewport, viewportRestored, messages.isNotEmpty()) {
         if (!viewportRestored) {
             val anchor = requireNotNull(initialViewport)
@@ -2006,14 +1994,13 @@ internal fun MessageTimeline(
         withFrameNanos { }
         snapshotFlow {
             val layout = listState.layoutInfo
-            val observedTimelineIds = currentMessages.value.map { it.id }
-            val rendered = observedTimelineIds.toHashSet()
+            val index = currentReadIndex
             val visible = layout.visibleItemsInfo.asSequence()
                 .filter { it.offset + it.size > layout.viewportStartOffset && it.offset < layout.viewportEndOffset }
                 .mapNotNull { it.key as? String }
-                .filter { it in rendered }
+                .filter { index.contains(it) }
                 .toSet()
-            visible to observedTimelineIds
+            visible to index.orderedIds
         }.distinctUntilChanged().collect { readObservation = it }
     }
     // History-only insertions do not admit another read until visibility or lifecycle changes.
@@ -2029,11 +2016,10 @@ internal fun MessageTimeline(
         activityResumed,
         venue.messageKind,
         latestId,
-        markerSignature,
+        readIndex.markerSignature,
     ) {
         if (!viewportRestored) return@LaunchedEffect
-        displayedMarkerCandidates(
-            messages = currentMessages.value,
+        currentReadIndex.displayedMarkerCandidates(
             visibleMessageIds = visibleMessageIds,
             enabled = readReceiptsEnabled,
             resumed = activityResumed,
@@ -2188,7 +2174,7 @@ internal fun MessageTimeline(
                                         name = message.attachmentName,
                                         mime = resolvedMime,
                                         groupChat = venue is ConversationVenue.Room || message.groupChat,
-                                        cached = isAttachmentCached(url),
+                                        isCached = { isAttachmentCached(url) },
                                         onUse = {
                                             onUseAttachment(url, message.attachmentName, resolvedMime)
                                         },
@@ -2609,13 +2595,24 @@ private fun MessageAttachment(
     name: String?,
     mime: String?,
     groupChat: Boolean,
-    cached: Boolean,
+    isCached: () -> Boolean,
     onUse: suspend () -> Boolean,
     onLoadInline: suspend () -> ImageBitmap?,
 ) {
     val scope = rememberCoroutineScope()
     val image = isInlineImage(mime, name, url)
-    var downloaded by remember(url) { mutableStateOf(cached) }
+    var downloaded by remember(url) { mutableStateOf(false) }
+    LaunchedEffect(url) {
+        val cached = try {
+            withContext(Dispatchers.IO) { isCached() }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            false
+        }
+        // A slow negative lookup must not overwrite a completed download.
+        downloaded = downloaded || cached
+    }
     var preview by remember(url) { mutableStateOf<ImageBitmap?>(null) }
     val inline = shouldRenderInlineImage(groupChat, mime, name, url)
     LaunchedEffect(url, inline) {
