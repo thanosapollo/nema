@@ -1,5 +1,26 @@
 #+TITLE: Nema changelog
 
+* 0.3.0 — 2026-09-23
+
+Third alpha release.
+
++ Add persistent named threads and an in-chat switcher for Main and thread destinations in direct chats and rooms.
++ Add experimental shared thread names through an optional server directory. Shared names require a supporting server; this is not a general XMPP interoperability claim.
++ Retain drafts, uploaded attachments, and reply/edit state across conversation switches. Show retained attachments and allow attachment-only sends.
++ Preserve conversation scroll positions and keep delayed sends, typing, and thread actions tied to their originating account and destination.
++ Keep cached conversations visible during refresh and move history indexing, snapshot comparison, and visible-read preparation off the UI thread.
++ Add controls for loading older direct and room history, with retry and end-of-history states. Direct history uses account-wide archive pages, so sparse conversations may need repeated requests.
++ Limit local read marking to displayed messages and restrict synchronized read state to the user's own activity.
++ Retry transient archive failures, preserve repeated account archive records, and repair authenticated room archive duplicates and message corrections.
++ Require current room membership before sending queued group messages or requesting room archives; allow failed joins to be retried.
++ Open notification targets under the correct account and prevent touches in an open conversation from reaching the Home screen underneath.
++ Route onion-account messaging and attachments through Orbot without direct fallback. Verified same-onion message connections may omit XMPP TLS only when the server offers none; offered TLS must validate and attachments still require HTTPS. Update checks remain direct HTTPS, and external links follow the browser's routing.
++ Ask before resetting a recognized incompatible alpha database. Resetting deletes local messages and drafts; newer or unrecognized databases are not automatically erased.
++ Fix update installer handoff on Android versions with package visibility restrictions.
++ Restore the Cut & wind launcher artwork, including round and themed icons.
+
+Nema remains an experimental plaintext XMPP client. OMEMO and OpenPGP are not implemented. Tor routing is not end-to-end message encryption.
+
 * 0.2.0 — 2026-08-30
 
 Second alpha release.
