@@ -1953,6 +1953,14 @@ internal fun MessageTimeline(
     var reactionPickerShown by remember { mutableStateOf(false) }
     val currentOnViewportChanged by rememberUpdatedState(onViewportChanged)
     val currentOnMessageDisplayed by rememberUpdatedState(onMessageDisplayed)
+    // Draft revisions replace composer callbacks, not timeline content. Read them at
+    // action time so typing does not rebuild the lazy interval/key index each time.
+    val currentOnReply by rememberUpdatedState(onReply)
+    val currentOnQuote by rememberUpdatedState(onQuote)
+    val currentOnEdit by rememberUpdatedState(onEdit)
+    val currentOnReplyAsThread by rememberUpdatedState(onReplyAsThread)
+    val currentOnLoadOlder by rememberUpdatedState(onLoadOlder)
+    val currentEditActionsEnabled by rememberUpdatedState(editActionsEnabled)
     val currentTypingPresent by rememberUpdatedState(typingLabel != null)
     val nearLatest by remember {
         derivedStateOf {
@@ -2124,7 +2132,6 @@ internal fun MessageTimeline(
                 }
                 val segments = remember(visibleBody) { parseQuotedBody(visibleBody) }
                 val correctionTarget = message.correctionTargetOrNull(venue)
-                    .takeIf { editActionsEnabled }
                 Box(modifier = Modifier.fillMaxWidth()) {
                     Column(
                         modifier = Modifier
@@ -2332,7 +2339,7 @@ internal fun MessageTimeline(
                                     text = { Text("Reply") },
                                     onClick = {
                                         messageActionsOpen = false
-                                        onReply(message)
+                                        currentOnReply(message)
                                     },
                                 )
                                 if (venue is ConversationVenue.Direct && !message.groupChat) {
@@ -2340,17 +2347,17 @@ internal fun MessageTimeline(
                                         text = { Text("Reply as a thread") },
                                         onClick = {
                                             messageActionsOpen = false
-                                            onReplyAsThread(message)
+                                            currentOnReplyAsThread(message)
                                         },
                                     )
                                 }
                             }
-                            if (correctionTarget != null) {
+                            if (correctionTarget != null && currentEditActionsEnabled) {
                                 DropdownMenuItem(
                                     text = { Text("Edit") },
                                     onClick = {
                                         messageActionsOpen = false
-                                        onEdit(message)
+                                        currentOnEdit(message)
                                     },
                                 )
                             }
@@ -2358,7 +2365,7 @@ internal fun MessageTimeline(
                                 text = { Text("Quote") },
                                 onClick = {
                                     messageActionsOpen = false
-                                    onQuote(message)
+                                    currentOnQuote(message)
                                 },
                             )
                             if (reactable) {
@@ -2378,7 +2385,7 @@ internal fun MessageTimeline(
             if (olderHistoryStatus != null) {
                 item(key = "older-history", contentType = "older-history") {
                     TextButton(
-                        onClick = { scope.launch { onLoadOlder() } },
+                        onClick = { scope.launch { currentOnLoadOlder() } },
                         enabled = olderHistoryStatus != OlderHistoryStatus.Pending &&
                             olderHistoryStatus != OlderHistoryStatus.Exhausted,
                         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("load-older-history"),
