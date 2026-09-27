@@ -5,7 +5,7 @@ import android.os.Looper
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertTextEquals
-import androidx.compose.ui.test.junit4.createComposeRule
+import org.thanosapollo.nema.createRobolectricComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -24,7 +24,7 @@ import org.thanosapollo.nema.chat.TimelineMessage
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class AttachmentCacheLookupTest {
-    @get:Rule val compose = createComposeRule()
+    @get:Rule val compose = createRobolectricComposeRule()
     private fun row(url: String) = TimelineMessage("attachment", "peer@example.org", "", false, null, null, null)
         .copy(attachmentUrl = url, attachmentName = "file.pdf", attachmentMime = "application/pdf")
 

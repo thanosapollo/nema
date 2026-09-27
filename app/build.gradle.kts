@@ -1,4 +1,30 @@
+import com.android.build.api.artifact.SingleArtifact
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
+abstract class MergeUnitTestAssets : DefaultTask() {
+    @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val appAssets: DirectoryProperty
+
+    @get:InputDirectory
+    @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val schemas: DirectoryProperty
+
+    @get:OutputDirectory
+    abstract val outputAssets: DirectoryProperty
+
+    @get:Inject
+    abstract val fileSystem: FileSystemOperations
+
+    @TaskAction
+    fun merge() {
+        fileSystem.sync {
+            from(appAssets, schemas)
+            into(outputAssets)
+            duplicatesStrategy = DuplicatesStrategy.FAIL
+        }
+    }
+}
 
 plugins {
     id("com.android.application")
@@ -52,10 +78,26 @@ android {
         unitTests.isIncludeAndroidResources = true
     }
 
-    sourceSets["debug"].assets.srcDir("$projectDir/schemas")
+    // Exported schemas are migration fixtures, not application assets.
+    sourceSets["androidTest"].assets.srcDir("$projectDir/schemas")
     sourceSets["test"].java.srcDir("src/sharedTest/java")
     if (providers.gradleProperty("nemaSharedThreadNetworkProof").orNull == "true") {
         sourceSets["androidTest"].java.srcDirs("src/sharedTest/java", "src/networkAndroidTest/java")
+    }
+}
+
+// App-module JVM tests reuse the app's binary resources; src/test/assets is not
+// merged by AGP. Transform only the unit-test artifact, never the app's assets.
+androidComponents {
+    onVariants { variant ->
+        variant.unitTest?.let { unitTest ->
+            val fixtureAssets = tasks.register<MergeUnitTestAssets>("${unitTest.name}FixtureAssets") {
+                schemas.set(layout.projectDirectory.dir("schemas"))
+            }
+            unitTest.artifacts.use(fixtureAssets)
+                .wiredWithDirectories(MergeUnitTestAssets::appAssets, MergeUnitTestAssets::outputAssets)
+                .toTransform(SingleArtifact.ASSETS)
+        }
     }
 }
 
@@ -71,8 +113,10 @@ room {
 
 // JVM tests otherwise accept duplicate classes/resources that Android cannot package.
 // Use AGP's checks on the app runtime (not Robolectric's separate dependency graph).
-tasks.matching { it.name == "testDebugUnitTest" }.configureEach {
-    dependsOn("checkDebugDuplicateClasses", "mergeDebugJavaResource")
+listOf("Debug", "Release").forEach { variant ->
+    tasks.matching { it.name == "test${variant}UnitTest" }.configureEach {
+        dependsOn("check${variant}DuplicateClasses", "merge${variant}JavaResource")
+    }
 }
 
 configurations.configureEach {
@@ -107,8 +151,10 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+    // Device Compose tests launch this Activity in the target debug application.
     debugImplementation("androidx.compose.ui:ui-test-manifest")
-    // Room's instrumentation schema parser is compiled against serialization 1.8.1.
+    // AGP requires instrumentation dependencies to match the target app's versions.
+    // Room's schema parser needs serialization 1.8.1; keep this debug-only alignment.
     debugImplementation(platform("org.jetbrains.kotlinx:kotlinx-serialization-bom:1.8.1"))
 
     testImplementation("junit:junit:4.13.2")
@@ -118,6 +164,8 @@ dependencies {
     testImplementation("androidx.compose.ui:ui-test-junit4")
     testImplementation("org.robolectric:robolectric:4.16")
     testImplementation("androidx.room:room-testing:2.8.4")
+    // Room's test schema parser is compiled against serialization 1.8.1.
+    testImplementation(platform("org.jetbrains.kotlinx:kotlinx-serialization-bom:1.8.1"))
 
     androidTestImplementation("androidx.room:room-testing:2.8.4")
     androidTestImplementation("androidx.test:core:1.6.1")

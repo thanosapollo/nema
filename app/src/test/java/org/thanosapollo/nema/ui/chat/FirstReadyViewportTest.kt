@@ -8,7 +8,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.layout.height
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.test.junit4.createComposeRule
+import org.thanosapollo.nema.createRobolectricComposeRule
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.runBlocking
@@ -34,7 +34,7 @@ import org.thanosapollo.nema.xmpp.transport.AccountId
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class FirstReadyViewportTest {
-    @get:Rule val compose = createComposeRule()
+    @get:Rule val compose = createRobolectricComposeRule()
 
     @Test
     fun heldProjectionNeverRestoresFallbackBeforeOldAnchorArrives() {

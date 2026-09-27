@@ -5,7 +5,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.test.junit4.createComposeRule
+import org.thanosapollo.nema.createRobolectricComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
@@ -29,7 +29,7 @@ import org.thanosapollo.nema.thread.ThreadRef
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class VisibleReadLayoutTest {
-    @get:Rule val compose = createComposeRule()
+    @get:Rule val compose = createRobolectricComposeRule()
     private val occurrence = ChatRouteOccurrence(ChatRoute("peer@example.org"), 1)
     private fun row(id: String) = TimelineMessage(id, "peer@example.org", id, false, null, null, null)
 

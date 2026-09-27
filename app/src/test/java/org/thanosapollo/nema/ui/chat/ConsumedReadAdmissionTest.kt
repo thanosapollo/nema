@@ -9,7 +9,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.test.junit4.createComposeRule
+import org.thanosapollo.nema.createRobolectricComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.unit.dp
@@ -94,7 +94,7 @@ class CountReadRequest {
 @Config(sdk = [34], application = Application::class,
     shadows = [CountReadRequest::class, CountHomePhotoEquality::class], instrumentedPackages = ["org.thanosapollo.nema.chat"])
 class ConsumedReadAdmissionTest {
-    @get:Rule val compose = createComposeRule()
+    @get:Rule val compose = createRobolectricComposeRule()
 
     @Test fun settledVisibilityDoesNotCopyOrScanHistoryOnMain() = admission(512)
     @Test fun largerHistoryDoesNotIncreaseMainAdmissionWork() = admission(2_048)

@@ -54,7 +54,7 @@ import androidx.compose.ui.test.assertIsNotFocused
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.StateRestorationTester
-import androidx.compose.ui.test.junit4.createComposeRule
+import org.thanosapollo.nema.createRobolectricComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -128,7 +128,7 @@ private val hasNoRole = SemanticsMatcher.keyNotDefined(SemanticsProperties.Role)
 @Config(sdk = [34], application = Application::class)
 class ConversationContentTest {
     @get:Rule
-    val composeRule = createComposeRule()
+    val composeRule = createRobolectricComposeRule()
 
     @Test
     fun presenterLoadingAndFailureHideOldActionsAndPreserveHomeAndDrafts() {

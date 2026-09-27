@@ -25,7 +25,7 @@ import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.StateRestorationTester
-import androidx.compose.ui.test.junit4.createComposeRule
+import org.thanosapollo.nema.createRobolectricComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -57,7 +57,7 @@ private val hasNoRole = SemanticsMatcher.keyNotDefined(SemanticsProperties.Role)
 @Config(sdk = [34], application = Application::class)
 class AccountSettingsContentTest {
     @get:Rule
-    val composeRule = createComposeRule()
+    val composeRule = createRobolectricComposeRule()
 
     @Test
     fun torActionsAreExplicitAndDoNotStartOnComposition() {
@@ -417,7 +417,7 @@ class AccountSettingsContentTest {
 @Config(sdk = [34], application = Application::class)
 class AccountsContentTest {
     @get:Rule
-    val composeRule = createComposeRule()
+    val composeRule = createRobolectricComposeRule()
 
     @Test
     fun accountsUseSharedTaggedRowsWithAvatarSelectionAndExactCallbacks() {
@@ -531,7 +531,7 @@ class AccountsContentTest {
 @Config(sdk = [34], application = Application::class)
 class SessionBottomBarTest {
     @get:Rule
-    val composeRule = createComposeRule()
+    val composeRule = createRobolectricComposeRule()
 
     @Test
     fun destinationsPresentAndSelectedStateTracksClicks() {

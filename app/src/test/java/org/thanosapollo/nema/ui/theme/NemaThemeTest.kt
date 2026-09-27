@@ -11,7 +11,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.test.junit4.createComposeRule
+import org.thanosapollo.nema.createRobolectricComposeRule
 import androidx.core.view.WindowCompat
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -25,7 +25,7 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34], application = Application::class)
 class NemaThemeTest {
     @get:Rule
-    val composeRule = createComposeRule()
+    val composeRule = createRobolectricComposeRule()
 
     @Test
     fun darkNeutralPaletteUsesTrueBlackAndSiteGold() {

@@ -4,7 +4,7 @@ import android.app.Application
 import android.net.Uri
 import androidx.compose.runtime.MutableState
 import androidx.compose.ui.test.junit4.StateRestorationTester
-import androidx.compose.ui.test.junit4.createComposeRule
+import org.thanosapollo.nema.createRobolectricComposeRule
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Rule
@@ -18,7 +18,7 @@ import org.thanosapollo.nema.ui.theme.AppearanceScope
 @Config(sdk = [34], application = Application::class)
 class BackgroundPickerLifecycleTest {
     @get:Rule
-    val composeRule = createComposeRule()
+    val composeRule = createRobolectricComposeRule()
 
     @Test
     fun pendingPickerResultRetainsExactScopeAcrossStateRestorationAndIsConsumedOnce() {

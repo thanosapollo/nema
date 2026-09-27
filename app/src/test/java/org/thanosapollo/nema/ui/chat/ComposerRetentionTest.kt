@@ -10,7 +10,7 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.test.junit4.createComposeRule
+import org.thanosapollo.nema.createRobolectricComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performTextReplacement
@@ -35,7 +35,7 @@ import org.thanosapollo.nema.ui.PrimaryDestination
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class ComposerRetentionTest {
-    @get:Rule val composeRule = createComposeRule()
+    @get:Rule val composeRule = createRobolectricComposeRule()
 
     @Test fun failedSaveSurvivesSettingsAndRoster() = destinationRoundTrip(false)
     @Test fun throwingSaveSurvivesSettingsAndRoster() = destinationRoundTrip(null)

@@ -12,7 +12,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.ui.test.junit4.createComposeRule
+import org.thanosapollo.nema.createRobolectricComposeRule
 import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -47,7 +47,7 @@ import org.thanosapollo.nema.xmpp.httpupload.UploadedFile
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class UploadDraftRetentionTest {
-    @get:Rule val composeRule = createComposeRule()
+    @get:Rule val composeRule = createRobolectricComposeRule()
 
     @Test fun heldPickerAcrossPeerSavesOrigin() = completion("peer", false, true)
     @Test fun heldPickerAcrossThreadRetainsFalseSave() = completion("thread", false, false)

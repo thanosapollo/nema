@@ -10,7 +10,7 @@ import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.StateRestorationTester
-import androidx.compose.ui.test.junit4.createComposeRule
+import org.thanosapollo.nema.createRobolectricComposeRule
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
@@ -43,7 +43,7 @@ import org.thanosapollo.nema.xmpp.transport.AccountId
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class SentDraftRecreationTest {
-    @get:Rule val composeRule = createComposeRule()
+    @get:Rule val composeRule = createRobolectricComposeRule()
 
     @Test fun acceptedSendCannotResurrectAfterOwnerAndPresenterRecreation() = recreate()
     @Test fun acceptedSendPreservesNewerOrdinaryInputAcrossRecreation() = recreate(newerInput = true)

@@ -5,7 +5,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.test.*
-import androidx.compose.ui.test.junit4.createComposeRule
+import org.thanosapollo.nema.createRobolectricComposeRule
 import androidx.test.core.app.ApplicationProvider
 import java.io.IOException
 import java.util.UUID
@@ -31,7 +31,7 @@ import org.thanosapollo.nema.xmpp.transport.*
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class SharedRetrySettlementTest {
-    @get:Rule val compose = createComposeRule()
+    @get:Rule val compose = createRobolectricComposeRule()
     private val context = ApplicationProvider.getApplicationContext<Application>()
     private val databaseName = "retry-settlement-${UUID.randomUUID()}.db"
     private lateinit var db: NemaDatabase

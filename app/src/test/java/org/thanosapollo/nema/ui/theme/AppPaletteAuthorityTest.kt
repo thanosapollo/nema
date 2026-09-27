@@ -4,7 +4,7 @@ import android.app.Application
 import android.content.SharedPreferences
 import android.net.Uri
 import androidx.compose.runtime.SideEffect
-import androidx.compose.ui.test.junit4.createComposeRule
+import org.thanosapollo.nema.createRobolectricComposeRule
 import androidx.test.core.app.ApplicationProvider
 import java.io.File
 import kotlinx.coroutines.Dispatchers
@@ -23,7 +23,7 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34], application = Application::class)
 class AppPaletteAuthorityTest {
     @get:Rule
-    val composeRule = createComposeRule()
+    val composeRule = createRobolectricComposeRule()
 
     private val context: Application
         get() = ApplicationProvider.getApplicationContext()

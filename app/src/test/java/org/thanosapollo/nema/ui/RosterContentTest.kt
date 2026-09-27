@@ -12,7 +12,7 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHeightIsAtLeast
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsSelected
-import androidx.compose.ui.test.junit4.createComposeRule
+import org.thanosapollo.nema.createRobolectricComposeRule
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 
 import androidx.compose.ui.test.onNodeWithTag
@@ -32,7 +32,7 @@ import org.thanosapollo.nema.storage.PeerEntity
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class RosterContentTest {
-    @get:Rule val composeRule = createComposeRule()
+    @get:Rule val composeRule = createRobolectricComposeRule()
 
     @Test fun bottomBarOrderSelectionAndTargetSize() {
         composeRule.setContent {

@@ -4,7 +4,7 @@ import android.app.Application
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.junit4.createComposeRule
+import org.thanosapollo.nema.createRobolectricComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -26,7 +26,7 @@ import org.thanosapollo.nema.xmpp.transport.SessionCapabilities
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class ArchiveStatusBannerTest {
-    @get:Rule val compose = createComposeRule()
+    @get:Rule val compose = createRobolectricComposeRule()
     private val owner = SessionIdentity(AccountId.require("owner"), ConnectionGeneration.require(1))
     private val connected = ConnectionState.Connected(owner.accountId, owner.generation)
     private val capabilities = SessionCapabilities(true, CarbonCapabilityState.UNSUPPORTED, false)

@@ -10,7 +10,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.test.assertHasNoClickAction
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.junit4.createComposeRule
+import org.thanosapollo.nema.createRobolectricComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performSemanticsAction
@@ -34,7 +34,7 @@ import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = android.app.Application::class)
 class UnknownDeliveryTest {
-    @get:Rule val composeRule = createComposeRule()
+    @get:Rule val composeRule = createRobolectricComposeRule()
 
     @Test fun unknownIsNeutralAndReadableInLightDirectChat() = assertUnknown(dark = false, room = false)
     @Test fun unknownIsNeutralAndReadableInDarkRoom() = assertUnknown(dark = true, room = true)

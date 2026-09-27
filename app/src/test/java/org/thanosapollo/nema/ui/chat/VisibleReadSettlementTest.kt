@@ -8,7 +8,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.test.junit4.createComposeRule
+import org.thanosapollo.nema.createRobolectricComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.unit.dp
 import androidx.room.withTransaction
@@ -38,7 +38,7 @@ import org.thanosapollo.nema.ui.HomeContent
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class VisibleReadSettlementTest {
-    @get:Rule val compose = createComposeRule()
+    @get:Rule val compose = createRobolectricComposeRule()
 
     @Test fun directReadSurvivesNavigation() = settlement(room = false, thread = false)
     @Test fun roomReadSurvivesPause() = settlement(room = true, thread = false)
