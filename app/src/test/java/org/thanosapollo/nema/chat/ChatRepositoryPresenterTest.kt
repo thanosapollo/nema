@@ -16,6 +16,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.runTest
@@ -108,11 +109,11 @@ class ChatRepositoryPresenterTest {
     fun reopeningKeepsLivePeerQueriesButReadsFreshDraft() = runBlocking {
         MessageStore(database).ingest(incoming(ACCOUNT, "local", "already on disk"))
         database.close()
-        val aliasQueries = java.util.concurrent.atomic.AtomicInteger()
+        val aliasQueries = kotlinx.coroutines.flow.MutableStateFlow(0)
         val timelineQueries = java.util.concurrent.atomic.AtomicInteger()
         database = Room.databaseBuilder(context, NemaDatabase::class.java, databaseName)
             .setQueryCallback({ sql, _ ->
-                if (sql.trimStart().startsWith("SELECT alias.*") && sql.contains("FROM trusted_identity_aliases AS alias")) aliasQueries.incrementAndGet()
+                if (sql.trimStart().startsWith("SELECT alias.*") && sql.contains("FROM trusted_identity_aliases AS alias")) aliasQueries.update { it + 1 }
                 if (sql.contains("END AS replyReferenceId") && sql.contains("AS conversationArchiveOrdinal")) timelineQueries.incrementAndGet()
             }, java.util.concurrent.Executor { it.run() }).build()
         val repository = ChatRepository(database)
@@ -120,7 +121,7 @@ class ChatRepositoryPresenterTest {
         try {
             presenter.selectPeer(PEER)
             val first = withTimeout(5_000) { presenter.state.first { it.messages.isNotEmpty() } }
-            val queries = aliasQueries.get()
+            val queries = aliasQueries.value
             assertEquals("timeline and recent threads must share the alias subscription", 1, queries)
             assertEquals("timeline and recent threads must share the history subscription", 1, timelineQueries.get())
             presenter.closeConversation()
@@ -132,11 +133,15 @@ class ChatRepositoryPresenterTest {
             } }
             assertEquals("changed while closed", reopened.draft)
             assertEquals("local", reopened.messages.single().id)
-            assertEquals("reopening must not restart peer timeline/alias queries", queries, aliasQueries.get())
+            assertEquals("reopening must not restart peer timeline/alias queries", queries, aliasQueries.value)
             assertEquals("reopening must retain the history subscription", 1, timelineQueries.get())
             MessageStore(database).ingest(incoming(ACCOUNT, "new", "invalidation"))
-            withTimeout(5_000) { presenter.state.first { it.messages.size == 2 } }
-            assertTrue(aliasQueries.get() > queries)
+            withTimeout(5_000) {
+                presenter.state.first { it.messages.size == 2 }
+                // Timeline rows can arrive before the independent alias query reruns.
+                aliasQueries.first { it > queries }
+            }
+            assertTrue(aliasQueries.value > queries)
         } finally {
             presenter.close()
         }
