@@ -47,8 +47,8 @@ class UpdateCoordinatorTest {
                 UpdateState.Failed("Could not check for updates. Try again.", null),
                 coordinator.state.value,
             )
-            coordinator.downloadAndVerify()
-            assertFalse(coordinator.install())
+            coordinator.requestUpdate()?.join()
+            assertEquals(null, coordinator.installRequest.value)
             assertEquals(1, constructions)
             assertTrue(processJob.isActive)
             assertTrue(uncaught.isEmpty())
@@ -111,7 +111,7 @@ class UpdateCoordinatorTest {
         val databaseOpen = application.indexOf("NemaDatabase.create(")
         assertTrue(databaseOpen >= 0)
         assertTrue(application.indexOf("updates = UpdateCoordinator") in 0 until databaseOpen)
-        assertEquals(1, "updates\\.checkAutomatic\\(\\)".toRegex().findAll(activity).count())
+        assertEquals(1, "updates\\.onForeground\\(\\)".toRegex().findAll(activity).count())
         assertEquals(0, "settleInstallOnResume".toRegex().findAll(activity).count())
         assertEquals(1, "installResumeController\\.onResume\\(\\)".toRegex().findAll(activity).count())
         val processController = Regex(

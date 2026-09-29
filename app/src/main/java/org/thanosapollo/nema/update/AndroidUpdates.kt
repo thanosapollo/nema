@@ -1,13 +1,11 @@
 package org.thanosapollo.nema.update
 
-import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
-import android.provider.Settings
 import androidx.core.content.FileProvider
 import java.io.File
 import kotlinx.coroutines.CoroutineScope
@@ -15,6 +13,12 @@ import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -28,8 +32,10 @@ private const val UPDATE_PREFERENCES = "updates"
 private const val LAST_SUCCESS = "last-success"
 private const val APK_MIME = "application/vnd.android.package-archive"
 
+data class UpdateInstallRequest(val authority: VerifiedUpdate, val mayRequestPermission: Boolean)
+
 class UpdateCoordinator(
-    scope: CoroutineScope,
+    private val scope: CoroutineScope,
     createRepository: () -> UpdateRepository,
     constructionDispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
@@ -54,6 +60,114 @@ class UpdateCoordinator(
         }
     }
 
+    // Jobs and continuation authority belong to the process, never an Activity or
+    // composition. No artifact/permission/install authority survives process death.
+    private var checkJob: Job? = null
+    private var updateJob: Job? = null
+    private var preparationCancelable = false
+    private val mutableInstallRequest = MutableStateFlow<UpdateInstallRequest?>(null)
+    val installRequest: StateFlow<UpdateInstallRequest?> = mutableInstallRequest.asStateFlow()
+    private var permissionRequest: VerifiedUpdate? = null
+    private val mutableMessage = MutableStateFlow<String?>(null)
+    val message: StateFlow<String?> = mutableMessage.asStateFlow()
+
+    fun onForeground() = requestCheck(manual = false)
+
+    @Synchronized
+    fun requestCheck(manual: Boolean = true): Job? {
+        if (checkJob?.isCompleted == false) return checkJob
+        if (updatePending()) return null
+        return scope.launch(start = CoroutineStart.LAZY) {
+            if (manual) {
+                mutableMessage.value = null
+                checkManual()
+            } else checkAutomatic()
+        }.also { checkJob = it; it.start() }
+    }
+
+    @Synchronized
+    fun requestUpdate(): Job? {
+        if (checkJob?.isCompleted == false || updatePending()) return null
+        mutableMessage.value = null
+        preparationCancelable = true
+        return scope.launch(start = CoroutineStart.LAZY) {
+            val available = repository.await() ?: return@launch
+            try {
+                available.download()
+                available.verify()
+                val context = currentCoroutineContext()
+                synchronized(this@UpdateCoordinator) {
+                    context.ensureActive()
+                    mutableInstallRequest.value = (available.state.value as? UpdateState.Verified)?.authority
+                        ?.let { UpdateInstallRequest(it, mayRequestPermission = true) }
+                }
+            } catch (cancelled: CancellationException) {
+                withContext(NonCancellable) { available.cancelPreparation() }
+                throw cancelled
+            }
+        }.also { updateJob = it; it.start() }
+    }
+
+    @Synchronized
+    fun cancelUpdate() {
+        // Once handed off, cancellation belongs to Android's permission/installer UI.
+        if (!preparationCancelable) return
+        preparationCancelable = false
+        mutableInstallRequest.value = null
+        val preparing = updateJob
+        preparing?.cancel()
+        // Admit no Retry before even non-cooperative verification and cleanup settle.
+        updateJob = scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            withContext(NonCancellable) {
+                preparing?.join()
+                repository.await()?.cancelPreparation()
+            }
+        }
+    }
+
+    @Synchronized
+    fun claimInstallRequest(expected: UpdateInstallRequest, needsPermission: Boolean): Boolean {
+        if (mutableInstallRequest.value !== expected) return false
+        mutableInstallRequest.value = null
+        preparationCancelable = false
+        if (needsPermission) {
+            if (!expected.mayRequestPermission) {
+                mutableMessage.value = "Allow Nema to install updates, then try again."
+                return false
+            }
+            permissionRequest = expected.authority
+        } else launchInstall(expected.authority)
+        return true
+    }
+
+    @Synchronized
+    fun onInstallPermissionResult(granted: Boolean) {
+        val expected = permissionRequest ?: return
+        permissionRequest = null // consume once, even when denied or stale
+        // Activity results arrive before onResume. Defer the handoff until the
+        // Activity is resumed, then recheck permission without opening Settings again.
+        if (granted) mutableInstallRequest.value = UpdateInstallRequest(expected, mayRequestPermission = false)
+        else mutableMessage.value = "Allow Nema to install updates, then try again."
+    }
+
+    @Synchronized
+    fun permissionLaunchFailed(expected: VerifiedUpdate) {
+        if (permissionRequest !== expected) return
+        permissionRequest = null
+        mutableMessage.value = "Could not open install permission settings. Try again."
+    }
+
+    private fun updatePending(): Boolean = updateJob?.isCompleted == false ||
+        mutableInstallRequest.value != null || permissionRequest != null
+
+    private fun launchInstall(expected: VerifiedUpdate) {
+        updateJob = scope.launch {
+            if (repository.await()?.install(expected) != true) {
+                mutableMessage.value = "Could not open installer. Try again."
+            }
+        }
+    }
+
     suspend fun checkAutomatic() {
         repository.await()?.checkAutomatic()
     }
@@ -70,14 +184,6 @@ class UpdateCoordinator(
         available.checkManual()
     }
 
-    suspend fun downloadAndVerify() {
-        repository.await()?.run {
-            download()
-            verify()
-        }
-    }
-
-    suspend fun install(): Boolean = repository.await()?.install() ?: false
     suspend fun settleInstallOnResume(handoff: InstallHandoffLease) =
         repository.await()?.settleInstallOnResume(handoff)
 }
@@ -98,26 +204,6 @@ internal fun createAndroidUpdateRepository(context: Context, installResumeGate: 
         apiLevel = Build.VERSION.SDK_INT,
         installLauncher = packageInstallerLauncher(appContext, installResumeGate),
     )
-}
-
-fun requestInstallOrPermission(
-    context: Context,
-    apiLevel: Int = Build.VERSION.SDK_INT,
-    canInstallPackages: Boolean = context.packageManager.canRequestPackageInstalls(),
-    install: () -> Unit,
-) {
-    if (apiLevel >= Build.VERSION_CODES.O && !canInstallPackages) {
-        val intent = Intent(
-            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-            Uri.parse("package:${context.packageName}"),
-        )
-        try {
-            context.startActivity(intent)
-        } catch (_: ActivityNotFoundException) {
-        }
-        return
-    }
-    install()
 }
 
 internal fun packageInstallerLauncher(

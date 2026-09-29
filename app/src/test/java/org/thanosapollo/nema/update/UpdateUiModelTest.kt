@@ -18,8 +18,8 @@ class UpdateUiModelTest {
             UpdateState.Checking(null) to Triple("Checking…", false, false),
             UpdateState.Current(accepted) to Triple("Nema is up to date", true, false),
             UpdateState.Available(accepted) to Triple("Nema 0.2 is available", true, true),
-            UpdateState.Downloading(accepted) to Triple("Downloading/verifying…", true, false),
-            UpdateState.Downloaded(accepted, artifact) to Triple("Downloading/verifying…", true, false),
+            UpdateState.Downloading(accepted) to Triple("Downloading/verifying…", false, false),
+            UpdateState.Downloaded(accepted, artifact) to Triple("Downloading/verifying…", false, false),
             UpdateState.Verified(accepted, verified) to Triple("Nema 0.2 is ready to install", true, false),
             UpdateState.Installing(accepted, InstallHandoffLease(UpdateState.Verified(accepted, verified))) to
                 Triple("Opening system installer…", false, false),

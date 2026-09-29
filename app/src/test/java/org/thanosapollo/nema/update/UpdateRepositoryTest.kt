@@ -336,16 +336,16 @@ class UpdateRepositoryTest {
                 saveCalls++
             }, { true })
 
+            repository.checkManual() // same-process accepted state is required for throttling
+            fetcher.calls = 0
+            saveCalls = 0
+            saved = case.last
             repository.checkAutomatic()
 
             assertEquals(case.toString(), case.expectedFetches, fetcher.calls)
             assertEquals(case.toString(), case.expectedFetches, saveCalls)
             assertEquals(case.toString(), if (case.expectedFetches == 1) case.now else case.last, saved)
-            if (case.expectedFetches == 1) {
-                assertTrue(case.toString(), repository.state.value is UpdateState.Available)
-            } else {
-                assertEquals(case.toString(), UpdateState.Idle, repository.state.value)
-            }
+            assertTrue(case.toString(), repository.state.value is UpdateState.Available)
         }
     }
 
@@ -368,6 +368,9 @@ class UpdateRepositoryTest {
             0L
         }, { saveCalls.incrementAndGet() }, { true })
 
+        repository.checkManual()
+        fetchCalls.set(0)
+        saveCalls.set(0)
         val first = launch(Dispatchers.Default) { repository.checkAutomatic() }
         first.invokeOnCompletion { firstCompleted.countDown() }
         assertTrue(firstEligibilityEntered.await(5, TimeUnit.SECONDS))
