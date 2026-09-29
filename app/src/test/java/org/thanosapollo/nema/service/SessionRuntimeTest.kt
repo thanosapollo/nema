@@ -904,8 +904,9 @@ class SessionRuntimeTest {
         val release = kotlinx.coroutines.channels.Channel<Unit>()
         var hold = false
         var fail = false
+        lateinit var connection: RecordingConnection
         val factory = SessionConnectionFactory { configuration, _, event ->
-            val connection = RecordingConnection(configuration.id, null, null, event)
+            connection = RecordingConnection(configuration.id, null, null, event)
             connection.archiveSupported = !room
             connection.repairRegistry = native.javaClass.getDeclaredField("roomStableIdAuthorities")
                 .apply { isAccessible = true }.get(native) as org.thanosapollo.nema.xmpp.smack.RoomStableIdAuthorityRegistry
@@ -935,12 +936,25 @@ class SessionRuntimeTest {
         }
         val runtime = SessionRuntime(accounts, credentials, store, PeerIdentityStore(database.messageDao()), backgroundScope, factory)
         assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
-        if (room) assertTrue(runtime.joinMuc(peer))
+        if (room) {
+            // Finish the empty startup restoration before this join publishes an
+            // autojoin bookmark. Otherwise startup can rejoin the room, replace
+            // its authorization and race the deliberately held older requests.
+            connection.firstBookmarkReadJob.await().join()
+            assertTrue(connection.joinedRooms.isEmpty())
+            assertTrue(runtime.joinMuc(peer))
+        }
         val presenter = DirectChatPresenter(owner, ChatRepository(database), backgroundScope, { _, _ -> true },
             loadOlder = runtime::loadOlderHistory, directoryConnection = runtime.state)
         try {
             presenter.selectPeer(peer)
-            val initial = presenter.state.first { it.contentStatus == ChatContentStatus.Ready && it.messages.size == 50 }
+            // Timeline and peer metadata are independent Room projections. The
+            // action must consume the intended archive scope, not a transient
+            // direct-chat projection that can already contain all 50 room rows.
+            val initial = presenter.state.first {
+                it.contentStatus == ChatContentStatus.Ready && it.messages.size == 50 &&
+                    it.selectedPeerGroupChat == room
+            }
             assertEquals((26..75).map { "history-$it" }, initial.messages.map { it.body })
             val origin = initial.routeOccurrence
             hold = true; fail = true
