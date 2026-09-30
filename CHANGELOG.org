@@ -19,7 +19,7 @@ Third alpha release.
 + Fix update installer handoff on Android versions with package visibility restrictions.
 + Restore the Cut & wind launcher artwork, including round and themed icons.
 
-Nema remains an experimental plaintext XMPP client. OMEMO and OpenPGP are not implemented. Tor routing is not end-to-end message encryption.
+This release does not implement end-to-end encryption. Tor routing is not end-to-end message encryption.
 
 * 0.2.0 — 2026-08-30
 
@@ -31,7 +31,7 @@ Second alpha release.
 + Share one typed conversation shell across direct chats and rooms.
 + Unify settings presentation, profile rows, and room information.
 
-Nema remains an experimental plaintext XMPP client. OMEMO and OpenPGP are not implemented.
+This release does not implement end-to-end encryption.
 
 * 0.1.1 — 2026-08-29
 
@@ -43,4 +43,4 @@ First tagged alpha release on Theodora.
 + Keep one persistent bottom bar ordered Roster, Home, Settings.
 + Harden reconnect, account replacement, roster lifecycle, chat navigation, and composer failure handling.
 
-Nema remains an experimental plaintext XMPP client. OMEMO and OpenPGP are not implemented.
+This release does not implement end-to-end encryption.

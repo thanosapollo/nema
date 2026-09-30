@@ -1,14 +1,17 @@
-#+TITLE: Nema - Experimental plaintext XMPP client for Android
+#+TITLE: Nema - XMPP messenger for Android
 
 * About
 
-Nema is an experimental [[https://xmpp.org/][XMPP]] client for Android, built with Kotlin,
+Nema is an [[https://xmpp.org/][XMPP]] messenger for Android, built with Kotlin,
 Jetpack Compose, Smack, and Room.
 
-The current work focuses on reliable plaintext messaging: direct and group
-chats, archive recovery, Carbons, replies, drafts, bookmarks, blocking,
-vCards, and HTTP file upload. OMEMO and OpenPGP are not implemented. Do not
-treat this build as an encrypted messenger.
+Current features include direct and group chats, archive recovery, Carbons,
+replies, drafts, bookmarks, blocking, vCards, and HTTP file upload.
+Development focuses on reliable messaging, responsive conversations, and
+clear boundaries for future features, including legacy and modern OMEMO.
+
+End-to-end encryption is not implemented yet. Planned OMEMO support does
+not make current builds an encrypted messenger.
 
 Nema is alpha software. Database migrations and messaging behavior have
 automated coverage, but releases may still contain bugs or incomplete UI.
