@@ -1172,6 +1172,10 @@ class DirectChatPresenter(
     fun updateDraft(snapshot: DraftSnapshot): Deferred<Boolean> {
         val result = CompletableDeferred<Boolean>()
         synchronized(actionLock) {
+            if (!presenterJob.isActive) {
+                result.complete(false)
+                return result
+            }
             val pending = coalescedDrafts.getOrPut(snapshot.key) { PendingDraft(snapshot) }
             pending.snapshot = snapshot
             pending.waiters += result
@@ -1195,6 +1199,10 @@ class DirectChatPresenter(
                     }
                 }.also {
                     actionTail = it
+                    // Retirement can prevent even the worker's try/finally from starting.
+                    it.invokeOnCompletion {
+                        if (!presenterJob.isActive) failPendingDrafts()
+                    }
                     it.start()
                 }
             }
@@ -1370,36 +1378,44 @@ class DirectChatPresenter(
                 }
                 coalescedDrafts.clear()
             }
-            for (pending in batch) {
-                val ok = try {
-                    if (!owns(pending.snapshot.key)) {
-                        false
-                    } else {
-                        repository.saveDraft(
-                            pending.snapshot.key,
-                            pending.snapshot.body,
-                            pending.snapshot.reply,
-                            pending.snapshot.attachmentUrl,
-                            pending.snapshot.attachmentName,
-                            pending.snapshot.attachmentMime,
-                            pending.snapshot.attachmentSize,
-                        )
-                        if (!pending.snapshot.groupChat) {
-                            notifyComposer(
-                                pending.snapshot.key.canonicalBarePeer,
-                                pending.snapshot.body.isNotEmpty(),
+            try {
+                for (pending in batch) {
+                    val ok = try {
+                        if (!owns(pending.snapshot.key)) {
+                            false
+                        } else {
+                            repository.saveDraft(
+                                pending.snapshot.key,
+                                pending.snapshot.body,
+                                pending.snapshot.reply,
+                                pending.snapshot.attachmentUrl,
+                                pending.snapshot.attachmentName,
+                                pending.snapshot.attachmentMime,
+                                pending.snapshot.attachmentSize,
                             )
+                            // Save completion, not ephemeral typing, owns durable success.
+                            pending.waiters.forEach { waiter -> waiter.complete(true) }
+                            if (!pending.snapshot.groupChat) {
+                                notifyComposer(
+                                    pending.snapshot.key.canonicalBarePeer,
+                                    pending.snapshot.body.isNotEmpty(),
+                                )
+                            }
+                            true
                         }
-                        true
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        false
                     }
-                } catch (cancelled: CancellationException) {
-                    pending.waiters.forEach { waiter -> waiter.complete(false) }
-                    failPendingDrafts()
-                    throw cancelled
-                } catch (_: Exception) {
-                    false
+                    pending.waiters.forEach { waiter -> waiter.complete(ok) }
                 }
-                pending.waiters.forEach { waiter -> waiter.complete(ok) }
+            } finally {
+                // These waiters no longer belong to coalescedDrafts. Settle untouched keys
+                // on cancellation too; already committed results retain their success.
+                batch.forEach { pending ->
+                    pending.waiters.forEach { waiter -> waiter.complete(false) }
+                }
             }
         }
     }

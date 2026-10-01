@@ -327,9 +327,12 @@ class UploadDraftRetentionTest {
                 composeRule.runOnIdle { active.value = presenter }
                 runBlocking { presenter.selectPeer(fixture.peer) }
                 composeRule.waitUntil { presenter.state.value.contentStatus == ChatContentStatus.Ready }
+                // Presenter readiness can precede collectAsState consumption by the new owner.
+                val restoredKey = DirectConversationKey(fixture.account, fixture.peer)
+                composeRule.waitUntil { restoredKey in owner.composerStates.value }
                 composeRule.waitForIdle()
                 composeRule.runOnIdle {
-                    val restored = owner.composerStates.value.getValue(DirectConversationKey(fixture.account, fixture.peer))
+                    val restored = owner.composerStates.value.getValue(restoredKey)
                     assertEquals("stored A", restored.body)
                     assertEquals(org.thanosapollo.nema.chat.DraftReply("reply", fixture.peer, "quoted", "A"), restored.reply)
                     assertEquals(if (remove) null else "https://example.org/file", restored.attachmentUrl)
