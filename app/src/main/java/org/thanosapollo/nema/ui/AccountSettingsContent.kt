@@ -51,6 +51,8 @@ fun AccountSettingsContent(
     onCheckForUpdates: () -> Unit = {},
     onDownloadUpdate: () -> Unit = {},
     onInstallUpdate: () -> Unit = {},
+    onCancelUpdate: () -> Unit = {},
+    updateMessage: String? = null,
     modifier: Modifier = Modifier,
 ) {
     ThemeSettingsContent(
@@ -162,40 +164,10 @@ fun AccountSettingsContent(
                     )
                 }
                 item {
-                    SettingsRow(
-                        title = model.currentVersion,
-                        supportingText = model.status,
-                        modifier = Modifier.testTag("settings-row-update-status"),
+                    org.thanosapollo.nema.update.UpdateControls(
+                        model, onCheckForUpdates, onDownloadUpdate, onInstallUpdate,
+                        onCancelUpdate, updateMessage,
                     )
-                }
-                item {
-                    SettingsRow(
-                        title = "Check for updates",
-                        enabled = model.canCheck,
-                        onClick = onCheckForUpdates,
-                        modifier = Modifier.testTag("settings-row-check-update"),
-                        role = Role.Button,
-                    )
-                }
-                if (model.canDownload) {
-                    item {
-                        SettingsRow(
-                            title = "Download update",
-                            onClick = onDownloadUpdate,
-                            modifier = Modifier.testTag("settings-row-download-update"),
-                            role = Role.Button,
-                        )
-                    }
-                }
-                if (model.canInstall) {
-                    item {
-                        SettingsRow(
-                            title = "Install update",
-                            onClick = onInstallUpdate,
-                            modifier = Modifier.testTag("settings-row-install-update"),
-                            role = Role.Button,
-                        )
-                    }
                 }
             }
         }

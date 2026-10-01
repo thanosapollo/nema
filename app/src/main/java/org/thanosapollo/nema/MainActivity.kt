@@ -10,7 +10,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.lifecycle.lifecycleScope
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
@@ -64,7 +63,8 @@ import org.thanosapollo.nema.ui.chat.ConversationContent
 import org.thanosapollo.nema.ui.chat.canReact
 import org.thanosapollo.nema.ui.showLoginSessionChrome
 import org.thanosapollo.nema.update.InstallHandoffLease
-import org.thanosapollo.nema.update.requestInstallOrPermission
+import org.thanosapollo.nema.update.AppUpdateHost
+import org.thanosapollo.nema.update.UpdateInstallRequest
 import org.thanosapollo.nema.update.updateUiModel
 import org.thanosapollo.nema.ui.theme.AppPaletteAuthority
 import org.thanosapollo.nema.ui.theme.AppearanceScope
@@ -96,9 +96,6 @@ class MainActivity : ComponentActivity() {
         if (notificationTarget == null && savedInstanceState?.containsKey(STATE_NOTIFICATION_SAVED) == true) {
             setIntent(Intent(this, MainActivity::class.java))
         }
-        if (shouldStartAutomaticUpdateCheck(savedInstanceState)) {
-            lifecycleScope.launch { (application as NemaApplication).updates.checkAutomatic() }
-        }
         val processToken = (application as NemaApplication).processToken
         val restoreChatRoute = shouldRestoreChatRoute(
             savedProcessToken = savedInstanceState?.getString(STATE_PROCESS_TOKEN),
@@ -110,22 +107,43 @@ class MainActivity : ComponentActivity() {
             }
             NemaTheme(themeAuthority.palette) {
                 val app = application as NemaApplication
-                val startup by app.databaseStartup.collectAsState()
-                if (startup != DatabaseStartup.READY) {
-                    DatabaseStartupScreen(startup, { app.resetDatabaseAndContinue() }, { app.retryDatabaseStartup() }, ::finish)
-                } else AccountConnectionScreen(
-                    restoreChatRouteOnStart = restoreChatRoute,
-                    activityResumed = activityResumed.value,
-                    themeAuthority = themeAuthority,
-                    notificationTarget = notificationTarget,
-                    onNotificationConsumed = { target ->
-                        if (notificationTarget === target) {
-                            notificationTarget = null
-                            setIntent(Intent(this, MainActivity::class.java))
-                        }
-                    },
-                )
+                AppUpdateHost(app.updates, activityResumed.value, ::continueUpdate) {
+                    val startup by app.databaseStartup.collectAsState()
+                    if (startup != DatabaseStartup.READY) {
+                        DatabaseStartupScreen(startup, { app.resetDatabaseAndContinue() }, { app.retryDatabaseStartup() }, ::finish)
+                    } else AccountConnectionScreen(
+                        restoreChatRouteOnStart = restoreChatRoute,
+                        activityResumed = activityResumed.value,
+                        themeAuthority = themeAuthority,
+                        notificationTarget = notificationTarget,
+                        onNotificationConsumed = { target ->
+                            if (notificationTarget === target) {
+                                notificationTarget = null
+                                setIntent(Intent(this, MainActivity::class.java))
+                            }
+                        },
+                    )
+                }
             }
+        }
+    }
+
+    private val installPermission = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        // Result codes from Settings are not permission evidence.
+        (application as NemaApplication).updates.onInstallPermissionResult(packageManager.canRequestPackageInstalls())
+    }
+
+    private fun continueUpdate(expected: UpdateInstallRequest) {
+        val updates = (application as NemaApplication).updates
+        val needsPermission = !packageManager.canRequestPackageInstalls()
+        if (!updates.claimInstallRequest(expected, needsPermission) || !needsPermission) return
+        try {
+            installPermission.launch(Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                Uri.parse("package:$packageName")))
+        } catch (_: android.content.ActivityNotFoundException) {
+            updates.permissionLaunchFailed(expected.authority)
+        } catch (_: SecurityException) {
+            updates.permissionLaunchFailed(expected.authority)
         }
     }
 
@@ -138,6 +156,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         (application as NemaApplication).installResumeController.onResume()
+        (application as NemaApplication).updates.onForeground()
         activityResumed.value = true
     }
 
@@ -233,9 +252,6 @@ internal class InstallResumeController(
 private const val STATE_PROCESS_TOKEN = "nema.process-token"
 private const val STATE_NOTIFICATION_SAVED = "nema.notification-saved"
 private const val STATE_PENDING_NOTIFICATION = "nema.pending-notification"
-
-internal fun shouldStartAutomaticUpdateCheck(savedInstanceState: Bundle?): Boolean =
-    savedInstanceState == null
 
 internal fun shouldRestoreChatRoute(savedProcessToken: String?, processToken: String): Boolean =
     savedProcessToken != null && savedProcessToken == processToken
@@ -734,17 +750,11 @@ private fun AccountConnectionScreen(
                                 BuildConfig.VERSION_CODE.toLong(),
                                 updateState,
                             ),
-                            onCheckForUpdates = {
-                                scope.launch { application.updates.checkManual() }
-                            },
-                            onDownloadUpdate = {
-                                scope.launch { application.updates.downloadAndVerify() }
-                            },
-                            onInstallUpdate = {
-                                requestInstallOrPermission(context) {
-                                    scope.launch { application.updates.install() }
-                                }
-                            },
+                            onCheckForUpdates = { application.updates.requestCheck() },
+                            onDownloadUpdate = { application.updates.requestUpdate() },
+                            onInstallUpdate = { application.updates.requestUpdate() },
+                            onCancelUpdate = { application.updates.cancelUpdate() },
+                            updateMessage = application.updates.message.collectAsState().value,
                             modifier = Modifier
                                 .padding(contentPadding)
                                 .consumeWindowInsets(contentPadding)

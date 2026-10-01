@@ -151,6 +151,21 @@ class UpdateAuthorizationTest {
         assertEquals(0, revoked.launches)
     }
 
+    @Test fun `permission continuation cannot install a successor verified artifact`() = runTest {
+        val fixture = fixture(launcher = { _, _ -> true })
+        fixture.prepareVerified()
+        val old = (fixture.repository.state.value as UpdateState.Verified).authority
+        fixture.repository.checkManual()
+        fixture.repository.download()
+        fixture.repository.verify()
+        val successor = fixture.repository.state.value as UpdateState.Verified
+        assertFalse(fixture.repository.install(old))
+        assertSame(successor, fixture.repository.state.value)
+        assertEquals(0, fixture.launches)
+        assertTrue(fixture.repository.install(successor.authority))
+        assertEquals(1, fixture.launches)
+    }
+
     @Test fun `final install revalidation blocks changed file installed or archive facts`() = runTest {
         suspend fun rejected(mutate: Fixture.() -> Unit) {
             val fixture = fixture()
@@ -217,7 +232,7 @@ class UpdateAuthorizationTest {
         assertFalse(fixture.repository.state.value is UpdateState.Installing)
     }
 
-    @Test fun `adapter cancellation during verify preserves exact downloaded authority`() = runTest {
+    @Test fun `adapter cancellation during verify restores retry and removes downloaded authority`() = runTest {
         listOf<(FakePackageFacts) -> Unit>(
             { it.beforeInstalled = { throw CancellationException("installed") } },
             { it.beforeArchive = { throw CancellationException("archive") } },
@@ -229,9 +244,9 @@ class UpdateAuthorizationTest {
             cancelAdapter(fixture.adapter)
 
             try { fixture.repository.verify(); fail() } catch (_: CancellationException) {}
-            assertSame(prior, fixture.repository.state.value)
-            assertSame(candidate, fixture.repository.boundArtifact())
-            assertTrue(fixture.directory.resolve(CANDIDATE_FILE_NAME).exists())
+            assertEquals(UpdateState.Available(requireNotNull(prior.accepted)), fixture.repository.state.value)
+            assertNull(fixture.repository.boundArtifact())
+            assertFalse(requireNotNull(candidate).file.exists())
         }
     }
 

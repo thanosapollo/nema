@@ -725,6 +725,7 @@ internal class SmackSessionConnection(
         generation: ConnectionGeneration,
         request: LocalUploadRequest,
     ): UploadedFile? = runInterruptible(Dispatchers.IO) {
+        request.requireValidSize()
         requireExactAttempt(accountId, generation)
         val manager = HttpFileUploadManager.getInstanceFor(connection)
         if (!manager.isUploadServiceDiscovered && !manager.discoverUploadService()) {

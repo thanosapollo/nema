@@ -76,7 +76,8 @@ class UpdateDownloadTest {
 
             fixture.repository.download()
 
-            assertEquals(accepted, fixture.repository.state.value)
+            assertEquals(accepted.accepted, fixture.repository.state.value.accepted)
+            assertTrue(fixture.repository.state.value is UpdateState.Failed)
             assertTrue(fixture.directory.listFiles().orEmpty().isEmpty())
         }
     }
@@ -89,7 +90,8 @@ class UpdateDownloadTest {
 
         fixture.repository.download()
 
-        assertEquals(accepted, fixture.repository.state.value)
+        assertSame(accepted.accepted, fixture.repository.state.value.accepted)
+        assertTrue(fixture.repository.state.value is UpdateState.Failed)
         assertEquals(0, calls.get())
         assertTrue(fixture.directory.listFiles().orEmpty().isEmpty())
     }
@@ -176,7 +178,7 @@ class UpdateDownloadTest {
         }
     }
 
-    @Test fun `download failure restores exact failed presentation`() = runTest {
+    @Test fun `download failure reports safe retry feedback with the same accepted authority`() = runTest {
         val bytes = "restore failure".toByteArray()
         val fixture = fixture(bytes, ApkDownloadEffect { _, _ -> error("download failed") })
         fixture.repository.checkManual()
@@ -184,7 +186,9 @@ class UpdateDownloadTest {
 
         fixture.repository.download()
 
-        assertSame(prior, fixture.repository.state.value)
+        val failed = fixture.repository.state.value as UpdateState.Failed
+        assertSame(prior.accepted, failed.accepted)
+        assertEquals("Could not download update. Try again.", failed.message)
         assertNull(fixture.repository.boundArtifact())
         assertTrue(fixture.directory.listFiles().orEmpty().isEmpty())
     }

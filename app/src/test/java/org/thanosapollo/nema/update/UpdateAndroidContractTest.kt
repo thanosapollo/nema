@@ -1,7 +1,6 @@
 package org.thanosapollo.nema.update
 
 import android.Manifest
-import android.app.Activity
 import android.app.Application
 import android.content.Context
 import android.content.ContextWrapper
@@ -10,7 +9,6 @@ import android.content.ActivityNotFoundException
 import android.content.pm.ActivityInfo
 import android.content.pm.ResolveInfo
 import android.net.Uri
-import android.provider.Settings
 import androidx.test.core.app.ApplicationProvider
 import java.io.File
 import org.junit.Assert.assertEquals
@@ -19,7 +17,6 @@ import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
@@ -27,46 +24,6 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class UpdateAndroidContractTest {
-    @Test
-    fun missingPermissionOpensOnlyPerAppUnknownSourceSettings() {
-        val context = Robolectric.buildActivity(Activity::class.java).get()
-        var installs = 0
-
-        requestInstallOrPermission(context, 34, canInstallPackages = false) { installs++ }
-
-        val intent = shadowOf(context).nextStartedActivity
-        assertEquals(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, intent.action)
-        assertEquals(Uri.parse("package:${context.packageName}"), intent.data)
-        assertEquals(0, installs)
-    }
-
-    @Test
-    fun grantedPermissionAndPreOInvokeInstallExactlyOnce() {
-        val context = Robolectric.buildActivity(Activity::class.java).get()
-        var installs = 0
-        requestInstallOrPermission(context, 34, true) { installs++ }
-        requestInstallOrPermission(context, 25, false) { installs++ }
-        assertEquals(2, installs)
-    }
-
-    @Test
-    fun unavailableUnknownSourceSettingsFailsClosedWithoutTouchingVerifiedState() {
-        val base = Robolectric.buildActivity(Activity::class.java).get()
-        val context = object : ContextWrapper(base) {
-            override fun startActivity(intent: Intent) {
-                throw ActivityNotFoundException("no settings handler")
-            }
-        }
-        val verified = verifiedFixture()
-        val state = arrayOf<UpdateState>(verified)
-        var installs = 0
-
-        requestInstallOrPermission(context, 34, canInstallPackages = false) { installs++ }
-
-        assertEquals(0, installs)
-        assertSame(verified, state.single())
-    }
-
     @Test
     fun installerUsesExactPrivateContentUriMimeAndFlags() {
         val context = ApplicationProvider.getApplicationContext<Application>()

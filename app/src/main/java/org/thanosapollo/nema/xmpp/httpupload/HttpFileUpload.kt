@@ -14,6 +14,8 @@ data class LocalUploadRequest(
 ) {
     val size: Long get() = bytes.size.toLong()
 
+    internal fun requireValidSize(): Unit = requireUploadSize(size)
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is LocalUploadRequest) return false

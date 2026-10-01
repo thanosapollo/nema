@@ -172,7 +172,8 @@ import org.thanosapollo.nema.xmpp.httpupload.attachmentBodyCaption
 import org.thanosapollo.nema.xmpp.httpupload.isInlineImage
 import org.thanosapollo.nema.xmpp.httpupload.resolvedAttachmentMime
 import org.thanosapollo.nema.xmpp.httpupload.shouldRenderInlineImage
-import org.thanosapollo.nema.xmpp.httpupload.slotFilename
+import org.thanosapollo.nema.xmpp.httpupload.AttachmentPreparationException
+import org.thanosapollo.nema.xmpp.httpupload.prepareOutgoingAttachment
 import org.thanosapollo.nema.xmpp.muc.roomSubtitle
 
 @Composable
@@ -498,19 +499,24 @@ fun ConversationContent(
                                 onAcknowledgeCompletedSends(completions.keys)
                             }
                             val keyboard = LocalSoftwareKeyboardController.current
-                            val resolver = LocalContext.current.contentResolver
+                            val attachmentContext = LocalContext.current
+                            val resolver = attachmentContext.contentResolver
                             fun pickAttachment() = composerOwner.launchFilePicker { uri ->
                                 if (uri != null) composerOwner.scope.launch {
                                     val uploaded = try {
-                                        val mime = resolver.getType(uri)
-                                        val name = slotFilename(uri.lastPathSegment?.substringAfterLast('/') ?: "file", mime)
-                                        val bytes = withContext(Dispatchers.IO) {
-                                            resolver.openInputStream(uri)?.use { it.readBytes() }
-                                        } ?: return@launch
+                                        val request = resolver.prepareOutgoingAttachment(uri)
                                         if (!isActive) return@launch
-                                        onUploadFile(name, mime, bytes)
+                                        onUploadFile(request.name, request.mime, request.bytes)
                                     } catch (cancelled: CancellationException) {
                                         throw cancelled
+                                    } catch (rejected: AttachmentPreparationException) {
+                                        if (!isActive) return@launch
+                                        withContext(Dispatchers.Main.immediate) {
+                                            android.widget.Toast.makeText(
+                                                attachmentContext, rejected.reason.message, android.widget.Toast.LENGTH_LONG,
+                                            ).show()
+                                        }
+                                        null
                                     } catch (_: Exception) {
                                         null
                                     } ?: return@launch

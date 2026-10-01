@@ -155,6 +155,7 @@ abstract class MessageDao {
         UPDATE messages SET locallyRead = 1
         WHERE accountId = :accountId AND peerJid = :peerJid
           AND localMessageId IN (:messageIds)
+          AND locallyRead = 0
           AND direction = 'INBOUND' AND replaceId IS NULL
     """)
     abstract suspend fun markMessageIdsRead(accountId: String, peerJid: String, messageIds: List<String>): Int

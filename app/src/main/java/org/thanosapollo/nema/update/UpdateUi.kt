@@ -6,6 +6,7 @@ data class UpdateUiModel(
     val canCheck: Boolean,
     val canDownload: Boolean,
     val canInstall: Boolean,
+    val canCancel: Boolean = false,
 )
 
 fun updateUiModel(versionName: String, versionCode: Long, state: UpdateState): UpdateUiModel {
@@ -20,7 +21,8 @@ fun updateUiModel(versionName: String, versionCode: Long, state: UpdateState): U
         is UpdateState.Installing -> "Opening system installer…"
         is UpdateState.Failed -> "Update failed. Try again."
     }
-    val checkBlocked = state is UpdateState.Checking || state is UpdateState.Installing
+    val preparing = state is UpdateState.Downloading || state is UpdateState.Downloaded
+    val checkBlocked = state is UpdateState.Checking || state is UpdateState.Installing || preparing
     return UpdateUiModel(
         currentVersion = "Current version: Nema $versionName ($versionCode)",
         status = status,
@@ -28,5 +30,6 @@ fun updateUiModel(versionName: String, versionCode: Long, state: UpdateState): U
         canDownload = state is UpdateState.Available ||
             state is UpdateState.Failed && available != null,
         canInstall = state is UpdateState.Verified,
+        canCancel = preparing,
     )
 }

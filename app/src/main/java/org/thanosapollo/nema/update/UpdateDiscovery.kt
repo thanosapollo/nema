@@ -5,6 +5,7 @@ import android.util.JsonToken
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.io.StringReader
 import java.net.URI
 import java.net.URL
@@ -196,7 +197,9 @@ class HttpsApkDownloadEffect(
                     DigestOutputStream(file, digest).use { output ->
                         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                         while (true) {
+                            currentCoroutineContext().ensureActive()
                             val count = input.read(buffer)
+                            currentCoroutineContext().ensureActive()
                             if (count == -1) break
                             check(count > 0)
                             size += count
@@ -210,6 +213,10 @@ class HttpsApkDownloadEffect(
             }
             check(size == manifest.size)
             check(digest.digest().hex() == manifest.sha256)
+        } catch (failure: IOException) {
+            // A cancelled blocked read may finish by timing out instead of returning.
+            currentCoroutineContext().ensureActive()
+            throw failure
         } finally {
             connection.disconnect()
         }
@@ -307,7 +314,10 @@ class UpdateRepository(
             val available = accepted.value as? AcceptedUpdate.Available ?: return
             if (artifact != null) return
             if (downloading) return
-            if (available.manifest.size > MAX_APK_BYTES) return
+            if (available.manifest.size > MAX_APK_BYTES) {
+                mutableState.value = UpdateState.Failed("Could not download update. Try again.", accepted)
+                return
+            }
             try {
                 pruneUpdateFiles()
             } catch (failure: CancellationException) {
@@ -339,13 +349,19 @@ class UpdateRepository(
             withContext(NonCancellable) { settleDownload(capture, null, part, candidate) }
             throw failure
         } catch (_: Exception) {
-            withContext(NonCancellable) { settleDownload(capture, null, part, candidate) }
+            withContext(NonCancellable) { settleDownload(capture, null, part, candidate, failed = true) }
             return
         }
         withContext(NonCancellable) { settleDownload(capture, verified, part, candidate) }
     }
 
     internal fun boundArtifact(): BoundUpdateArtifact? = artifact
+
+    internal suspend fun cancelPreparation() = withContext(blockingDispatcher) {
+        gate.withLock {
+            if (lease == null) artifact?.let { rejectCandidate(it, cancelled = true) }
+        }
+    }
 
     suspend fun verify() {
         val adapter = packageFacts ?: return
@@ -364,6 +380,13 @@ class UpdateRepository(
         val authority = try {
             withContext(blockingDispatcher) { authorize(capture, adapter) }
         } catch (failure: CancellationException) {
+            withContext(NonCancellable) {
+                gate.withLock {
+                    if (artifact == capture && verified == null && lease == null) {
+                        rejectCandidate(capture, cancelled = true)
+                    }
+                }
+            }
             throw failure
         } catch (_: Exception) {
             null
@@ -380,7 +403,7 @@ class UpdateRepository(
         }
     }
 
-    suspend fun install(): Boolean {
+    suspend fun install(expected: VerifiedUpdate? = null): Boolean {
         val adapter = packageFacts ?: return false
         currentCoroutineContext().ensureActive()
         return withContext(blockingDispatcher) {
@@ -389,6 +412,7 @@ class UpdateRepository(
                 currentCoroutineContext().ensureActive()
                 if (lease != null) return@withContext false
                 val authority = verified ?: return@withContext false
+                if (expected != null && authority !== expected) return@withContext false
                 val prior = mutableState.value as? UpdateState.Verified ?: return@withContext false
                 if (prior.authority !== authority) return@withContext false
                 if (!finalAuthorityMatches(authority, adapter)) {
@@ -441,10 +465,14 @@ class UpdateRepository(
         currentCoroutineContext().ensureActive()
         if (!gate.tryLock()) return
         try {
-            if (lease != null) return
+            // Foreground discovery must not revoke an explicit user's update.
+            if (lease != null || downloading || artifact != null) return
             currentCoroutineContext().ensureActive()
             val now = clock()
-            if (!networkAvailable() || !automaticEligible(now, lastSuccess())) return
+            if (!networkAvailable()) return
+            // The persisted timestamp is not a discovery result. Rebuild process-local
+            // authority once after restart, including saved-state Activity restoration.
+            if (mutableState.value.accepted != null && !automaticEligible(now, lastSuccess())) return
             checkLocked(manual = false)
         } finally {
             gate.unlock()
@@ -514,6 +542,7 @@ class UpdateRepository(
         verified: BoundUpdateArtifact?,
         part: File,
         candidate: File,
+        failed: Boolean = false,
     ) = gate.withLock {
         downloading = false
         val current = mutableState.value.accepted
@@ -535,7 +564,8 @@ class UpdateRepository(
             mutableState.value = if (cleanupFailed) {
                 UpdateState.Failed("Could not download update. Try again.", current)
             } else if (mutableState.value == UpdateState.Downloading(capture.accepted)) {
-                capture.prior
+                if (failed) UpdateState.Failed("Could not download update. Try again.", current)
+                else capture.prior
             } else {
                 mutableState.value
             }
@@ -639,13 +669,14 @@ class UpdateRepository(
         mutableState.value = handoff.prior
     }
 
-    private fun rejectCandidate(bound: BoundUpdateArtifact) {
+    private fun rejectCandidate(bound: BoundUpdateArtifact, cancelled: Boolean = false) {
         if (artifact != bound) return
         try {
             checkedDelete(bound.file)
             artifact = null
             verified = null
-            mutableState.value = UpdateState.Available(bound.accepted)
+            mutableState.value = if (cancelled) UpdateState.Available(bound.accepted)
+                else UpdateState.Failed("Could not verify update. Try again.", bound.accepted)
         } catch (_: Exception) {
             artifact = null
             verified = null
