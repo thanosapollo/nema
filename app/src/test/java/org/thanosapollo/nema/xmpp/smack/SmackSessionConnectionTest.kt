@@ -55,6 +55,28 @@ import org.jxmpp.jid.impl.JidCreate
 @Config(sdk = [34], application = Application::class)
 class SmackSessionConnectionTest {
     @Test
+    fun `oversize direct upload rejects before discovery slot or HTTP`() {
+        SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
+        val transport = RecordingXmppConnection()
+        val session = session(transport)
+        val first = attempt(1)
+        session.updateAttempt(first)
+        val request = org.thanosapollo.nema.xmpp.httpupload.LocalUploadRequest(
+            "large.bin", null,
+            ByteArray((org.thanosapollo.nema.xmpp.httpupload.MAX_ATTACHMENT_BYTES + 1).toInt()),
+        )
+        val before = transport.events.toList()
+        try {
+            val rejected = assertThrows(IllegalArgumentException::class.java) {
+                runBlocking { session.uploadHttpFile(ACCOUNT_ID, first.generation, request) }
+            }
+            assertEquals("AttachmentPreparationException", rejected.javaClass.simpleName)
+            assertEquals("Attachment is too large (maximum 25 MiB)", rejected.message)
+            assertEquals(before, transport.events.toList())
+        } finally { runBlocking { session.disconnect() } }
+    }
+
+    @Test
     fun `group send enters only with current membership while direct is independent`() = runBlocking {
         SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
         val transport = RecordingXmppConnection()
@@ -593,6 +615,14 @@ class SmackSessionConnectionTest {
             }
             val request = packet as IQ
             val response = when (request) {
+                is org.jivesoftware.smackx.disco.packet.DiscoverItems -> {
+                    events += "disco-items"
+                    org.jivesoftware.smackx.disco.packet.DiscoverItems().apply {
+                        type = IQ.Type.result
+                        stanzaId = request.stanzaId
+                        from = request.to ?: xmppServiceDomain
+                    }
+                }
                 is DiscoverInfo -> {
                     events += "disco"
                     DiscoverInfo.builder(request.stanzaId)

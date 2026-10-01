@@ -533,6 +533,7 @@ internal class ActiveSessionController(
         generation: ConnectionGeneration,
         request: LocalUploadRequest,
     ): UploadedFile? {
+        request.requireValidSize()
         val target = exactConnection(accountId, generation)
         return target.uploadHttpFile(accountId, generation, request)
     }
