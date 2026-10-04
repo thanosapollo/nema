@@ -17,6 +17,7 @@ data class MucEventFacts(
 
 // Pure, dormant decision contract. These helpers neither acquire facts nor mutate accepted links.
 internal fun MessageEntity.isSupportedMucPlaintext(): Boolean =
+    !isProtected() &&
     messageKind == MessageKind.GROUPCHAT && body.isNotBlank() && mucPayloadState == MucPayloadState.PLAIN &&
         attachmentUrl == null && attachmentName == null && attachmentMime == null && attachmentSize == null &&
         replyToId == null && replyToJid == null && replyFallbackBody == null

@@ -27,6 +27,8 @@ internal fun IncomingMessageEnvelope.toIncomingMessage(localMessageId: String): 
         threadId = thread?.id?.value,
         parentThreadId = thread?.parentId?.value,
         body = body,
+        protection = protection,
+        unreadEligible = protection?.state != org.thanosapollo.nema.xmpp.omemo.ProtectedState.UNSUPPORTED_HEADER_ONLY,
         archiveOrdinal = null,
         aliases = buildList {
             originId?.let {

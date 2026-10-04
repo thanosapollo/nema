@@ -4,12 +4,15 @@ internal const val CHEAP_CONVERSATION_SUMMARIES = """
         SELECT messages.localMessageId AS localMessageId,
           messages.peerJid AS peerJid,
           messages.senderJid AS senderJid,
+          CASE WHEN messages.protectedState = 'NONE' AND messages.protectedEvidence IS NOT NULL THEN 'REJECTED' ELSE messages.protectedState END AS protectedState,
           COALESCE(
             (
               SELECT correction.body
               FROM messages AS correction
               WHERE correction.accountId = messages.accountId
                 AND correction.correctionTargetMessageId = messages.localMessageId
+              AND messages.protectedState = 'NONE' AND messages.protectedEvidence IS NULL
+              AND correction.protectedState = 'NONE' AND correction.protectedEvidence IS NULL
               AND (correction.messageKind != 'GROUPCHAT' OR correction.mucCorrectionSelected = 1)
               ORDER BY correction.sentAtEpochMs IS NULL,
                 correction.sentAtEpochMs DESC,

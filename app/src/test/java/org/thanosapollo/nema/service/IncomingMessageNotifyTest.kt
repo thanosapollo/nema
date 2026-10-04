@@ -16,6 +16,18 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class IncomingMessageNotifyTest {
+    @Test fun protectedStatusIsClientOwnedAndContainsNoFallbackOrMessagingStyle() {
+        val context = ApplicationProvider.getApplicationContext<Application>()
+        val intent = PendingIntent.getActivity(context, 9, Intent(context, context.javaClass), PendingIntent.FLAG_IMMUTABLE)
+        val notification = incomingMessageNotification(context, "peer@example.org", "https://example.org/private-ciphertext",
+            intent, android.R.drawable.stat_notify_chat, "UNSUPPORTED_PAYLOAD")
+        assertEquals("Protected message is not supported", notification.extras.getCharSequence(Notification.EXTRA_TEXT).toString())
+        org.junit.Assert.assertNull(notification.extras.getString(Notification.EXTRA_TEMPLATE))
+        org.junit.Assert.assertNull(notification.extras.getParcelableArray(Notification.EXTRA_MESSAGES))
+        assertEquals(intent, notification.contentIntent)
+        assertTrue(!notification.extras.toString().contains("private-ciphertext"))
+    }
+
     @Test
     fun messageChannelHeadsUpWithSoundAndVibration() {
         val channel = incomingMessageChannel("Messages", "Incoming messages")

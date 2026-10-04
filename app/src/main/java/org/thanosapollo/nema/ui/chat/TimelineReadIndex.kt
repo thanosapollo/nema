@@ -9,7 +9,7 @@ internal class TimelineReadIndex(messages: List<TimelineMessage>) {
     private val membership = orderedIds.toHashSet()
     private val markers = messages.withIndex().filter {
         val message = it.value
-        !message.outgoing && !message.groupChat && message.markable && !message.markerTargetId.isNullOrEmpty()
+        message.protectedState == "NONE" && !message.outgoing && !message.groupChat && message.markable && !message.markerTargetId.isNullOrEmpty()
     }.associateBy { it.value.id }
     val markerSignature: Int = messages.fold(0) { signature, message ->
         if (message.markable) {

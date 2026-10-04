@@ -182,6 +182,7 @@ data class IncomingMessageEnvelope(
     val replaceId: String? = null,
     val mucFacts: org.thanosapollo.nema.storage.MucEventFacts? = null,
     val mucLiveOrderEpoch: String? = null,
+    val protection: org.thanosapollo.nema.xmpp.omemo.ProtectedContent? = null,
 ) {
     init {
         require(peer.isNotEmpty()) { "Peer must not be empty" }
@@ -197,9 +198,7 @@ data class IncomingMessageEnvelope(
         }
         require(originId == null || originId.isNotEmpty()) { "Origin ID must not be empty" }
         require(replaceId == null || replaceId.isNotEmpty()) { "Correction target must not be empty" }
-        // WIP-FOUNDATION: crypto/protection later. Empty body is legal only with an attachment.
-        // Mapper still copies OOB URL into body for persist/preview; do not change that here.
-        require(body.isNotEmpty() || !attachmentUrl.isNullOrEmpty()) { "Message payload must not be empty" }
+        require(protection != null || body.isNotEmpty() || !attachmentUrl.isNullOrEmpty()) { "Message payload must not be empty" }
         require(stanzaIds.distinct().size == stanzaIds.size) { "Stanza IDs must be unique" }
         require((sentAtEpochMs == null) == (sentTimeSource == null)) {
             "Message time and provenance must be stored together"

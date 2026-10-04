@@ -236,6 +236,9 @@ data class MessageEntity(
     val mucLiveOrderEpoch: String? = null,
     @ColumnInfo(defaultValue = "0")
     val mucCorrectionSelected: Boolean = false,
+    @ColumnInfo(defaultValue = "'NONE'")
+    val protectedState: String = "NONE",
+    val protectedEvidence: String? = null,
 )
 
 // Raw traversal evidence deliberately has no logical-message owner.

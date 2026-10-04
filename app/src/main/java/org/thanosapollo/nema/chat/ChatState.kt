@@ -1,5 +1,7 @@
 package org.thanosapollo.nema.chat
 
+import org.thanosapollo.nema.xmpp.omemo.protectedStatus
+
 import org.thanosapollo.nema.xmpp.threads.*
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -80,6 +82,7 @@ data class ConversationSummary(
     val sentAtEpochMs: Long? = null,
     val unreadCount: Int = 0,
     val previewSender: String? = null,
+    val protectedState: String = "NONE",
 ) {
     val displayLabel: String
         get() = peerDisplayLabel(peerJid, displayName, localNickname)
@@ -88,7 +91,7 @@ data class ConversationSummary(
         if (this === other) return true
         if (other !is ConversationSummary) return false
         return peerJid == other.peerJid &&
-            preview == other.preview &&
+            preview == other.preview && protectedState == other.protectedState &&
             localSequence == other.localSequence &&
             displayName == other.displayName &&
             localNickname == other.localNickname &&
@@ -103,6 +106,7 @@ data class ConversationSummary(
     override fun hashCode(): Int {
         var result = peerJid.hashCode()
         result = 31 * result + preview.hashCode()
+        result = 31 * result + protectedState.hashCode()
         result = 31 * result + localSequence.hashCode()
         result = 31 * result + (displayName?.hashCode() ?: 0)
         result = 31 * result + (localNickname?.hashCode() ?: 0)
@@ -211,6 +215,7 @@ data class TimelineMessage(
     val sentAtEpochMs: Long? = null,
     val threadSummaries: List<ThreadSummary> = emptyList(),
     val reactions: List<org.thanosapollo.nema.xmpp.reactions.ReactionDisplay> = emptyList(),
+    val protectedState: String = "NONE",
 )
 
 enum class ChatContentStatus { Loading, Ready, Failed }
@@ -420,7 +425,8 @@ class ChatRepository(database: NemaDatabase) {
         val summaries = latestRows.map { row ->
             ConversationSummary(
                 peerJid = row.peerJid,
-                preview = row.preview,
+                preview = protectedStatus(row.protectedState) ?: row.preview,
+                protectedState = row.protectedState,
                 localSequence = row.localSequence,
                 displayName = row.displayName,
                 localNickname = row.localNickname,
@@ -429,7 +435,7 @@ class ChatRepository(database: NemaDatabase) {
                 groupChat = row.groupChat,
                 sentAtEpochMs = row.sentAtEpochMs,
                 unreadCount = row.unreadCount,
-                previewSender = previewSenderLabel(
+                previewSender = if (row.protectedState != "NONE") null else previewSenderLabel(
                     groupChat = row.groupChat,
                     outgoing = row.direction == MessageDirection.OUTBOUND,
                     senderJid = row.senderJid,
@@ -632,6 +638,7 @@ class ChatRepository(database: NemaDatabase) {
         target: TimelineMessage,
         reply: DraftReply,
     ): Boolean {
+        if (target.protectedState != "NONE") return false
         val thread = requireNotNull(route.thread) { "Thread reply route requires a thread" }
         return dao.saveNavigationWithDraft(
             expectedNavigation = sourceRoute.toEntity(accountId),
@@ -1138,6 +1145,7 @@ class DirectChatPresenter(
     }
 
     suspend fun startThreadFrom(message: TimelineMessage): Boolean {
+        if (message.protectedState != "NONE") return false
         val origin = currentRouteOccurrence() ?: return false
         val route = origin.route
         val current = state.value
@@ -1547,7 +1555,7 @@ internal fun List<TimelineMessage>.projectThreads(
                     thread = thread.thread,
                     replyCount = thread.members.size,
                     latestMessageId = latest.id,
-                    latestPreview = latest.body,
+                    latestPreview = protectedStatus(latest.protectedState) ?: latest.body,
                 )
             }
         message.copy(threadSummaries = attached)
@@ -1567,7 +1575,7 @@ internal class ThreadIndex(timeline: List<TimelineMessage>) {
             val memberIds = members.mapTo(hashSetOf(), TimelineMessage::id)
             val externalRoot = members.firstNotNullOfOrNull { member ->
                 replies.resolve(member)?.takeIf { candidate ->
-                    !candidate.groupChat && candidate.id !in memberIds &&
+                    candidate.protectedState == "NONE" && !candidate.groupChat && candidate.id !in memberIds &&
                         (candidate.thread?.id == thread.parentId ||
                             (candidate.thread == null && thread.parentId != null))
                 }
@@ -1598,7 +1606,8 @@ internal fun List<TimelineMessage>.recentThreads(
                 null
             }
             val replies = resolved?.members?.size ?: (members.size - 1).coerceAtLeast(0)
-            val defaultTitle = (resolved?.root ?: members.first()).body.threadTitlePreview()
+            val root = resolved?.root ?: members.first()
+            val defaultTitle = (protectedStatus(root.protectedState) ?: root.body).threadTitlePreview()
             val title = customTitles[kind to thread.id.value]?.title ?: defaultTitle
             val local = customTitles[kind to thread.id.value]
             indexed.maxOf { it.index } to RecentThread(
@@ -1668,8 +1677,9 @@ internal class ReplyIndex(timeline: List<TimelineMessage>) {
 }
 
 private fun TimelineMessage.withReplyPresentation(replies: ReplyIndex): TimelineMessage {
-    if (replyToId == null) return this
+    if (protectedState != "NONE" || replyToId == null) return this
     val target = replies.resolve(this)
+    if (target != null && target.protectedState != "NONE") return copy(reply = null)
     val fallback = replyFallbackBody?.toFallbackPreview()
     val previewBody = target?.body ?: fallback?.body ?: return this
     val sender = target?.senderJid?.replySenderLabel()

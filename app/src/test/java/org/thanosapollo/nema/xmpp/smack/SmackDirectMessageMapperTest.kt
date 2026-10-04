@@ -597,17 +597,25 @@ class SmackDirectMessageMapperTest {
             """<message xmlns='jabber:client' from='peer@example.org/device' type='chat'>$extension</message>""",
         ) as Message
 
-        listOf("eu.siacs.conversations.axolotl", "urn:xmpp:omemo:2").forEach { namespace ->
-            val control = parse("<encrypted xmlns='$namespace'><header sid='1'/></encrypted>")
-            val content = parse(
-                "<encrypted xmlns='$namespace'><header sid='1'/><payload>AA==</payload></encrypted>",
-            )
-            assertNull(control.toIncomingEnvelope(attempt, "account@example.org"))
-            assertEquals(
-                "Encrypted message",
-                requireNotNull(content.toIncomingEnvelope(attempt, "account@example.org")).body,
-            )
+        installNemaOmemoProviders()
+        org.thanosapollo.nema.xmpp.omemo.OmemoProtocol.entries.forEach { protocol ->
+            val header = parse(ProtectedFixtures.encrypted(protocol, null))
+            val content = parse(ProtectedFixtures.encrypted(protocol) + "<body>unchanged fallback</body>")
+            val rejected = parse("<encrypted xmlns='${protocol.namespace}'><header sid='1'/></encrypted>")
+            val headerEnvelope = requireNotNull(header.toIncomingEnvelope(attempt, "account@example.org"))
+            assertEquals("", headerEnvelope.body)
+            assertEquals(org.thanosapollo.nema.xmpp.omemo.ProtectedState.UNSUPPORTED_HEADER_ONLY, headerEnvelope.protection?.state)
+            val envelope = requireNotNull(content.toIncomingEnvelope(attempt, "account@example.org"))
+            assertEquals("unchanged fallback", envelope.body)
+            val evidence = requireNotNull(envelope.protection)
+            assertEquals(protocol, evidence.content?.protocol)
+            assertEquals("AQID", evidence.content?.payload)
+            assertEquals("BAUG", evidence.content?.keys?.single()?.ciphertext)
+            assertEquals(org.thanosapollo.nema.xmpp.omemo.ProtectedState.REJECTED,
+                rejected.toIncomingEnvelope(attempt, "account@example.org")?.protection?.state)
         }
+        assertNull(parse("<encrypted xmlns='urn:xmpp:omemo:99'><payload>AA==</payload></encrypted>")
+            .toIncomingEnvelope(attempt, "account@example.org"))
 
         val wrongElement = parse(
             "<devices xmlns='urn:xmpp:omemo:2'><payload>AA==</payload></devices>",

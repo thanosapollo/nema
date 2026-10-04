@@ -268,7 +268,7 @@ abstract class AccountDao {
         DirectoryIntentEntity::class,
     ],
     views = [ThreadDestination::class],
-    version = 30,
+    version = 31,
     autoMigrations = [
         AutoMigration(from = 1, to = 2),
         AutoMigration(from = 2, to = 3),
@@ -319,6 +319,7 @@ abstract class NemaDatabase : RoomDatabase() {
                 MessageSchema.MIGRATION_25_26,
                 MessageSchema.MIGRATION_26_27,
                 MessageSchema.MIGRATION_27_28,
+                MessageSchema.MIGRATION_30_31,
             )
             .openHelperFactory(preservingOpenHelperFactory)
             .addCallback(MessageSchema.REOPEN_CALLBACK)

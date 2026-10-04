@@ -10,6 +10,10 @@ import android.media.AudioAttributes
 import android.media.RingtoneManager
 import android.os.Build
 
+data class IncomingNotification(val body: String, val protectedState: String = "NONE") {
+    val text: String get() = org.thanosapollo.nema.xmpp.omemo.protectedStatus(protectedState) ?: body
+}
+
 internal const val INCOMING_MESSAGE_CHANNEL_ID = "xmpp_messages_alert"
 internal const val LEGACY_MESSAGE_CHANNEL_ID = "xmpp_messages"
 
@@ -35,8 +39,9 @@ internal fun incomingMessageNotification(
     preview: String,
     openIntent: PendingIntent,
     icon: Int,
+    protectedState: String = "NONE",
 ): Notification {
-    val body = preview.ifBlank { "New message" }
+    val body = (org.thanosapollo.nema.xmpp.omemo.protectedStatus(protectedState) ?: preview).ifBlank { "New message" }
     val builder = Notification.Builder(context, INCOMING_MESSAGE_CHANNEL_ID)
         .setSmallIcon(icon)
         .setCategory(Notification.CATEGORY_MESSAGE)
@@ -45,7 +50,7 @@ internal fun incomingMessageNotification(
         .setContentIntent(openIntent)
         .setAutoCancel(true)
         .setOnlyAlertOnce(false)
-    if (Build.VERSION.SDK_INT >= 28) {
+    if (protectedState == "NONE" && Build.VERSION.SDK_INT >= 28) {
         val you = Person.Builder().setName("You").build()
         val them = Person.Builder().setName(peer).build()
         builder.setStyle(

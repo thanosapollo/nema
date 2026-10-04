@@ -143,7 +143,9 @@ class SessionRuntime(
     private val messages: MessageStore,
     private val peerIdentities: PeerIdentityStore,
     runtimeScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
-    connectionFactory: SessionConnectionFactory = SmackSessionConnectionFactory(),
+    connectionFactory: SessionConnectionFactory = SmackSessionConnectionFactory { attempt ->
+        (credentials.load(attempt.accountId) as? CredentialAccess.Available)?.value
+    },
     private val typingClock: () -> Long = System::currentTimeMillis,
 ) {
     private val scope = runtimeScope
@@ -196,7 +198,7 @@ class SessionRuntime(
     )
     private val pendingPeerIdentities = AtomicReference<Map<String, Set<String>>>(emptyMap())
     val visiblePeer = AtomicReference<String?>(null)
-    @Volatile var onInsertedInbound: ((AccountId, String, String, org.thanosapollo.nema.thread.ThreadRef?) -> Unit)? = null
+    @Volatile var onInsertedInbound: ((AccountId, String, IncomingNotification, org.thanosapollo.nema.thread.ThreadRef?) -> Unit)? = null
     val rooms = RoomStateStore()
     val chatStates = ChatStateHub()
     val realTimeText = RealTimeTextHub()
@@ -233,7 +235,7 @@ class SessionRuntime(
                         val result = liveMessages.ingest(event.message)
                         emitInsertedLive(event.message, result)
                         acknowledgeReceiptRequest(event.message, result)
-                        controller.applyEphemeral(event.attempt) {
+                        if (event.message.protection == null) controller.applyEphemeral(event.attempt) {
                             chatStates.apply(
                                 IncomingChatState(
                                     accountId = event.message.accountId,
@@ -436,6 +438,7 @@ class SessionRuntime(
     }
 
     private suspend fun emitInsertedLive(envelope: IncomingMessageEnvelope, result: IngestionResult) {
+        if (result.protectedState == "UNSUPPORTED_HEADER_ONLY") return
         if (
             shouldNotifyInsertedInbound(
                 result = result,
@@ -448,13 +451,15 @@ class SessionRuntime(
             val destination = messages.notificationThread(
                 envelope.accountId.value, envelope.peer, envelope.kind, result.storedThread,
             )
-            onInsertedInbound?.invoke(envelope.accountId, envelope.peer, envelope.body, destination)
+            onInsertedInbound?.invoke(envelope.accountId, envelope.peer, IncomingNotification(
+                if (result.protectedState == "NONE") envelope.body else "", result.protectedState), destination)
         }
     }
 
     private suspend fun emitInsertedArchive(accountId: AccountId, inserted: List<InsertedInbound>, direction: ArchiveDirection) {
         val visible = visiblePeer.get()
         inserted.forEach { inbound ->
+            if (inbound.protectedState == "UNSUPPORTED_HEADER_ONLY") return@forEach
             if (
                 shouldNotifyInsertedInbound(
                     result = IngestionResult(inbound.peerJid, 0, identityConflict = false, inserted = true),
@@ -469,7 +474,8 @@ class SessionRuntime(
                     accountId.value, inbound.peerJid,
                     if (inbound.groupChat) MessageKind.GROUPCHAT else MessageKind.CHAT, inbound.thread,
                 )
-                onInsertedInbound?.invoke(accountId, inbound.peerJid, inbound.preview, destination)
+                onInsertedInbound?.invoke(accountId, inbound.peerJid, IncomingNotification(
+                    if (inbound.protectedState == "NONE") inbound.preview else "", inbound.protectedState), destination)
             }
         }
     }
@@ -1105,7 +1111,7 @@ class SessionRuntime(
     ) {
         val targetId = message.messageId?.takeIf(String::isNotEmpty) ?: return
         val recipient = message.receiptRecipient ?: return
-        if (message.outbound ||
+        if (message.protection != null || result.protectedState != "NONE" || message.outbound ||
             message.kind != MessageKind.CHAT ||
             !message.receiptRequested ||
             !result.firstLiveDelivery
@@ -1582,7 +1588,7 @@ class XmppConnectionService : Service() {
             .build()
     }
 
-    private fun notifyInbound(accountId: AccountId, peer: String, preview: String, thread: org.thanosapollo.nema.thread.ThreadRef?) {
+    private fun notifyInbound(accountId: AccountId, peer: String, preview: IncomingNotification, thread: org.thanosapollo.nema.thread.ThreadRef?) {
         if (!canShowNotifications()) return
         val target = org.thanosapollo.nema.MessageNotificationTarget(accountId.value, peer, thread)
         val openIntent = target.pendingIntent(this)
@@ -1593,7 +1599,8 @@ class XmppConnectionService : Service() {
                 incomingMessageNotification(
                     context = this,
                     peer = peer,
-                    preview = preview,
+                    preview = preview.text,
+                    protectedState = preview.protectedState,
                     openIntent = openIntent,
                     icon = R.drawable.ic_nema_mark,
                 ),

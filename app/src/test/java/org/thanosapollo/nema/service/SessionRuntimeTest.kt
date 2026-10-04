@@ -1568,6 +1568,108 @@ class SessionRuntimeTest {
     }
 
     @Test
+    fun `protected service admission cannot settle typing session read or ordinary outbox`() = runTest {
+        org.thanosapollo.nema.xmpp.smack.SmackAndroid.initialize(context)
+        org.thanosapollo.nema.xmpp.smack.installNemaOmemoProviders()
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val connections = RecordingConnectionFactory()
+        val store = MessageStore(database)
+        val runtime = SessionRuntime(accounts, credentials, store, PeerIdentityStore(database.messageDao()), backgroundScope, connections)
+        val active = account("protected-effects")
+        assertTrue(runtime.prepareActivation(runtime.beginPendingActivation(), active, "secret".toCharArray(), {}))
+        accounts.activate(active.id)
+        assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
+        val connection = connections.created.single()
+        fun owned(message: IncomingMessageEnvelope) = message.copy(accountId = active.id,
+            generation = connection.attemptIdentity.generation)
+        val seed = owned(org.thanosapollo.nema.xmpp.smack.ProtectedFixtures.envelope(
+            org.thanosapollo.nema.xmpp.omemo.OmemoProtocol.LEGACY, id = "unread")).copy(protection = null, body = "ordinary")
+        connection.emitIncoming(seed)
+        runCurrent()
+        val unreadId = store.messages(active.id.value).single().localMessageId
+        val current = store.ensureDirectThreadSession(active.id.value, REACTION_PEER)
+        store.compose(OutboundIntent(active.id.value, "pending", "outbound", "ordinary-origin", REACTION_PEER,
+            active.bareJid.value, MessageKind.CHAT, null, null, "ordinary"))
+        runCurrent()
+        val outbox = store.outbox(active.id.value, "pending")
+        try {
+            for (protocol in org.thanosapollo.nema.xmpp.omemo.OmemoProtocol.entries) {
+                for (payload in listOf("AQID", null, "malformed")) {
+                    connection.emitEphemeral()
+                    runCurrent()
+                    val envelope = owned(org.thanosapollo.nema.xmpp.smack.ProtectedFixtures.envelope(protocol, payload,
+                        "${protocol.name}-$payload")).copy(thread = ThreadRef(ThreadId.require("untrusted-thread")),
+                            receiptRequested = true, receiptRecipient = "peer@example.org/device")
+                    connection.emitIncoming(envelope)
+                    runCurrent()
+                    assertEquals(listOf(REACTION_PEER), runtime.chatStates.observe(active.id.value, REACTION_PEER).first())
+                    assertEquals("draft", runtime.realTimeText.observe(active.id.value, REACTION_PEER).first())
+                    assertEquals(current.id.value, database.messageDao().directThreadSession(active.id.value, REACTION_PEER)!!.threadId)
+                    assertTrue(connection.sentSignals.isEmpty())
+                }
+            }
+            val sent = owned(org.thanosapollo.nema.xmpp.smack.ProtectedFixtures.carried(
+                org.thanosapollo.nema.xmpp.omemo.OmemoProtocol.MODERN,
+                org.thanosapollo.nema.xmpp.omemo.ProtectedCarrierKind.SENT_CARBON, true))
+                .copy(sender = active.bareJid.value, originId = "ordinary-origin", body = "ordinary")
+            connection.emitIncoming(sent)
+            runCurrent()
+            assertEquals(outbox, store.outbox(active.id.value, "pending"))
+            assertFalse(store.messages(active.id.value).single { it.localMessageId == unreadId }.locallyRead)
+            connection.emitIncoming(seed.copy(messageId = "ordinary-positive", thread = ThreadRef(ThreadId.require("ordinary-thread")),
+                receiptRequested = true, receiptRecipient = "peer@example.org/device"))
+            runCurrent()
+            assertTrue(runtime.chatStates.observe(active.id.value, REACTION_PEER).first().isEmpty())
+            assertNull(runtime.realTimeText.observe(active.id.value, REACTION_PEER).first())
+            assertEquals("ordinary-thread", database.messageDao().directThreadSession(active.id.value, REACTION_PEER)!!.threadId)
+            assertEquals(1, connection.sentSignals.size)
+            store.compose(OutboundIntent(active.id.value, "positive", "positive-outbound", "positive-origin", REACTION_PEER,
+                active.bareJid.value, MessageKind.CHAT, null, null, "ordinary"))
+            connection.emitIncoming(sent.copy(messageId = "ordinary-sent", originId = "positive-origin", protection = null))
+            runCurrent()
+            assertEquals(OutboxStatus.CONFIRMED, store.outbox(active.id.value, "positive")!!.status)
+            assertTrue(store.messages(active.id.value).single { it.localMessageId == unreadId }.locallyRead)
+        } finally { runtime.stop() }
+    }
+
+    @Test
+    fun `protected payload notifies generically while header only and replay stay silent`() = runTest {
+        org.thanosapollo.nema.xmpp.smack.SmackAndroid.initialize(context)
+        org.thanosapollo.nema.xmpp.smack.installNemaOmemoProviders()
+        val accounts = AccountRepository(database.accountDao())
+        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val connections = RecordingConnectionFactory()
+        val store = MessageStore(database)
+        val runtime = SessionRuntime(accounts, credentials, store, PeerIdentityStore(database.messageDao()), backgroundScope, connections)
+        val active = account("protected")
+        assertTrue(runtime.prepareActivation(runtime.beginPendingActivation(), active, "secret".toCharArray(), {}))
+        accounts.activate(active.id)
+        assertEquals(ConnectionCommandOutcome.RUNNING, runtime.connectActive())
+        val connection = connections.created.single()
+        val notifications = mutableListOf<IncomingNotification>()
+        runtime.onInsertedInbound = { _, _, content, _ -> notifications += content }
+        fun message(id: String, payload: String?) = org.thanosapollo.nema.xmpp.smack.ProtectedFixtures.envelope(
+            org.thanosapollo.nema.xmpp.omemo.OmemoProtocol.LEGACY, payload, id).copy(
+                accountId = active.id, generation = connection.attemptIdentity.generation,
+                body = "https://example.org/untrusted", receiptRequested = true, receiptRecipient = "peer@example.org/device")
+        val payload = message("payload", "AQID")
+        connection.emitIncoming(payload)
+        runCurrent()
+        connection.emitIncoming(payload)
+        runCurrent()
+        connection.emitIncoming(message("header", null))
+        runCurrent()
+        assertTrue(connection.sentSignals.isEmpty())
+        assertEquals(1, notifications.size)
+        assertEquals("Protected message is not supported", notifications.single().text)
+        assertEquals("", notifications.single().body)
+        assertEquals(2, store.messages(active.id.value).size)
+        assertFalse(store.messages(active.id.value).single { it.protectedState == "UNSUPPORTED_HEADER_ONLY" }.unreadEligible)
+        runtime.stop()
+    }
+
+    @Test
     fun `live receipt request acknowledges full requester while replays stay silent`() = runTest {
         val accounts = AccountRepository(database.accountDao())
         val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
@@ -2383,7 +2485,7 @@ class SessionRuntimeTest {
         val runtime = SessionRuntime(accounts, credentials, store, PeerIdentityStore(database.messageDao()), backgroundScope, factory)
         val notifications = kotlinx.coroutines.channels.Channel<Pair<Triple<AccountId, String, String>, ThreadRef?>>(kotlinx.coroutines.channels.Channel.UNLIMITED)
         runtime.onInsertedInbound = { owner, peer, body, thread ->
-            notifications.trySend(Triple(owner, peer, body) to thread).getOrThrow()
+            notifications.trySend(Triple(owner, peer, body.text) to thread).getOrThrow()
         }
         try {
             for (owner in owners) {

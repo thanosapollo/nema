@@ -13,16 +13,17 @@ import org.thanosapollo.nema.xmpp.transport.MessageReceiptStage
 internal fun TimelineRow.toPresentation(replyReferenceIds: Set<String>) = TimelineMessage(
     id = localMessageId,
     senderJid = senderJid,
-    body = correctedBody ?: body,
+    body = if (protectedState == "NONE") correctedBody ?: body else body,
+    protectedState = protectedState,
     outgoing = direction == MessageDirection.OUTBOUND,
-    delivery = if (direction == MessageDirection.OUTBOUND) {
+    delivery = if (protectedState == "NONE" && direction == MessageDirection.OUTBOUND) {
         receiptStage?.let(MessageReceiptStage::valueOf)
             ?.toPresentation()
             ?: outboxStatus?.let(OutboxStatus::valueOf).toPresentation()
     } else {
         null
     },
-    retryUncertainKey = if (outboxStatus == OutboxStatus.UNCERTAIN.name) {
+    retryUncertainKey = if (protectedState == "NONE" && outboxStatus == OutboxStatus.UNCERTAIN.name) {
         RetryUncertainKey(
             accountId = accountId,
             operationId = requireNotNull(operationId),
@@ -39,19 +40,19 @@ internal fun TimelineRow.toPresentation(replyReferenceIds: Set<String>) = Timeli
         )
     },
     groupChat = messageKind == MessageKind.GROUPCHAT,
-    attachmentUrl = attachmentUrl,
-    attachmentName = attachmentName,
-    attachmentMime = attachmentMime,
-    attachmentSize = attachmentSize,
+    attachmentUrl = attachmentUrl.takeIf { protectedState == "NONE" },
+    attachmentName = attachmentName.takeIf { protectedState == "NONE" },
+    attachmentMime = attachmentMime.takeIf { protectedState == "NONE" },
+    attachmentSize = attachmentSize.takeIf { protectedState == "NONE" },
     replyReferenceId = replyReferenceId,
     replyReferenceIds = replyReferenceIds,
-    replyToId = replyToId,
-    replyToJid = replyToJid,
-    replyFallbackBody = replyFallbackBody,
-    markable = markable,
-    markerTargetId = markerTargetId,
-    edited = edited,
-    correctionReferenceId = operationId,
+    replyToId = replyToId.takeIf { protectedState == "NONE" },
+    replyToJid = replyToJid.takeIf { protectedState == "NONE" },
+    replyFallbackBody = replyFallbackBody.takeIf { protectedState == "NONE" },
+    markable = protectedState == "NONE" && markable,
+    markerTargetId = markerTargetId.takeIf { protectedState == "NONE" },
+    edited = protectedState == "NONE" && edited,
+    correctionReferenceId = operationId.takeIf { protectedState == "NONE" },
     sentAtEpochMs = sentAtEpochMs,
 )
 

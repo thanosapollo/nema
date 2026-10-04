@@ -65,7 +65,7 @@ class MucCorrectionMigrationTest {
             var db = NemaDatabase.create(context, name)
             try {
                 val sql = db.openHelper.writableDatabase
-                assertEquals(30, sql.version)
+                assertEquals(31, sql.version)
                 assertEquals(before, snapshot(sql))
                 assertUnknown(sql)
                 var store = MessageStore(db)
@@ -201,8 +201,11 @@ class MucCorrectionMigrationTest {
             "message_outbox", "message_reactions", "message_drafts", "message_threads", "account_message_sequences", "archive_cursors")) {
             sql.query("SELECT * FROM $table ORDER BY rowid").use { c ->
                 val columns = c.columnNames.indices.filterNot { c.columnNames[it].startsWith("muc") ||
-                    c.columnNames[it] in setOf("replaceId", "correctionTargetMessageId") }
-                result[table] = buildList { while (c.moveToNext()) add(columns.map { if (c.isNull(it)) null else c.getString(it) }) }
+                    c.columnNames[it] in setOf("replaceId", "correctionTargetMessageId", "protectedState", "protectedEvidence") }
+                result[table] = buildList { while (c.moveToNext()) {
+                    c.ordinaryHistoricalColumns()
+                    add(columns.map { if (c.isNull(it)) null else c.getString(it) })
+                } }
             }
         }
         return result

@@ -64,6 +64,7 @@ open class NemaApplication : Application() {
             updates.settleInstallOnResume(handoff)
         }
         SmackAndroid.initialize(applicationContext)
+        org.thanosapollo.nema.xmpp.smack.installNemaOmemoProviders()
         installNemaCarbonProvider()
         installNemaMucUserProvider()
         installNemaMamResultProvider()

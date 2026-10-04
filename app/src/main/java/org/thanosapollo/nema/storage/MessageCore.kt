@@ -1,5 +1,8 @@
 package org.thanosapollo.nema.storage
 
+import org.thanosapollo.nema.xmpp.omemo.ProtectedContentCodec
+import org.thanosapollo.nema.xmpp.omemo.ProtectedState
+
 import androidx.room.Dao
 import androidx.room.Delete
 import androidx.room.Insert
@@ -774,6 +777,21 @@ abstract class MessageDao {
         nextValue: Long,
     ): Int
 
+    @Query("UPDATE messages SET protectedState = :state, protectedEvidence = :evidence WHERE accountId = :accountId AND localMessageId = :messageId")
+    abstract suspend fun updateProtectedContent(accountId: String, messageId: String, state: String, evidence: String): Int
+
+    @Query("""
+        SELECT EXISTS(SELECT 1 FROM messages JOIN trusted_identity_aliases AS alias
+          ON alias.accountId = messages.accountId AND alias.messageId = messages.localMessageId
+        WHERE messages.accountId = :accountId AND messages.peerJid = :peer
+          AND alias.value = :reference AND alias.status = 'TRUSTED'
+          AND ((messages.messageKind = 'CHAT' AND alias.kind IN ('ORIGIN_ID', 'MESSAGE_ID'))
+            OR (messages.messageKind = 'GROUPCHAT' AND alias.kind = 'STANZA_ID' AND alias.authority = messages.peerJid))
+          AND (:sender IS NULL OR messages.senderJid = :sender)
+          AND (messages.protectedState != 'NONE' OR messages.protectedEvidence IS NOT NULL))
+    """)
+    abstract suspend fun protectedReplyTargetExists(accountId: String, peer: String, reference: String, sender: String?): Boolean
+
     @Insert
     abstract suspend fun insertMessage(message: MessageEntity)
 
@@ -1017,12 +1035,15 @@ abstract class MessageDao {
             messages.localMessageId AS localMessageId,
             messages.peerJid AS peerJid,
           messages.senderJid AS senderJid,
+          CASE WHEN messages.protectedState = 'NONE' AND messages.protectedEvidence IS NOT NULL THEN 'REJECTED' ELSE messages.protectedState END AS protectedState,
             COALESCE(
               (
                 SELECT correction.body
                 FROM messages AS correction
                 WHERE correction.accountId = messages.accountId
                   AND correction.correctionTargetMessageId = messages.localMessageId
+              AND messages.protectedState = 'NONE' AND messages.protectedEvidence IS NULL
+              AND correction.protectedState = 'NONE' AND correction.protectedEvidence IS NULL
               AND (correction.messageKind != 'GROUPCHAT' OR correction.mucCorrectionSelected = 1)
                 ORDER BY correction.sentAtEpochMs IS NULL,
                   correction.sentAtEpochMs DESC,
@@ -1146,6 +1167,7 @@ abstract class MessageDao {
         SELECT messages.localMessageId AS localMessageId,
           messages.peerJid AS peerJid,
           messages.senderJid AS senderJid,
+          messages.protectedState AS protectedState,
           messages.preview AS preview,
           messages.localSequence AS localSequence,
           messages.messageKind AS messageKind,
@@ -1196,7 +1218,44 @@ abstract class MessageDao {
     @RewriteQueriesToDropUnusedColumns
     @Query(
         """
-        SELECT messages.*, message_outbox.operationId AS operationId,
+        SELECT messages.accountId,
+          messages.localMessageId,
+          messages.peerJid,
+          messages.senderJid,
+          messages.direction,
+          messages.messageKind,
+          messages.threadId,
+          messages.parentThreadId,
+          messages.body,
+          messages.localSequence,
+          messages.archiveOrdinal,
+          messages.sentAtEpochMs,
+          messages.sentTimeSource,
+          messages.reconciliationObservedAtMs,
+          messages.attachmentUrl,
+          messages.attachmentName,
+          messages.attachmentMime,
+          messages.attachmentSize,
+          messages.replyToId,
+          messages.replyToJid,
+          messages.replyFallbackBody,
+          messages.markable,
+          messages.markerTargetId,
+          messages.replaceId,
+          messages.correctionTargetMessageId,
+          messages.directSessionTransitionApplied,
+          messages.liveDeliveryObserved,
+          messages.unreadEligible,
+          messages.locallyRead,
+          messages.mucMessageId,
+          messages.mucReplaceId,
+          messages.mucClaimState,
+          messages.mucOccupantId,
+          messages.mucOccupantEvidence,
+          messages.mucPayloadState,
+          messages.mucLiveOrderEpoch,
+          messages.mucCorrectionSelected,
+          CASE WHEN messages.protectedState = 'NONE' AND messages.protectedEvidence IS NOT NULL THEN 'REJECTED' ELSE messages.protectedState END AS protectedState, message_outbox.operationId AS operationId,
           message_outbox.status AS outboxStatus,
           message_outbox.receiptStage AS receiptStage,
           message_outbox.generation AS outboxGeneration,
@@ -1206,6 +1265,8 @@ abstract class MessageDao {
             FROM messages AS correction
             WHERE correction.accountId = messages.accountId
               AND correction.correctionTargetMessageId = messages.localMessageId
+              AND messages.protectedState = 'NONE' AND messages.protectedEvidence IS NULL
+              AND correction.protectedState = 'NONE' AND correction.protectedEvidence IS NULL
               AND (correction.messageKind != 'GROUPCHAT' OR correction.mucCorrectionSelected = 1)
             ORDER BY correction.sentAtEpochMs IS NULL,
               correction.sentAtEpochMs DESC,
@@ -1217,6 +1278,8 @@ abstract class MessageDao {
             SELECT 1 FROM messages AS correction
             WHERE correction.accountId = messages.accountId
               AND correction.correctionTargetMessageId = messages.localMessageId
+              AND messages.protectedState = 'NONE' AND messages.protectedEvidence IS NULL
+              AND correction.protectedState = 'NONE' AND correction.protectedEvidence IS NULL
               AND (correction.messageKind != 'GROUPCHAT' OR correction.mucCorrectionSelected = 1)
           ) AS edited,
           CASE
@@ -1450,6 +1513,7 @@ abstract class MessageDao {
             AND messages.localMessageId = :messageId
             AND messages.peerJid = :peerJid
             AND messages.senderJid = :senderJid
+            AND messages.protectedState = 'NONE' AND messages.protectedEvidence IS NULL
             AND messages.body = :body
             AND messages.messageKind = 'CHAT'
             AND ((messages.threadId IS NULL AND :threadId IS NULL) OR messages.threadId = :threadId)
@@ -1765,6 +1829,7 @@ data class ConversationListRow(
     val unreadCount: Int = 0,
     val senderJid: String = "",
     val direction: MessageDirection = MessageDirection.INBOUND,
+    val protectedState: String = "NONE",
 ) {
     val groupChat: Boolean
         get() = room
@@ -1806,6 +1871,7 @@ data class TimelineRow(
     val conversationArchiveScope: String,
     val unreadEligible: Boolean = true,
     val locallyRead: Boolean = false,
+    val protectedState: String = "NONE",
 )
 
 data class RetryUncertainKey(
@@ -1948,6 +2014,7 @@ data class IncomingMessage(
     val unreadEligible: Boolean = true,
     val mucFacts: MucEventFacts? = null,
     val mucLiveOrderEpoch: String? = null,
+    val protection: org.thanosapollo.nema.xmpp.omemo.ProtectedContent? = null,
 ) {
     init {
         require(mucFacts == null || messageKind == MessageKind.GROUPCHAT) { "MUC facts require a room event" }
@@ -2037,6 +2104,7 @@ data class IngestionResult(
     val firstLiveDelivery: Boolean = false,
     /** Canonical lineage after reconciliation, never the untrusted incoming claim. */
     val storedThread: ThreadRef? = null,
+    val protectedState: String = "NONE",
 )
 
 class OutboxClaim internal constructor(
@@ -2051,6 +2119,7 @@ internal enum class MessageWriteBoundary {
     AFTER_ALIAS,
     AFTER_OUTBOX,
     AFTER_DEPENDENT_REPARENT,
+    AFTER_PROTECTED_CONTENT,
     BEFORE_ARCHIVE_CURSOR,
     AFTER_ARCHIVE_CURSOR,
 }
@@ -2147,7 +2216,7 @@ class MessageStore private constructor(
         ) {
             val matches = dao.inboundChatByAliasValue(accountId, peerJid, targetId)
                 .distinctBy(MessageEntity::localMessageId)
-            val target = matches.singleOrNull() ?: return null
+            val target = matches.singleOrNull()?.takeUnless { it.isProtected() } ?: return null
             dao.markMessagesReadThrough(accountId, peerJid, target.localSequence)
             return null
         }
@@ -2157,7 +2226,7 @@ class MessageStore private constructor(
             ?: attachReceiptOutbox(dao, accountId, peerJid, targetId)
             ?: return null
         val message = dao.message(accountId, outbox.messageId) ?: return null
-        if (message.direction != MessageDirection.OUTBOUND ||
+        if (message.isProtected() || message.direction != MessageDirection.OUTBOUND ||
             message.messageKind != MessageKind.CHAT ||
             message.peerJid != peerJid
         ) {
@@ -2175,7 +2244,7 @@ class MessageStore private constructor(
     ): OutboxEntity? {
         val matches = dao.outboundChatByAliasValue(accountId, peerJid, targetId)
             .distinctBy(MessageEntity::localMessageId)
-        val message = matches.singleOrNull() ?: return null
+        val message = matches.singleOrNull()?.takeUnless { it.isProtected() } ?: return null
         dao.outboxForMessage(accountId, message.localMessageId)?.let { return it }
         if (dao.outbox(accountId, targetId) != null || dao.outboxByOrigin(accountId, targetId) != null) {
             return null
@@ -2292,6 +2361,11 @@ class MessageStore private constructor(
 
     private suspend fun composeInTransaction(intent: OutboundIntent): OutboxEntity {
         val dao = database.messageDao()
+        intent.replyToId?.let { reference ->
+            require(!dao.protectedReplyTargetExists(intent.accountId, intent.peerJid, reference, intent.replyToJid)) {
+                "Protected content cannot prepare an ordinary reply"
+            }
+        }
         existingOutboxForIntent(dao, intent)?.let { return it }
         require(dao.outboxByOrigin(intent.accountId, intent.originId) == null) {
             "Origin ID already identifies another outbound intent"
@@ -2384,7 +2458,7 @@ class MessageStore private constructor(
             incoming.withoutArchivePosition(),
             muc,
             preserveStoredThreadLineage = true,
-            allowSentCarbonRead = incoming.sentTimeSource == MessageTimeSource.CARBON,
+            allowSentCarbonRead = incoming.protection == null && incoming.sentTimeSource == MessageTimeSource.CARBON,
             allowLiveReconciliation = position == null,
         )
         if (position != null) attachArchivePosition(result.messageId, incoming.accountId, position)
@@ -2401,7 +2475,7 @@ class MessageStore private constructor(
         database.withTransaction {
             val dao = database.messageDao()
             val selected = dao.message(accountId, localMessageId)
-                ?.takeIf { it.peerJid == peerJid && it.messageKind == MessageKind.CHAT }
+                ?.takeIf { !it.isProtected() && it.peerJid == peerJid && it.messageKind == MessageKind.CHAT }
                 ?: return@withTransaction null
             val message = dao.directReactionTarget(selected) ?: return@withTransaction null
             dao.trustedAliasesForMessage(message.accountId, message.localMessageId)
@@ -2417,7 +2491,7 @@ class MessageStore private constructor(
     ): DirectReactionTarget? = database.withTransaction {
         val dao = database.messageDao()
         val selected = dao.message(accountId, localMessageId)
-            ?.takeIf { it.peerJid == peerJid && it.messageKind == MessageKind.CHAT }
+            ?.takeIf { !it.isProtected() && it.peerJid == peerJid && it.messageKind == MessageKind.CHAT }
             ?: return@withTransaction null
         if ((selected.replaceId == null) != (selected.correctionTargetMessageId == null)) {
             return@withTransaction null
@@ -2447,7 +2521,7 @@ class MessageStore private constructor(
     ): ReactionTarget? = database.withTransaction {
         val dao = database.messageDao()
         val selected = dao.message(accountId, localMessageId)
-            ?.takeIf { it.peerJid == peerJid }
+            ?.takeIf { !it.isProtected() && it.peerJid == peerJid }
             ?: return@withTransaction null
         if (selected.messageKind == MessageKind.CHAT) {
             return@withTransaction resolveDirectReactionTarget(accountId, peerJid, localMessageId)
@@ -2522,7 +2596,7 @@ class MessageStore private constructor(
     ): List<String> = database.withTransaction {
         val dao = database.messageDao()
         val selected = dao.message(accountId, localMessageId)
-            ?.takeIf { it.peerJid == peerJid && it.messageKind == MessageKind.CHAT }
+            ?.takeIf { !it.isProtected() && it.peerJid == peerJid && it.messageKind == MessageKind.CHAT }
             ?: return@withTransaction emptyList()
         val target = dao.directReactionTarget(selected) ?: return@withTransaction emptyList()
         if (selected.localMessageId != target.localMessageId) reparentReactions(selected, target)
@@ -2560,6 +2634,11 @@ class MessageStore private constructor(
         archiveComponentOwner: String? = null,
     ): IngestionResult {
         val dao = database.messageDao()
+        received.protection?.let {
+            ProtectedContentCodec.encode(it)
+            require(received.attachmentUrl == null && received.replyToId == null && !received.markable &&
+                received.markerTargetId == null && received.replaceId == null) { "Protected outer controls must be inert" }
+        }
         val timed = received.withStoredTime(clock)
         val inheritedParent = timed.threadId
             ?.takeIf { timed.parentThreadId == null }
@@ -2693,6 +2772,13 @@ class MessageStore private constructor(
         }
         writeBoundary(MessageWriteBoundary.AFTER_ALIAS)
 
+        if (incoming.protection != null && !inserted) {
+            val retained = requireNotNull(winner.protection()).union(incoming.protection)
+            val encoded = ProtectedContentCodec.encode(retained)
+            check(dao.updateProtectedContent(winner.accountId, winner.localMessageId, retained.state.name, encoded) == 1)
+            writeBoundary(MessageWriteBoundary.AFTER_PROTECTED_CONTENT)
+            winner = winner.copy(protectedState = retained.state.name, protectedEvidence = encoded)
+        }
         winner = reconcileCorrections(dao, incoming, winner)
         val liveDelivery = incoming.sentTimeSource != MessageTimeSource.CARBON &&
             incoming.sentTimeSource != MessageTimeSource.MAM
@@ -2706,7 +2792,7 @@ class MessageStore private constructor(
             )
             .withMarkerMetadata(incoming)
             .withLiveDeliveryObserved(liveDelivery)
-            .withUnreadEligible(incoming.unreadEligible)
+            .withUnreadEligible(incoming.unreadEligible && incoming.protection?.state != ProtectedState.UNSUPPORTED_HEADER_ONLY)
         if (reconciled != winner) {
             dao.updateMessage(reconciled)
             winner = reconciled
@@ -2714,7 +2800,7 @@ class MessageStore private constructor(
 
         confirmMatchingOutbox(incoming, winner.localMessageId)
         writeBoundary(MessageWriteBoundary.AFTER_OUTBOX)
-        if (allowDirectSessionTransition &&
+        if (allowDirectSessionTransition && incoming.protection == null && !winner.isProtected() &&
             incoming.messageKind == MessageKind.CHAT &&
             incoming.sentTimeSource != MessageTimeSource.MAM &&
             !winner.directSessionTransitionApplied
@@ -2723,7 +2809,7 @@ class MessageStore private constructor(
             winner = winner.copy(directSessionTransitionApplied = true)
             dao.updateMessage(winner)
         }
-        if (allowSentCarbonRead &&
+        if (allowSentCarbonRead && incoming.protection == null && !winner.isProtected() &&
             incoming.direction == MessageDirection.OUTBOUND &&
             incoming.messageKind == MessageKind.CHAT &&
             incoming.senderJid == dao.accountBareJid(incoming.accountId)
@@ -2739,6 +2825,7 @@ class MessageStore private constructor(
             inserted = inserted,
             firstLiveDelivery = firstLiveDelivery,
             storedThread = winner.threadRef(),
+            protectedState = if (winner.isProtected()) winner.protectedState.takeUnless { it == "NONE" } ?: "REJECTED" else "NONE",
         )
     }
 
@@ -2848,6 +2935,7 @@ class MessageStore private constructor(
     }
 
     private suspend fun attachPendingReactions(dao: MessageDao, winner: MessageEntity) {
+        if (winner.isProtected()) return
         if (winner.messageKind == MessageKind.GROUPCHAT) {
             val target = resolveReactionTarget(
                 winner.accountId, winner.peerJid, winner.localMessageId,
@@ -2894,6 +2982,7 @@ class MessageStore private constructor(
     }
 
     private suspend fun MessageDao.directReactionTarget(message: MessageEntity): MessageEntity? {
+        if (message.isProtected()) return null
         if (message.replaceId == null) return message.takeIf { it.correctionTargetMessageId == null }
         val targetId = message.correctionTargetMessageId ?: return null
         val target = message(message.accountId, targetId) ?: return null
@@ -3449,7 +3538,8 @@ class MessageStore private constructor(
                 inserted++
                 insertedInbound += InsertedInbound(
                     peerJid = message.peerJid,
-                    preview = message.body,
+                    preview = if (result.protectedState == "NONE") message.body else "",
+                    protectedState = result.protectedState,
                     inbound = message.direction == MessageDirection.INBOUND,
                     groupChat = message.messageKind == MessageKind.GROUPCHAT,
                     thread = stored.threadRef(),
@@ -3563,9 +3653,11 @@ class MessageStore private constructor(
             dao.outboxes(accountId).mapTo(mutableSetOf(), OutboxEntity::messageId))
         val pairs = mutableListOf<Pair<MessageEntity, MessageEntity>>()
         var skipped = 0L
+        var protectedRefusal = false
         components.filter { it.messages.size > 1 && it.messages.any { row -> row.peerJid == room } }.forEach { component ->
             val pair = component.pair(room, positions)
             if (pair == null) {
+                if (component.messages.any { it.isProtected() }) protectedRefusal = true
                 skipped++
             } else {
                 val (live, mam) = pair
@@ -3573,10 +3665,15 @@ class MessageStore private constructor(
                     live.direction, live.messageKind, live.threadId, live.parentThreadId, live.body, null, emptyList(),
                     attachmentUrl = live.attachmentUrl, attachmentName = live.attachmentName,
                     attachmentMime = live.attachmentMime, attachmentSize = live.attachmentSize,
-                    replyToId = live.replyToId, replyToJid = live.replyToJid, replaceId = live.replaceId)
-                if (canMerge(live, mam, incoming)) pairs.add(pair) else skipped++
+                    replyToId = live.replyToId, replyToJid = live.replyToJid, replyFallbackBody = live.replyFallbackBody,
+                    replaceId = live.replaceId, protection = live.protection())
+                if (canMerge(live, mam, incoming)) pairs.add(pair) else {
+                    if (live.isProtected() || mam.isProtected()) protectedRefusal = true
+                    skipped++
+                }
             }
         }
+        if (protectedRefusal) return@withTransaction state
         // Classification and compatibility of the entire frozen universe precede the first merge.
         val muc = MucCorrectionBatch(dao)
         pairs.forEach { (live, mam) -> mergePair(live, mam, muc) }
@@ -3823,6 +3920,7 @@ class MessageStore private constructor(
     ): Boolean {
         if (!first.isCompatibleWith(incoming) || !second.isCompatibleWith(incoming)) return false
         if (!first.mucFactsCompatible(second)) return false
+        if (runCatching { preflightProtectedMerge(first, second) }.isFailure) return false
         if (first.attachmentUrl != second.attachmentUrl ||
             !optionalMetadataMatches(first.attachmentName, second.attachmentName) ||
             !optionalMetadataMatches(first.attachmentMime, second.attachmentMime) ||
@@ -3848,6 +3946,7 @@ class MessageStore private constructor(
         second: MessageEntity,
         muc: MucCorrectionBatch,
     ): MessageEntity {
+        val protection = preflightProtectedMerge(first, second)
         val dao = database.messageDao()
         muc.beforeMerge(first)
         muc.beforeMerge(second)
@@ -3871,6 +3970,8 @@ class MessageStore private constructor(
             withArchive
         }
         val reconciled = withTransition.enrichMuc(loser.mucFacts()).copy(
+            protectedState = protection?.state?.name ?: "NONE",
+            protectedEvidence = protection?.let(ProtectedContentCodec::encode),
             locallyRead = winner.locallyRead || loser.locallyRead,
             mucLiveOrderEpoch = null,
         )
@@ -3878,6 +3979,11 @@ class MessageStore private constructor(
             .withUnreadEligible(loser.unreadEligible)
             .withPreferredTime(loser.sentAtEpochMs, loser.sentTimeSource)
             .withAttachmentMetadata(loser.attachmentName, loser.attachmentMime, loser.attachmentSize)
+        if (protection != null) {
+            check(dao.updateProtectedContent(winner.accountId, winner.localMessageId, protection.state.name,
+                requireNotNull(reconciled.protectedEvidence)) == 1)
+            writeBoundary(MessageWriteBoundary.AFTER_PROTECTED_CONTENT)
+        }
         if (reconciled != winner) dao.updateMessage(reconciled)
         muc.capture(reconciled)
         return reconciled
@@ -3965,6 +4071,7 @@ class MessageStore private constructor(
     }
 
     private suspend fun confirmMatchingOutbox(incoming: IncomingMessage, messageId: String) {
+        if (incoming.protection != null) return
         val dao = database.messageDao()
         incoming.aliases
             .filter {
@@ -4185,6 +4292,8 @@ private fun IncomingMessage.toEntity(
     threadId = threadId,
     parentThreadId = parentThreadId,
     body = body,
+    protectedState = protection?.state?.name ?: "NONE",
+    protectedEvidence = protection?.let(ProtectedContentCodec::encode),
     localSequence = localSequence,
     archiveOrdinal = archiveOrdinal,
     sentAtEpochMs = sentAtEpochMs,
@@ -4200,7 +4309,7 @@ private fun IncomingMessage.toEntity(
     markable = markable,
     markerTargetId = markerTargetId,
     replaceId = replaceId,
-    unreadEligible = unreadEligible,
+    unreadEligible = unreadEligible && protection?.state != ProtectedState.UNSUPPORTED_HEADER_ONLY,
 )
 
 private fun TrustedIdentityAlias.toEntity(accountId: String, messageId: String) =
@@ -4230,7 +4339,7 @@ private fun <T> optionalMetadataMatches(first: T?, second: T?): Boolean =
     first == null || second == null || first == second
 
 private fun MessageEntity.isCompatibleWith(incoming: IncomingMessage, checkMucFacts: Boolean = true): Boolean =
-    accountId == incoming.accountId &&
+    protectedCompatible(incoming) && accountId == incoming.accountId &&
         peerJid == incoming.peerJid &&
         (senderJid == incoming.senderJid ||
             (messageKind == MessageKind.GROUPCHAT &&
@@ -4267,7 +4376,7 @@ private fun MessageEntity.canCorrect(target: MessageEntity): Boolean =
         parentThreadId == target.parentThreadId
 
 private fun MessageEntity.isPlainDirectText(): Boolean =
-    messageKind == MessageKind.CHAT &&
+    !isProtected() && messageKind == MessageKind.CHAT &&
         body.isNotBlank() &&
         attachmentUrl == null &&
         attachmentName == null &&

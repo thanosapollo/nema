@@ -1,5 +1,7 @@
 package org.thanosapollo.nema
 
+import org.thanosapollo.nema.storage.ordinaryHistoricalColumns
+
 import android.database.sqlite.SQLiteDatabase
 import android.os.Bundle
 import android.os.Looper
@@ -60,6 +62,28 @@ class AlphaDatabaseStartupTest {
         assertEquals(app.beforeRows, snapshot(app))
         assertTrue(app.deletedNames.isEmpty())
         assertTrue(runCatching { app.sessionRuntime }.exceptionOrNull() is UninitializedPropertyAccessException)
+    }
+
+    @Test @Config(application = Released30ProtectedFixtureApplication::class)
+    fun released30UpgradesToProtectedSchemaWithoutReset() {
+        assertEquals(1, app.beforeRows.getValue("messages").size)
+        assertEquals(DatabaseStartup.READY, app.databaseStartup.value)
+        assertEquals(31, app.database.openHelper.writableDatabase.version)
+        assertTrue(app.deletedNames.isEmpty())
+        app.database.openHelper.writableDatabase.query("SELECT protectedState, protectedEvidence, body FROM messages WHERE localMessageId = 'm'").use {
+            assertTrue(it.moveToFirst())
+            assertEquals("NONE", it.getString(0))
+            assertTrue(it.isNull(1))
+            assertEquals("unsent body", it.getString(2))
+        }
+    }
+
+    @Test @Config(application = Current31ProtectedFixtureApplication::class)
+    fun genuineCurrentProtectedSchemaOpensWithoutReset() {
+        assertEquals(1, app.beforeRows.getValue("messages").size)
+        assertEquals(DatabaseStartup.READY, app.databaseStartup.value)
+        assertEquals(31, app.database.openHelper.writableDatabase.version)
+        assertTrue(app.deletedNames.isEmpty())
     }
 
     @Test fun shippedIdentitiesAndHistoricalExportsStayPinned() {
@@ -169,15 +193,15 @@ class AlphaDatabaseStartupTest {
     }
 
     @Test @Config(application = CanonicalAlphaFixtureApplication::class)
-    fun canonicalSharedThread29RetainsEveryPopulatedRowAndOpens30() {
+    fun canonicalSharedThread29RetainsEveryPopulatedRowAndOpens31() {
         assertEquals(DatabaseStartup.READY, app.databaseStartup.value)
         assertEquals(app.beforeRows, snapshot(app))
         assertTrue(app.deletedNames.isEmpty())
-        assertEquals(30, app.database.openHelper.writableDatabase.version)
+        assertEquals(31, app.database.openHelper.writableDatabase.version)
         app.database.close()
         val reopened = NemaDatabase.create(app)
         try {
-            assertEquals(30, reopened.openHelper.writableDatabase.version)
+            assertEquals(31, reopened.openHelper.writableDatabase.version)
             assertEquals(app.beforeRows, snapshot(app))
         } finally { reopened.close() }
     }
@@ -187,7 +211,7 @@ class AlphaDatabaseStartupTest {
         assertEquals(DatabaseStartup.READY, app.databaseStartup.value)
         assertTrue(app.packageManager.getPackageInfo(app.packageName, 0).longVersionCode > 3)
         val sql = app.database.openHelper.writableDatabase
-        assertEquals(30, sql.version)
+        assertEquals(31, sql.version)
         sql.query("SELECT name FROM sqlite_master WHERE name = 'muc_avatars'").use { assertFalse(it.moveToFirst()) }
         runBlocking { app.database.accountDao().upsert(AccountEntity("retain", "retain@example.org", "retain", null, "example.org", null, null)) }
         runBlocking {
@@ -352,7 +376,7 @@ class AlphaDatabaseStartupTest {
 
     private fun proveUsableAndReopen() {
         val sql = app.database.openHelper.writableDatabase
-        assertEquals(30, sql.version)
+        assertEquals(31, sql.version)
         runBlocking { app.database.accountDao().upsert(AccountEntity("new", "new@example.org", "new", null, "example.org", null, null)) }
         app.database.close()
         val reopened = NemaDatabase.create(app)
@@ -375,6 +399,9 @@ class UnknownIdentityAlphaFixtureApplication : AlphaFixtureApplication() { overr
 class UnknownOlderAlphaFixtureApplication : AlphaFixtureApplication() { override val mode = "older-unknown-identity" }
 class MismatchedOlderAlphaFixtureApplication : AlphaFixtureApplication() { override val mode = "older-mismatched-identity" }
 
+class Released30ProtectedFixtureApplication : AlphaFixtureApplication() { override val mode = "released30" }
+class Current31ProtectedFixtureApplication : AlphaFixtureApplication() { override val mode = "current31" }
+
 open class AlphaFixtureApplication : NemaApplication() {
     protected open val mode = "avatar"
     var failDelete = false
@@ -385,10 +412,15 @@ open class AlphaFixtureApplication : NemaApplication() {
     var beforeRows: Map<String, List<List<String?>>> = emptyMap()
     override fun onCreate() {
         when (mode) {
-            "avatar", "avatar-wal", "canonical", "newer", "older", "unknown-identity", "older-unknown-identity", "older-mismatched-identity" -> {
-                createHistoricalDatabase(this, avatar = mode.startsWith("avatar"), version = if (mode.startsWith("older")) 28 else 29)
+            "avatar", "avatar-wal", "canonical", "released30", "current31", "newer", "older", "unknown-identity", "older-unknown-identity", "older-mismatched-identity" -> {
+                createHistoricalDatabase(this, avatar = mode.startsWith("avatar"), version = when {
+                    mode.startsWith("older") -> 28
+                    mode == "released30" -> 30
+                    mode == "current31" -> 31
+                    else -> 29
+                })
                 if (mode == "avatar-wal") createCommittedWalFixture(this)
-                if (mode == "newer") SQLiteDatabase.openDatabase(getDatabasePath("nema.db").path, null, SQLiteDatabase.OPEN_READWRITE).use { it.version = 31 }
+                if (mode == "newer") SQLiteDatabase.openDatabase(getDatabasePath("nema.db").path, null, SQLiteDatabase.OPEN_READWRITE).use { it.version = 32 }
                 if (mode.endsWith("unknown-identity")) SQLiteDatabase.openDatabase(getDatabasePath("nema.db").path, null, SQLiteDatabase.OPEN_READWRITE).use {
                     it.execSQL("UPDATE room_master_table SET identity_hash = 'unrecognized-damaged-identity' WHERE id = 42")
                 }
@@ -424,7 +456,7 @@ private fun snapshot(context: android.content.Context): Map<String, List<List<St
             buildList { while (c.moveToNext()) add(c.getString(0)) }
         }
         tables.associateWith { table -> db.rawQuery("SELECT * FROM `$table` ORDER BY rowid", null).use { c ->
-            buildList { while (c.moveToNext()) add((0 until c.columnCount).map { column ->
+            buildList { while (c.moveToNext()) add(c.ordinaryHistoricalColumns().map { column ->
                 if (c.getType(column) == android.database.Cursor.FIELD_TYPE_BLOB) c.getBlob(column).joinToString("") { "%02x".format(it) } else c.getString(column)
             }) }
         } }

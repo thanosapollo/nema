@@ -17,7 +17,14 @@ import org.thanosapollo.nema.session.SessionAttemptIdentity
 import org.thanosapollo.nema.xmpp.transport.AccountId
 import org.thanosapollo.nema.xmpp.transport.ConnectionGeneration
 
+@org.junit.runner.RunWith(org.robolectric.RobolectricTestRunner::class)
+@org.robolectric.annotation.Config(sdk = [34], application = android.app.Application::class)
 class CarbonMessageMappingTest {
+    @org.junit.Before fun initialize() {
+        SmackAndroid.initialize(androidx.test.core.app.ApplicationProvider.getApplicationContext())
+        installNemaOmemoProviders()
+        installNemaCarbonProvider()
+    }
     private val own = "account@example.org"
 
     private fun inner(
@@ -109,7 +116,6 @@ class CarbonMessageMappingTest {
             "urn:xmpp:mam:tmp" to listOf("archived"),
             "jabber:x:oob" to listOf("x"),
             "eu.siacs.conversations.axolotl" to listOf("encrypted"),
-            "urn:xmpp:omemo:1" to listOf("encrypted"),
             "urn:xmpp:omemo:2" to listOf("encrypted"),
             "jabber:x:encrypted" to listOf("x"),
         )
@@ -162,22 +168,75 @@ class CarbonMessageMappingTest {
     }
 
     @Test
-    fun `encrypted placeholder families survive carbon mapping`() {
-        val encrypted = listOf(
-            StandardExtensionElement.builder("encrypted", "eu.siacs.conversations.axolotl")
-                .addElement("payload", "cipher").build(),
-            StandardExtensionElement.builder("encrypted", "urn:xmpp:omemo:1")
-                .addElement("payload", "cipher").build(),
-            StandardExtensionElement.builder("encrypted", "urn:xmpp:omemo:2")
-                .addElement("payload", "cipher").build(),
-            StandardExtensionElement.builder("x", "jabber:x:encrypted").setText("cipher").build(),
-        )
-        encrypted.forEach { payload ->
-            val carbon = requireNotNull(mapped(
-                CarbonExtension.Direction.received,
-                inner("peer@example.org/phone", "$own/device", body = null, extension = payload),
-            ))
-            assertEquals("Encrypted message", carbon.message.encryptedMessagePlaceholder())
+    fun `incumbent encrypted placeholder survives carbon mapping`() {
+        val payload = StandardExtensionElement.builder("x", "jabber:x:encrypted").setText("cipher").build()
+        val carbon = requireNotNull(mapped(CarbonExtension.Direction.received,
+            inner("peer@example.org/phone", "$own/device", body = null, extension = payload)))
+        val envelope = requireNotNull(carbon.message.toIncomingEnvelope(ProtectedFixtures.attempt, own,
+            carbonDirection = carbon.carbonDirection, protectedCarrier = carbon.protectedCarrier))
+        assertEquals("Encrypted message", envelope.body)
+        assertNull(envelope.protection)
+    }
+
+    private fun nativeCarbon(direction: String, content: String): Message {
+        val from = if (direction == "sent") "$own/laptop" else "peer@example.org/phone"
+        val to = if (direction == "sent") "peer@example.org/phone" else "$own/device"
+        return org.jivesoftware.smack.util.PacketParserUtils.parseStanza(
+            "<message xmlns='jabber:client' from='$own' to='$own/device'>" +
+                "<$direction xmlns='urn:xmpp:carbons:2'><forwarded xmlns='urn:xmpp:forward:0'>" +
+                "<message xmlns='jabber:client' type='chat' from='$from' to='$to' id='wire'>$content</message>" +
+                "</forwarded></$direction></message>")
+    }
+
+    @Test
+    fun `exact native protected carbons retain evidence and untouched fallback`() {
+        for (protocol in org.thanosapollo.nema.xmpp.omemo.OmemoProtocol.entries) {
+            for (direction in listOf("sent", "received")) for (fallback in listOf("", "untouched fallback")) {
+                val cases = listOf(
+                    ProtectedFixtures.encrypted(protocol) to "UNSUPPORTED_PAYLOAD",
+                    ProtectedFixtures.encrypted(protocol, null) to "UNSUPPORTED_HEADER_ONLY",
+                    "<encrypted xmlns='${protocol.namespace}'/>" to "REJECTED",
+                )
+                for ((content, state) in cases) {
+                    val body = if (fallback.isEmpty()) "" else "<body>$fallback</body>"
+                    val carbon = requireNotNull(nativeCarbon(direction, content + body)
+                        .classifyCarrier(own, "$own/device").toTrustedCarbonMessage(own))
+                    val envelope = requireNotNull(carbon.message.toIncomingEnvelope(ProtectedFixtures.attempt, own,
+                        carbonDirection = carbon.carbonDirection, protectedCarrier = carbon.protectedCarrier))
+                    val evidence = requireNotNull(envelope.protection)
+                    assertEquals(fallback, envelope.body)
+                    assertEquals(state, evidence.state.name)
+                    assertEquals(setOf(protocol), evidence.protocols)
+                    assertEquals(carbon.protectedCarrier, evidence.carriers.single())
+                    assertEquals(direction == "sent", envelope.outbound)
+                    if (state == "REJECTED") {
+                        assertNull(evidence.content)
+                        assertEquals(org.thanosapollo.nema.xmpp.omemo.ProtectedRejection.MALFORMED, evidence.rejection)
+                    } else {
+                        assertNull(evidence.rejection)
+                        assertEquals(ProtectedFixtures.envelope(protocol,
+                            if (state == "UNSUPPORTED_PAYLOAD") "AQID" else null).protection!!.content, evidence.content)
+                    }
+                }
+            }
         }
+    }
+
+    @Test
+    fun `unknown versions never gain carbon admission from an ordinary fallback`() {
+        for (namespace in listOf("urn:xmpp:omemo:1", "urn:xmpp:omemo:99")) {
+            for (direction in listOf("sent", "received")) for (body in listOf("", "<body>ordinary fallback</body>")) {
+                val content = "<encrypted xmlns='$namespace'><payload>AQID</payload></encrypted>"
+                assertNull(nativeCarbon(direction, content + body)
+                    .classifyCarrier(own, "$own/device").toTrustedCarbonMessage(own))
+                val direct = ProtectedFixtures.parse(content + body).toIncomingEnvelope(ProtectedFixtures.attempt, own)
+                if (body.isEmpty()) assertNull(direct) else {
+                    assertEquals("ordinary fallback", requireNotNull(direct).body)
+                    assertNull(direct.protection)
+                }
+            }
+        }
+        assertNotNull(nativeCarbon("received", "<body>ordinary fallback</body>")
+            .classifyCarrier(own, "$own/device").toTrustedCarbonMessage(own))
     }
 }

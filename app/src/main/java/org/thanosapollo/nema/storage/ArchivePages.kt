@@ -77,6 +77,7 @@ data class InsertedInbound(
     val inbound: Boolean,
     val groupChat: Boolean,
     val thread: org.thanosapollo.nema.thread.ThreadRef? = null,
+    val protectedState: String = "NONE",
 )
 
 data class ArchivePageResult(

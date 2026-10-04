@@ -44,18 +44,31 @@ private fun connection(route: TorSocketFactory) = OnionXmppConnection(
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class OnionXmppConnectionTest {
+    @Test fun repeatedPhysicalReconnectsRetainExactOnionProof() {
+        repeat(32) { actualSessionAuthenticatesAndExchangesMessageWithoutStartTlsThenReconnects() }
+    }
+
     @Test fun actualSessionAuthenticatesAndExchangesMessageWithoutStartTlsThenReconnects() = runBlocking {
         SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
         val credentials = CopyOnWriteArrayList<String>()
         val messages = CopyOnWriteArrayList<String>()
-        SocksFixture { socket, _ -> serveXmpp(socket, credentials, messages) }.use { proxy ->
-            val route = route(proxy)
-            val connection = connection(route)
+        SocksFixture { socket, _ ->
+            try { serveXmpp(socket, credentials, messages) } catch (failure: Exception) {
+                println("ONION_PEER_FAILURE ${failure.javaClass.name} ${failure.stackTrace.toList()}")
+                throw failure
+            }
+        }.use { proxy ->
+            lateinit var route: TorSocketFactory
+            lateinit var connection: OnionXmppConnection
             val echoed = java.util.concurrent.LinkedBlockingQueue<String>()
-            connection.addAsyncStanzaListener({ stanza ->
-                if ((stanza as Message).body == "fixture-message") echoed.add("fixture-message")
-            }, StanzaTypeFilter.MESSAGE)
-            val session = SmackSessionConnection(connection, "fixture", "fixture@$VALID_ONION", {}, torSockets = route)
+            val session = SmackSessionConnectionFactory { "fixture-only".toCharArray() }.createSession(account(), initialOwner, {}) { owner ->
+                route = TorSocketFactory(NetworkEndpoint.create(VALID_ONION, 5222), proxy.address, 2_000, owner, VALID_ONION)
+                connection = connection(route)
+                connection.addAsyncStanzaListener({ stanza ->
+                    if ((stanza as Message).body == "fixture-message") echoed.add("fixture-message")
+                }, StanzaTypeFilter.MESSAGE)
+                route to connection
+            }
             try {
                 session.connect("fixture-only".toCharArray(), attempt())
                 assertTrue(session.isUsable)
@@ -66,11 +79,17 @@ class OnionXmppConnectionTest {
                     "peer@$VALID_ONION", "fixture-message", null)) {}
                 assertEquals("fixture-message", echoed.poll(3, TimeUnit.SECONDS))
                 // Physical replacement, not a logical relabel of the existing route.
+                val oldNative = connection
+                val oldRoute = route
                 connection.disconnect()
                 assertFalse(route.hasOnionProof(attempt()))
                 session.updateAttempt(attempt(2))
                 assertFalse(session.isUsable)
                 session.reconnect(attempt(2))
+                assertNotSame(oldNative, connection)
+                assertNotSame(oldRoute, route)
+                assertFalse(oldRoute.hasOnionProof(attempt()))
+                assertFalse(oldRoute.hasOnionProof(attempt(2)))
                 assertTrue(session.isUsable)
                 assertFalse(route.hasOnionProof(attempt()))
                 assertTrue(route.hasOnionProof(attempt(2)))
@@ -85,6 +104,91 @@ class OnionXmppConnectionTest {
                 assertFalse(session.isUsable)
                 assertFalse(session.onionWithoutTls)
             } finally { session.revoke(); session.disconnect() }
+        }
+    }
+
+    @Test fun directTlsReplacementUsesFreshNativeOwnerAndFreshCredential() = runBlocking {
+        SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
+        val domain = "example.org"
+        val config = AccountConfiguration.create(fixtureAccount, "fixture@$domain", "fixture", null, domain, null)
+        val cert = HeldCertificate.Builder().addSubjectAlternativeName(domain).build()
+        val certificates = HandshakeCertificates.Builder().heldCertificate(cert).addTrustedCertificate(cert.certificate).build()
+        val credentials = CopyOnWriteArrayList<String>()
+        val messages = CopyOnWriteArrayList<String>()
+        val peers = CopyOnWriteArrayList<Socket>()
+        val native = CopyOnWriteArrayList<org.jivesoftware.smack.tcp.XMPPTCPConnection>()
+        val echoes = java.util.concurrent.LinkedBlockingQueue<String>()
+        val acquired = CopyOnWriteArrayList<CharArray>()
+        val server = java.net.ServerSocket(0, 16, localAddress)
+        val executor = Executors.newCachedThreadPool()
+        executor.submit {
+            while (!server.isClosed) {
+                val socket = try { server.accept() } catch (_: Exception) { break }
+                peers += socket
+                executor.submit {
+                    socket.use {
+                        try {
+                            socket.soTimeout = 3_000
+                            readThrough(socket, ">", "<stream:stream")
+                            send(socket, stream(domain) + "<stream:features><starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/></stream:features>")
+                            check(element(socket).contains("starttls"))
+                            send(socket, "<proceed xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
+                            (certificates.sslSocketFactory().createSocket(socket, domain, server.localPort, true) as SSLSocket).use { tls ->
+                                tls.useClientMode = false
+                                tls.startHandshake()
+                                serveXmpp(tls, credentials, messages, domain)
+                            }
+                        } catch (failure: Exception) {
+                            println("DIRECT_PEER_FAILURE ${failure.javaClass.name} ${failure.stackTrace.toList()}")
+                        }
+                    }
+                }
+            }
+        }
+        val session = SmackSessionConnectionFactory { owner ->
+            assertEquals(attempt(2), owner)
+            "fixture-only".toCharArray().also(acquired::add)
+        }.createSession(config, initialOwner, {}) {
+            val production = SmackSessionConnectionFactory.configurationFor(config)
+            val connection = org.jivesoftware.smack.tcp.XMPPTCPConnection(
+                org.jivesoftware.smack.tcp.XMPPTCPConnectionConfiguration.builder()
+                    .setXmppDomain(domain).setUsernameAndPassword("fixture", null)
+                    .setSecurityMode(production.securityMode).setHostnameVerifier(production.hostnameVerifier)
+                    .setHostAddress(localAddress).setPort(server.localPort)
+                    .setCustomX509TrustManager(certificates.trustManager).build()).apply { replyTimeout = 3_000 }
+            connection.addAsyncStanzaListener({ stanza ->
+                if ((stanza as Message).body == "fixture-message") echoes.add("echo")
+            }, StanzaTypeFilter.MESSAGE)
+            native += connection
+            null to connection
+        }
+        try {
+            session.connect("fixture-only".toCharArray(), attempt())
+            for (number in 1L..2L) {
+                if (number == 2L) session.reconnect(attempt(2))
+                val connection = native.last()
+                assertTrue(session.isUsable && connection.isSecureConnection)
+                assertFalse(session.onionWithoutTls)
+                for (flag in listOf("useSm", "useSmResumption")) {
+                    assertFalse(org.jivesoftware.smack.tcp.XMPPTCPConnection::class.java
+                        .getDeclaredField(flag).apply { isAccessible = true }.getBoolean(connection))
+                }
+                assertFalse(connection.isSmEnabled)
+                assertFalse(connection.isDisconnectedButSmResumptionPossible)
+                assertEquals(org.jivesoftware.smackx.receipts.DeliveryReceiptManager.AutoReceiptMode.disabled,
+                    org.jivesoftware.smackx.receipts.DeliveryReceiptManager.getInstanceFor(connection).autoReceiptMode)
+                session.send(OutgoingMessageEnvelope(fixtureAccount, attempt(number).generation, 1, "direct-$number", "origin-$number",
+                    "peer@$domain", "fixture-message", null)) {}
+                assertEquals("echo", echoes.poll(3, TimeUnit.SECONDS))
+            }
+            assertNotSame(native.first(), native.last())
+            assertFalse(native.first().isConnected)
+            assertEquals(2, credentials.size)
+            assertTrue(acquired.single().all { it == '\u0000' })
+        } finally {
+            session.revoke(); session.disconnect()
+            server.close(); peers.forEach { runCatching { it.close() } }
+            executor.shutdownNow(); assertTrue(executor.awaitTermination(4, TimeUnit.SECONDS))
         }
     }
 
@@ -322,14 +426,18 @@ class OnionXmppConnectionTest {
                 }
             }
             val config = AccountConfiguration.create(fixtureAccount, "fixture@$domain", "fixture", null, domain, null)
-            val route = TorSocketFactory(NetworkEndpoint.create(domain, 5222), InetSocketAddress(localAddress, proxyPort),
-                90_000, initialOwner, domain)
-            val connection = OnionXmppConnection(SmackSessionConnectionFactory.configurationFor(config, route), route).apply {
-                replyTimeout = 90_000; setUseStreamManagement(false); setUseStreamManagementResumption(false)
-            }
+            lateinit var route: TorSocketFactory
+            lateinit var connection: OnionXmppConnection
             val echoed = java.util.concurrent.LinkedBlockingQueue<String>()
-            connection.addAsyncStanzaListener({ stanza -> if ((stanza as Message).body == "fixture-message") echoed.add("fixture-message") }, StanzaTypeFilter.MESSAGE)
-            val session = SmackSessionConnection(connection, "fixture", "fixture@$domain", {}, torSockets = route)
+            val session = SmackSessionConnectionFactory { password.toCharArray() }.createSession(config, initialOwner, {}) { owner ->
+                route = TorSocketFactory(NetworkEndpoint.create(domain, 5222), InetSocketAddress(localAddress, proxyPort),
+                    90_000, owner, domain)
+                connection = OnionXmppConnection(SmackSessionConnectionFactory.configurationFor(config, route), route).apply {
+                    replyTimeout = 90_000; setUseStreamManagement(false); setUseStreamManagementResumption(false)
+                }
+                connection.addAsyncStanzaListener({ stanza -> if ((stanza as Message).body == "fixture-message") echoed.add("fixture-message") }, StanzaTypeFilter.MESSAGE)
+                route to connection
+            }
             try {
                 session.connect(password.toCharArray(), attempt())
                 assertTrue(session.isUsable && session.onionWithoutTls)
@@ -392,7 +500,7 @@ private fun element(socket: Socket): String {
     val name = opening.substringAfter('<').takeWhile { it != ' ' && it != '>' }
     return opening + readThrough(socket, "</$name>")
 }
-private fun serveXmpp(socket: Socket, credentials: MutableList<String>, messages: MutableList<String>,
+internal fun serveXmpp(socket: Socket, credentials: MutableList<String>, messages: MutableList<String>,
     domain: String = VALID_ONION, password: String = "fixture-only") {
     readThrough(socket, ">", "<stream:stream")
     send(socket, stream(domain) + "<stream:features>" + mechanisms() + "</stream:features>")

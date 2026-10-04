@@ -55,6 +55,107 @@ import org.jxmpp.jid.impl.JidCreate
 @Config(sdk = [34], application = Application::class)
 class SmackSessionConnectionTest {
     @Test
+    fun `independent receipt manager cannot acknowledge before durable application admission`() {
+        SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
+        val transport = RecordingXmppConnection()
+        val manager = org.jivesoftware.smackx.receipts.DeliveryReceiptManager.getInstanceFor(transport)
+        manager.setAutoReceiptMode(org.jivesoftware.smackx.receipts.DeliveryReceiptManager.AutoReceiptMode.always)
+        val request = ProtectedFixtures.parse("<request xmlns='urn:xmpp:receipts'/><body>ordinary</body>")
+        @Suppress("UNCHECKED_CAST")
+        val listeners = transport.privateField("asyncRecvListeners", AbstractXMPPConnection::class.java)
+            as Map<org.jivesoftware.smack.StanzaListener, *>
+        val receiptListeners = listeners.filterKeys { it.javaClass.name.startsWith(manager.javaClass.name) }
+        assertTrue(receiptListeners.isNotEmpty())
+        fun dispatch(message: Message) {
+            receiptListeners.forEach { (listener, wrapper) ->
+                val registration = requireNotNull(wrapper)
+                val filter = registration.javaClass.getDeclaredMethod("filterMatches", Stanza::class.java)
+                filter.isAccessible = true
+                if (filter.invoke(registration, message) == true) listener.processStanza(message)
+            }
+        }
+        // Exercise the manager's native registration and filter, independently of Nema.
+        dispatch(request)
+        assertEquals(listOf("message:chat"), transport.events.toList())
+        transport.events.clear()
+        val defaultField = manager.javaClass.getDeclaredField("defaultAutoReceiptMode").apply { isAccessible = true }
+        val defaultMode = defaultField.get(null)
+        val owned = session(transport)
+        for (content in listOf("<body>ordinary</body>",
+            ProtectedFixtures.encrypted(org.thanosapollo.nema.xmpp.omemo.OmemoProtocol.LEGACY),
+            "<encrypted xmlns='urn:xmpp:omemo:2'/>")) {
+            val message = ProtectedFixtures.parse(content + "<request xmlns='urn:xmpp:receipts'/>")
+            dispatch(message)
+        }
+        assertTrue(transport.events.isEmpty())
+        assertEquals(defaultMode, defaultField.get(null))
+        owned.revoke()
+    }
+
+    @Test
+    fun `native live and carbon listener dispatch persists inert content across reopen`() = runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Application>()
+        SmackAndroid.initialize(context)
+        installNemaCarbonProvider()
+        val name = "listener-protected-${java.util.UUID.randomUUID()}.db"
+        var db = org.thanosapollo.nema.storage.NemaDatabase.create(context, name)
+        db.accountDao().saveBound(org.thanosapollo.nema.storage.AccountEntity("account", ACCOUNT_BARE_JID,
+            "account", null, "example.org", null, null))
+        val effects = mutableListOf<SessionEvent>()
+        val transport = RecordingXmppConnection()
+        val owned = session(transport, event = { event ->
+            if (event is SessionEvent.Incoming) runBlocking {
+                org.thanosapollo.nema.chat.LiveMessageAdapter(org.thanosapollo.nema.storage.MessageStore(db)).ingest(event.message)
+            } else effects += event
+        })
+        val current = attempt(1)
+        owned.updateAttempt(current)
+        (owned.privateField("stableIdGate") as StableIdDiscoveryGate).complete(current, false)
+        val listener = owned.privateField("messageListener") as org.jivesoftware.smack.StanzaListener
+        try {
+            for (protocol in org.thanosapollo.nema.xmpp.omemo.OmemoProtocol.entries) for (outgoing in listOf(false, true)) {
+                val from = if (outgoing) ACCOUNT_BARE_JID else PEER
+                val to = if (outgoing) PEER else ACCOUNT_BARE_JID
+                val inner = "<message xmlns='jabber:client' type='chat' from='$from' to='$to' id='${protocol.name}-$outgoing'>" +
+                    ProtectedFixtures.encrypted(protocol) + "<active xmlns='http://jabber.org/protocol/chatstates'/>" +
+                    "<request xmlns='urn:xmpp:receipts'/><received xmlns='urn:xmpp:receipts' id='old'/></message>"
+                val direction = if (outgoing) "sent" else "received"
+                val carbon = "<message xmlns='jabber:client' from='$ACCOUNT_BARE_JID' to='$ACCOUNT_BARE_JID/test'>" +
+                    "<$direction xmlns='urn:xmpp:carbons:2'><forwarded xmlns='urn:xmpp:forward:0'>$inner</forwarded></$direction></message>"
+                for (wire in listOf(inner, carbon)) {
+                    listener.processStanza(org.jivesoftware.smack.util.PacketParserUtils.parseStanza<Message>(wire))
+                    db.close(); db = org.thanosapollo.nema.storage.NemaDatabase.create(context, name)
+                }
+            }
+            val rows = org.thanosapollo.nema.storage.MessageStore(db).messages("account")
+            assertEquals(4, rows.size)
+            assertTrue(rows.all { it.protectedState == "UNSUPPORTED_PAYLOAD" && it.body.isEmpty() })
+            assertTrue(effects.isEmpty())
+            assertTrue(transport.events.isEmpty())
+        } finally { owned.revoke(); db.close(); context.deleteDatabase(name) }
+    }
+
+    @Test
+    fun `native listener retains protected content without emitting sibling controls`() {
+        SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
+        val transport = RecordingXmppConnection()
+        val events = mutableListOf<SessionEvent>()
+        val owned = session(transport, events::add)
+        val current = attempt(1)
+        owned.updateAttempt(current)
+        (owned.privateField("stableIdGate") as StableIdDiscoveryGate).complete(current, false)
+        val listener = owned.privateField("messageListener") as org.jivesoftware.smack.StanzaListener
+        for (protocol in org.thanosapollo.nema.xmpp.omemo.OmemoProtocol.entries) {
+            listener.processStanza(ProtectedFixtures.parse(ProtectedFixtures.encrypted(protocol, null) +
+                "<received xmlns='urn:xmpp:receipts' id='wire'/><active xmlns='http://jabber.org/protocol/chatstates'/>"))
+        }
+        assertEquals(2, events.size)
+        assertTrue(events.all { it is SessionEvent.Incoming && it.message.protection != null })
+        assertTrue(transport.events.isEmpty())
+        owned.revoke()
+    }
+
+    @Test
     fun `oversize direct upload rejects before discovery slot or HTTP`() {
         SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
         val transport = RecordingXmppConnection()
@@ -378,8 +479,9 @@ class SmackSessionConnectionTest {
             ),
             SessionIdentity(accountId, ConnectionGeneration.require(1)),
         ) {}
-        val connection = session.privateField("connection") as XMPPTCPConnection
-        val messageListener = session.privateField("messageListener")
+        val physical = requireNotNull(session.privateField("current")).privateField("connection")!!
+        val connection = physical.privateField("connection") as XMPPTCPConnection
+        val messageListener = physical.privateField("messageListener")
         val blockingListeners = connection.privateField(
             "recvListeners",
             AbstractXMPPConnection::class.java,

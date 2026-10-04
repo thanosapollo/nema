@@ -58,6 +58,64 @@ class RoomArchiveRepairTest {
         dao.insertTrustedAlias(TrustedIdentityAliasEntity("a", kind, authority, uid, id, status))
     }
 
+    @Test fun protectedRoomRepairRollsBackEvidenceAndDependentsAtWriteFault() = runBlocking {
+        org.thanosapollo.nema.xmpp.smack.SmackAndroid.initialize(context)
+        org.thanosapollo.nema.xmpp.smack.installNemaOmemoProviders()
+        pair()
+        val evidence = org.thanosapollo.nema.xmpp.smack.ProtectedFixtures.envelope(
+            org.thanosapollo.nema.xmpp.omemo.OmemoProtocol.MODERN).protection!!
+        val encoded = org.thanosapollo.nema.xmpp.omemo.ProtectedContentCodec.encode(evidence)
+        for (id in listOf("live", "mam")) dao.updateProtectedContent("a", id, evidence.state.name, encoded)
+        val before = dao.messages("a")
+        val aliases = dao.trustedAliases("a")
+        val positions = dao.archivePositions("a")
+        val failing = MessageStore.observingWrites(db) {
+            if (it == MessageWriteBoundary.AFTER_PROTECTED_CONTENT) error("synthetic protected write fault")
+        }
+        assertTrue(runCatching { failing.repairRoomArchiveDuplicates("a", room) { true } }.isFailure)
+        db.close(); db = NemaDatabase.create(context, name)
+        assertEquals(before, dao.messages("a"))
+        assertEquals(aliases, dao.trustedAliases("a"))
+        assertEquals(positions, dao.archivePositions("a"))
+        assertEquals(1L, store.repairRoomArchiveDuplicates("a", room) { true }!!.matchedCount)
+        assertEquals(encoded, dao.messages("a").single().protectedEvidence)
+    }
+
+    @Test fun protectedRepairRefusesUnknownOrDifferentEvidenceBeforeAnyDependentMutation() = runBlocking {
+        org.thanosapollo.nema.xmpp.smack.SmackAndroid.initialize(context)
+        org.thanosapollo.nema.xmpp.smack.installNemaOmemoProviders()
+        val evidence = org.thanosapollo.nema.xmpp.smack.ProtectedFixtures.envelope(
+            org.thanosapollo.nema.xmpp.omemo.OmemoProtocol.LEGACY).protection!!
+        val encoded = org.thanosapollo.nema.xmpp.omemo.ProtectedContentCodec.encode(evidence)
+        for (mode in listOf("same", "different", "unknown", "ordinary")) {
+            val r = "$mode@conference.example.org"
+            pair(mode, r)
+            dao.updateProtectedContent("a", mode + "live", evidence.state.name, encoded)
+            if (mode != "ordinary") {
+                val other = when (mode) {
+                    "unknown" -> "{\"version\":99}"
+                    "different" -> org.thanosapollo.nema.xmpp.omemo.ProtectedContentCodec.encode(
+                        evidence.copy(content = evidence.content!!.copy(payload = "BAUG")))
+                    else -> encoded
+                }
+                dao.updateProtectedContent("a", mode + "mam", evidence.state.name, other)
+            }
+            val before = dao.messages("a")
+            val aliases = dao.trustedAliases("a")
+            val positions = dao.archivePositions("a")
+            val result = requireNotNull(store.repairRoomArchiveDuplicates("a", r) { true })
+            if (mode == "same") {
+                assertEquals(1L, result.matchedCount)
+                assertEquals(encoded, dao.message("a", mode + "live")!!.protectedEvidence)
+            } else {
+                assertEquals(ReconciliationRepairStatus.PENDING, result.status)
+                assertEquals(before, dao.messages("a"))
+                assertEquals(aliases, dao.trustedAliases("a"))
+                assertEquals(positions, dao.archivePositions("a"))
+            }
+        }
+    }
+
     @Test fun historicalPairAndIndependentRoomReceiptSurviveReopenAndRaces() = runBlocking {
         pair()
         pair("b", "unavailable@conference.example.org")

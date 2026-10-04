@@ -4,13 +4,13 @@ import java.util.Base64
 import org.jxmpp.jid.impl.JidCreate
 import org.thanosapollo.nema.xmpp.XmppElement
 
-internal enum class OmemoProtocol(val namespace: String) {
+enum class OmemoProtocol(val namespace: String) {
     LEGACY("eu.siacs.conversations.axolotl"),
     MODERN("urn:xmpp:omemo:2"),
 }
 
 /** Unauthenticated wire evidence, never a trust decision or a decrypted message. */
-internal data class OmemoContent(
+data class OmemoContent(
     val protocol: OmemoProtocol,
     val senderDevice: Long,
     val keys: List<OmemoRecipientKey>,
@@ -20,7 +20,7 @@ internal data class OmemoContent(
     val formatVersion: Int get() = 1
 }
 
-internal data class OmemoRecipientKey(
+data class OmemoRecipientKey(
     val recipientBareJid: String?,
     val device: Long,
     val keyExchange: Boolean,
@@ -35,7 +35,7 @@ internal sealed interface OmemoInspection {
 
 /**
  * Semantic codec only. Callers must validate the carrier before using its result.
- * Not installed in ingress until ciphertext and client-owned status can be persisted.
+ * Exact presence and carrier admission belong to the native ingress boundary.
  */
 internal object OmemoContentCodec {
     private const val MAX_CHARACTERS = 1_048_576

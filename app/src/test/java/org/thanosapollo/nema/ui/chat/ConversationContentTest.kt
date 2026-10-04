@@ -126,9 +126,41 @@ private val hasNoRole = SemanticsMatcher.keyNotDefined(SemanticsProperties.Role)
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
+@org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
 class ConversationContentTest {
     @get:Rule
     val composeRule = createRobolectricComposeRule()
+
+    @Test
+    fun protectedTimelineNeverInvokesCachedOrUncachedAttachmentOrContentActions() {
+        var effects = 0
+        val protected = message("protected", outgoing = false).copy(
+            body = "https://example.org/unauthenticated",
+            protectedState = "UNSUPPORTED_PAYLOAD",
+            attachmentUrl = "https://example.org/ciphertext", attachmentMime = "image/png",
+            replyReferenceId = "wire", markable = true, markerTargetId = "wire",
+        )
+        composeRule.setContent {
+            MaterialTheme {
+                MessageTimeline(messages = listOf(protected), readReceiptsEnabled = true, activityResumed = true,
+                    isAttachmentCached = { effects++; true },
+                    onUseAttachment = { _, _, _ -> effects++; true },
+                    onLoadInlineImage = { effects++; null },
+                    onMessageDisplayed = { effects++; true },
+                    onReply = { effects++ }, onQuote = { effects++ }, onEdit = { effects++ },
+                    onReact = { _, _ -> effects++; true })
+            }
+        }
+        composeRule.onNodeWithText("Protected message is not supported").assertIsDisplayed()
+        composeRule.onNodeWithText("Unauthenticated fallback").assertIsDisplayed()
+        composeRule.onNodeWithText(protected.body).assertHasNoClickAction()
+        composeRule.onNodeWithTag("message-bubble-protected").assertDoesNotExist()
+        composeRule.runOnIdle {
+            assertEquals(0, effects)
+            assertFalse(canReact(ConversationVenue.Direct, protected))
+            assertNull(protected.correctionTargetOrNull(ConversationVenue.Direct))
+        }
+    }
 
     @Test
     fun presenterLoadingAndFailureHideOldActionsAndPreserveHomeAndDrafts() {

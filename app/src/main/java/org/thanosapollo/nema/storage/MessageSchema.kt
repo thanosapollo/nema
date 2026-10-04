@@ -5,6 +5,13 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 internal object MessageSchema {
+    val MIGRATION_30_31 = object : Migration(30, 31) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            db.execSQL("ALTER TABLE messages ADD COLUMN protectedState TEXT NOT NULL DEFAULT 'NONE'")
+            db.execSQL("ALTER TABLE messages ADD COLUMN protectedEvidence TEXT")
+        }
+    }
+
     val MIGRATION_27_28: Migration = object : Migration(27, 28) {
         override fun migrate(db: SupportSQLiteDatabase) {
             db.execSQL("""CREATE TABLE archive_record_positions (

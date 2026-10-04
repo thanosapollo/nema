@@ -124,6 +124,7 @@ private fun connectedComponent(
 
 private fun IdentitylessReconciliationCandidate.node(): ReconciliationNode? {
     val message = message
+    if (message.isProtected()) return null
     if (message.direction != MessageDirection.INBOUND || hasOutbox || hasConflict) return null
     val liveTime = message.reconciliationObservedAtMs
     val node = when {

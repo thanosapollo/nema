@@ -1,5 +1,7 @@
 package org.thanosapollo.nema
 
+import org.thanosapollo.nema.storage.ordinaryHistoricalColumns
+
 import android.database.sqlite.SQLiteDatabase
 import android.os.Bundle
 import android.os.Looper
@@ -50,12 +52,12 @@ class AlphaDatabaseHotJournalTest {
     @Test fun canonical29HotJournalRecoversBeforeBridgeAndPreservesCommittedRows() = compatible()
 
     @Test @Config(application = CurrentHotJournalApplication::class)
-    fun current30HotJournalRecoversBeforeClassificationAndPreservesCommittedRows() = compatible()
+    fun current31HotJournalRecoversBeforeClassificationAndPreservesCommittedRows() = compatible()
 
     private fun compatible() {
         assertTrue("fixture required native rollback before startup", app.readOnlyRecoveryFailed)
         assertEquals(DatabaseStartup.READY, app.databaseStartup.value)
-        assertEquals(30, app.database.openHelper.writableDatabase.version)
+        assertEquals(31, app.database.openHelper.writableDatabase.version)
         assertEquals(app.committedRows, journalRows(app))
         assertTrue(app.deletedNames.isEmpty())
         runBlocking { app.retryDatabaseStartup().join() }
@@ -95,7 +97,7 @@ class AlphaDatabaseHotJournalTest {
     }
 }
 
-class CurrentHotJournalApplication : HotJournalApplication() { override val version = 30 }
+class CurrentHotJournalApplication : HotJournalApplication() { override val version = 31 }
 class HistoricalHotJournalApplication : HotJournalApplication() { override val avatar = true }
 
 open class HotJournalApplication : NemaApplication() {
@@ -156,7 +158,7 @@ private fun journalRows(context: android.content.Context): Map<String, List<List
             buildList { while (c.moveToNext()) add(c.getString(0)) }
         }
         tables.associateWith { table -> db.rawQuery("SELECT * FROM `$table` ORDER BY rowid", null).use { c ->
-            buildList { while (c.moveToNext()) add((0 until c.columnCount).map { column ->
+            buildList { while (c.moveToNext()) add(c.ordinaryHistoricalColumns().map { column ->
                 if (c.getType(column) == android.database.Cursor.FIELD_TYPE_BLOB) c.getBlob(column).joinToString("") { "%02x".format(it) } else c.getString(column)
             }) }
         } }

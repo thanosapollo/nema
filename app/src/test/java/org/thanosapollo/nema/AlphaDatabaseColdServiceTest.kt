@@ -223,7 +223,7 @@ open class ColdServiceApplication : NemaApplication() {
         SQLiteDatabase.openDatabase(getDatabasePath("nema.db").path, null, SQLiteDatabase.OPEN_READWRITE).use {
             it.execSQL("INSERT INTO accounts (id,bareJid,authenticationId,serviceDomain) VALUES ('b','b@example.org','b','example.org')")
             it.execSQL("INSERT INTO active_account (singletonId,accountId) VALUES (1,'a')")
-            if (mode == "newer") it.version = 31
+            if (mode == "newer") it.version = 32
         }
         if (mode == "failed") getDatabasePath("nema.db").writeText("not sqlite")
         holdOpen = true

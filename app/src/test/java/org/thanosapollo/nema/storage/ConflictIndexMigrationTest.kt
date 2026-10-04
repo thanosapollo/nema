@@ -51,15 +51,19 @@ class ConflictIndexMigrationTest {
                 val db = NemaDatabase.create(context, name)
                 try {
                     val sql = db.openHelper.writableDatabase
-                    assertEquals(30, sql.version)
+                    assertEquals(31, sql.version)
                     assertEquals(before, snapshot(sql))
                     assertEquals(listOf("root"), db.messageDao().mucConflictedEvents("a", listOf("root")))
                     sql.query("PRAGMA foreign_key_check").use { assertFalse(it.moveToFirst()) }
                     sql.query("PRAGMA integrity_check").use { assertTrue(it.moveToFirst()); assertEquals("ok", it.getString(0)) }
                 } finally { db.close() }
             }
-            migrations.runMigrationsAndValidate(name, 30, true, MessageSchema.MIGRATION_26_27, MessageSchema.MIGRATION_27_28).close()
-        } finally { context.deleteDatabase(name) }
+            migrations.createDatabase("$name-history", 26).close()
+            migrations.runMigrationsAndValidate("$name-history", 30, true, MessageSchema.MIGRATION_26_27, MessageSchema.MIGRATION_27_28).close()
+        } finally {
+            context.deleteDatabase(name)
+            context.deleteDatabase("$name-history")
+        }
     }
 
     private fun snapshot(sql: SupportSQLiteDatabase): Map<String, List<List<String?>>> {
@@ -68,7 +72,7 @@ class ConflictIndexMigrationTest {
         }
         return tables.associateWith { table ->
             sql.query("SELECT * FROM `$table` ORDER BY rowid").use { c ->
-                buildList { while (c.moveToNext()) add((0 until c.columnCount).map { if (c.isNull(it)) null else c.getString(it) }) }
+                buildList { while (c.moveToNext()) add(c.ordinaryHistoricalColumns().map { if (c.isNull(it)) null else c.getString(it) }) }
             }
         }
     }

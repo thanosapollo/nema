@@ -54,7 +54,7 @@ internal fun inspectAlphaDatabase(context: Context): DatabaseCompatibility {
             check(it.moveToFirst() && it.getString(0) == "ok") { "Database integrity check failed" }
         }
         val version = db.version
-        if (version > 30) return@use DatabaseCompatibility.NEWER
+        if (version > 31) return@use DatabaseCompatibility.NEWER
         val identity = db.rawQuery("SELECT identity_hash FROM room_master_table WHERE id = 42", null).use {
             check(it.moveToFirst()) { "Missing database identity" }
             it.getString(0).also { hash -> check(!hash.isNullOrBlank()) { "Missing database identity" } }
@@ -64,6 +64,7 @@ internal fun inspectAlphaDatabase(context: Context): DatabaseCompatibility {
             // version/identity pairs may authorize the explicit alpha reset.
             olderAlphaIdentities[version] == identity -> DatabaseCompatibility.INCOMPATIBLE
             version in 29..30 && identity == "5e8e901ae2a87582117fb5276a3c5e9b" -> DatabaseCompatibility.COMPATIBLE
+            version == 31 && identity == "09191c6875860ed97bff22694b097a4d" -> DatabaseCompatibility.COMPATIBLE
             // Only the known shipped collision proves incompatibility; an arbitrary changed
             // identity could be damaged metadata and must not authorize destructive recovery.
             version == 29 && identity == "d842cda2ce9467413942ebca6bfc3576" -> DatabaseCompatibility.INCOMPATIBLE

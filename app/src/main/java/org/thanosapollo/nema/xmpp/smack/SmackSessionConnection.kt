@@ -63,6 +63,9 @@ import org.jivesoftware.smackx.pubsub.PayloadItem
 import org.jivesoftware.smackx.pubsub.PubSubManager
 import org.jivesoftware.smackx.pubsub.SimplePayload
 import org.jivesoftware.smackx.receipts.DeliveryReceipt
+import org.jivesoftware.smackx.receipts.DeliveryReceiptManager
+import org.thanosapollo.nema.xmpp.omemo.ProtectedCarrier
+import org.thanosapollo.nema.xmpp.omemo.ProtectedCarrierKind
 import org.jivesoftware.smackx.receipts.DeliveryReceiptRequest
 import org.jivesoftware.smackx.sid.StableUniqueStanzaIdManager
 import org.jivesoftware.smackx.sid.element.OriginIdElement
@@ -154,7 +157,10 @@ import org.thanosapollo.nema.xmpp.transport.SessionCapabilities
 import org.thanosapollo.nema.xmpp.transport.StanzaIdEnvelope
 import org.thanosapollo.nema.xmpp.vcard.RemoteVCardPayload
 
-class SmackSessionConnectionFactory : SessionConnectionFactory {
+class SmackSessionConnectionFactory(
+    // The loader transfers one transient buffer; the invocation wipes it on every exit.
+    private val credentialLoader: suspend (SessionAttemptIdentity) -> CharArray? = { null },
+) : SessionConnectionFactory {
     override fun create(
         configuration: AccountConfiguration,
         identity: SessionIdentity,
@@ -170,25 +176,49 @@ class SmackSessionConnectionFactory : SessionConnectionFactory {
         installNemaReactionProviders()
         installNemaRttProviders()
         require(identity.accountId == configuration.id) { "Session account does not match configuration" }
-        val policy = AccountTransportPolicy.forAccount(configuration)
-        val torSockets = torSocketsFor(configuration, identity)
-        val smackConfiguration = configurationFor(configuration, torSockets)
-        val connection = (if (torSockets?.onionEligible == true) OnionXmppConnection(smackConfiguration, torSockets)
-            else XMPPTCPConnection(smackConfiguration)).apply {
-            setUseStreamManagement(false)
-            setUseStreamManagementResumption(false)
-            setParsingExceptionCallback(NemaParsingExceptionCallback)
+        return createSession(configuration, identity, event) { owner ->
+            val sockets = torSocketsFor(configuration, owner)
+            val config = configurationFor(configuration, sockets)
+            sockets to if (sockets?.onionEligible == true) OnionXmppConnection(config, sockets)
+                else XMPPTCPConnection(config)
         }
-        advertiseNemaFeatures(connection)
-        ReconnectionManager.getInstanceFor(connection).disableAutomaticReconnection()
-        return SmackSessionConnection(
-            connection = connection,
-            authenticationId = configuration.authenticationId.value,
-            expectedBareJid = configuration.bareJid.value,
-            torSockets = torSockets,
-            httpTransfer = AccountHttpTransfer(policy),
-            event = event,
-        )
+    }
+
+    internal fun createSession(
+        configuration: AccountConfiguration,
+        identity: SessionIdentity,
+        event: (SessionEvent) -> Unit,
+        httpTransfer: () -> AccountHttpTransfer = { AccountHttpTransfer(AccountTransportPolicy.forAccount(configuration)) },
+        transport: (SessionIdentity) -> Pair<TorSocketFactory?, XMPPTCPConnection>,
+    ): SessionConnection {
+        require(identity.accountId == configuration.id)
+        return ReconnectingSmackSession(identity, event, credentialLoader) { owner, emit ->
+            val (torSockets, connection) = transport(owner)
+            var transfer: AccountHttpTransfer? = null
+            try {
+                connection.apply {
+                    setUseStreamManagement(false)
+                    setUseStreamManagementResumption(false)
+                    setParsingExceptionCallback(NemaParsingExceptionCallback)
+                }
+                advertiseNemaFeatures(connection)
+                ReconnectionManager.getInstanceFor(connection).disableAutomaticReconnection()
+                transfer = httpTransfer()
+                SmackSessionConnection(
+                    connection = connection,
+                    authenticationId = configuration.authenticationId.value,
+                    expectedBareJid = configuration.bareJid.value,
+                    torSockets = torSockets,
+                    httpTransfer = transfer,
+                    event = emit,
+                )
+            } catch (failure: Throwable) {
+                torSockets?.close()
+                transfer?.close()
+                if (connection.isConnected) runCatching { connection.instantShutdown() }
+                throw failure
+            }
+        }
     }
 
     companion object {
@@ -306,6 +336,7 @@ internal class SmackSessionConnection(
     private val rosterLifecycle = RosterConnectionLifecycle(entryGate)
     private val revoked = AtomicBoolean(false)
     private val disconnectStarted = AtomicBoolean(false)
+    private val dialStarted = AtomicBoolean(false)
     private val stableIdGate = StableIdDiscoveryGate()
     private val roomStableIdAuthorities = RoomStableIdAuthorityRegistry()
     private val roomViewHandoff = RoomViewHandoff<UserStatusListener, PresenceListener, SubjectUpdatedListener, SessionEvent.RoomUpdated>(
@@ -334,39 +365,43 @@ internal class SmackSessionConnection(
         val roomFacts = copyRoomConsumerFacts(
             entryGate, roomStableIdAuthorities, attempt, room,
         )
-        val carbonEffect = carrier.bodylessCarbonEffect()
-        if (carrier is MessageCarrier.Direct || carbonEffect == BodylessCarbonEffect.SIGNAL) {
-            message.message.toIncomingSignal(attempt, expectedBareJid)?.let {
-                event(SessionEvent.Signal(attempt, it))
-                return@StanzaListener
+        if (!message.message.hasProtectedContent()) {
+            val carbonEffect = carrier.bodylessCarbonEffect()
+            if (carrier is MessageCarrier.Direct || carbonEffect == BodylessCarbonEffect.SIGNAL) {
+                message.message.toIncomingSignal(attempt, expectedBareJid)?.let {
+                    event(SessionEvent.Signal(attempt, it))
+                    return@StanzaListener
+                }
             }
-        }
-        if (carrier is MessageCarrier.Direct || carbonEffect == BodylessCarbonEffect.CHAT_STATE) {
-            carrier.toIncomingChatState(attempt, expectedBareJid, roomFacts?.ownNick)?.let {
-                event(SessionEvent.ChatState(attempt, it))
+            if (carrier is MessageCarrier.Direct || carbonEffect == BodylessCarbonEffect.CHAT_STATE) {
+                carrier.toIncomingChatState(attempt, expectedBareJid, roomFacts?.ownNick)?.let {
+                    event(SessionEvent.ChatState(attempt, it))
+                }
             }
-        }
-        if ((carrier is MessageCarrier.Direct || carbonEffect == BodylessCarbonEffect.RTT) &&
-            wrapper.getExtension(MamResultExtension::class.java) == null
-        ) {
-            message.message.toIncomingRtt(attempt, expectedBareJid)?.let {
-                event(SessionEvent.RealTimeText(attempt, it))
+            if ((carrier is MessageCarrier.Direct || carbonEffect == BodylessCarbonEffect.RTT) &&
+                wrapper.getExtension(MamResultExtension::class.java) == null
+            ) {
+                message.message.toIncomingRtt(attempt, expectedBareJid)?.let {
+                    event(SessionEvent.RealTimeText(attempt, it))
+                }
             }
-        }
-        if (carrier is MessageCarrier.Direct || carbonEffect == BodylessCarbonEffect.REACTION) {
-            message.message.toIncomingReaction(
-                attempt, expectedBareJid, roomFacts = roomFacts,
-                liveCarrier = message.isRawLive(
-                    wrapper.getExtension(MamResultExtension::class.java) != null,
-                ),
-            )?.let {
-                event(SessionEvent.Reaction(attempt, it))
-                if (message.message.body.isNullOrEmpty()) return@StanzaListener
+            if (carrier is MessageCarrier.Direct || carbonEffect == BodylessCarbonEffect.REACTION) {
+                message.message.toIncomingReaction(
+                    attempt, expectedBareJid, roomFacts = roomFacts,
+                    liveCarrier = message.isRawLive(
+                        wrapper.getExtension(MamResultExtension::class.java) != null,
+                    ),
+                )?.let {
+                    event(SessionEvent.Reaction(attempt, it))
+                    if (message.message.body.isNullOrEmpty()) return@StanzaListener
+                }
             }
         }
         stableIdGate.accept(attempt, message).forEach(::deliver)
     }
     init {
+        installNemaOmemoProviders()
+        DeliveryReceiptManager.getInstanceFor(connection).setAutoReceiptMode(DeliveryReceiptManager.AutoReceiptMode.disabled)
         connection.addStanzaListener(messageListener, StanzaTypeFilter.MESSAGE)
     }
 
@@ -399,9 +434,8 @@ internal class SmackSessionConnection(
         establish(attempt, credential)
     }
 
-    override suspend fun reconnect(attempt: SessionAttemptIdentity) {
-        establish(attempt, null)
-    }
+    override suspend fun reconnect(attempt: SessionAttemptIdentity): Unit =
+        error("A physical Smack connection cannot be reused")
 
     override fun updateAttempt(attempt: SessionAttemptIdentity) {
         torSockets?.invalidateAttempt()
@@ -1068,7 +1102,7 @@ internal class SmackSessionConnection(
         connection.removeConnectionListener(connectionListener)
         connection.removeStanzaListener(messageListener)
         ReconnectionManager.getInstanceFor(connection).disableAutomaticReconnection()
-        runCatching { synchronized(connection) { connection.disconnect() } }
+        if (connection.isConnected) runCatching { synchronized(connection) { connection.disconnect() } }
         Unit
     }
 
@@ -1122,6 +1156,7 @@ internal class SmackSessionConnection(
             decision.sentTimeSource,
             decision.receivedAtEpochMs,
             decision.carbonDirection,
+            decision.protectedCarrier,
         )?.let { envelope ->
             val admitted = decision.retainLiveMucFacts(envelope, roomFacts,
                 connectionListener.currentAttempt(), "$mucOrderInstance:${decision.attempt}")
@@ -1131,8 +1166,9 @@ internal class SmackSessionConnection(
 
     private suspend fun establish(
         attempt: SessionAttemptIdentity,
-        credential: CharArray?,
+        credential: CharArray,
     ) = runInterruptible(Dispatchers.IO) {
+        check(dialStarted.compareAndSet(false, true)) { "A physical Smack connection cannot be reused" }
         connectionListener.attemptStarting(attempt)
         try {
             if (shouldResetSmackTransport(
@@ -1161,11 +1197,7 @@ internal class SmackSessionConnection(
                 if (connection is OnionXmppConnection && !connection.permitsTransport(attempt)) {
                     throw SessionFailure(SessionFailureReason.TLS_CERTIFICATE)
                 }
-                if (credential == null) {
-                    connection.login()
-                } else {
-                    connection.login(authenticationId, credential.concatToString(), null)
-                }
+                connection.login(authenticationId, credential.concatToString(), null)
             }
             if (connection.user?.asBareJid()?.toString() != expectedBareJid) {
                 connectionListener.localDisconnect()
@@ -1437,6 +1469,7 @@ internal fun Message.toIncomingSignal(
     attempt: SessionAttemptIdentity,
     expectedBareJid: String,
 ): IncomingMessageSignal? {
+    if (hasProtectedContent()) return null
     if (type != Message.Type.chat || body != null) return null
     val sender = from?.asBareJid()?.takeIf { it.isEntityBareJid }?.toString() ?: return null
     val recipient = to?.asBareJid()?.takeIf { it.isEntityBareJid }?.toString() ?: return null
@@ -1488,6 +1521,7 @@ internal fun Message.toIncomingChatState(
     ownRoomNick: String? = null,
     ownSenderPeer: String? = null,
 ): IncomingChatState? {
+    if (hasProtectedContent()) return null
     if (type != Message.Type.chat && type != Message.Type.groupchat && type != Message.Type.normal) return null
     val fromJid = from ?: return null
     val activities = extensions.mapNotNull { extension ->
@@ -1549,9 +1583,6 @@ internal fun Message.encryptedMessagePlaceholder(): String? {
         val element = extension as? StandardExtensionElement ?: return@any false
         val namespace = element.namespace.orEmpty()
         when {
-            element.elementName == "encrypted" &&
-                (namespace == "eu.siacs.conversations.axolotl" || namespace.startsWith("urn:xmpp:omemo:")) ->
-                !element.getFirstElement("payload", namespace)?.text.isNullOrEmpty()
             element.elementName == "x" && namespace == "jabber:x:encrypted" ->
                 !element.text.isNullOrEmpty()
             else -> false
@@ -1564,6 +1595,7 @@ internal fun Message.toIncomingRtt(
     attempt: SessionAttemptIdentity,
     expectedBareJid: String,
 ): IncomingRealTimeText? {
+    if (hasProtectedContent()) return null
     if (type != Message.Type.chat && type != Message.Type.normal) return null
     val parsed = parseRtt()
     val hasBody = !body.isNullOrEmpty()
@@ -1585,6 +1617,7 @@ internal fun Message.toIncomingReaction(
     liveCarrier: Boolean = true,
     roomFacts: RoomConsumerFacts? = null,
 ): IncomingReactionEnvelope? {
+    if (hasProtectedContent()) return null
     val parsed = parseReactions() ?: return null
     if (type == Message.Type.groupchat) {
         if (!liveCarrier || DelayInformation.from(this) != null) return null
@@ -1651,6 +1684,7 @@ internal fun Message.toIncomingEnvelope(
     suppliedSentTimeSource: MessageTimeSource? = null,
     receivedAtEpochMs: Long = System.currentTimeMillis(),
     carbonDirection: CarbonCarrier.Direction? = null,
+    protectedCarrier: ProtectedCarrier? = null,
 ): IncomingMessageEnvelope? {
     val topLevelDelay = DelayInformation.from(this)?.stamp?.time
     val sentAtEpochMs = (suppliedSentAtEpochMs ?: topLevelDelay)?.coerceAtMost(receivedAtEpochMs)
@@ -1661,13 +1695,14 @@ internal fun Message.toIncomingEnvelope(
     val groupChat = type == Message.Type.groupchat
     if (!groupChat && type != Message.Type.chat && type != Message.Type.normal) return null
     val fromJid = from ?: return null
-    val receiptRequested = carbonDirection == null && type == Message.Type.chat &&
+    val protection = protectedContent(protectedCarrier ?: ProtectedCarrier(ProtectedCarrierKind.LIVE, from?.toString(), to?.toString()))
+    val receiptRequested = protection == null && carbonDirection == null && type == Message.Type.chat &&
         extensions.count { it is DeliveryReceiptRequest } == 1
-    val markable = type == Message.Type.chat && extensions.count {
+    val markable = protection == null && type == Message.Type.chat && extensions.count {
         it.elementName == org.thanosapollo.nema.xmpp.markers.MARKABLE_ELEMENT &&
             it.namespace == CHAT_MARKERS_NAMESPACE && it is StandardExtensionElement
     } == 1
-    val replaceId = if (type == Message.Type.chat) {
+    val replaceId = if (protection == null && type == Message.Type.chat) {
         extensions.filter {
             it.elementName == MessageCorrectExtension.ELEMENT &&
                 it.namespace == MessageCorrectExtension.NAMESPACE
@@ -1679,10 +1714,10 @@ internal fun Message.toIncomingEnvelope(
     } else {
         null
     }
-    val share = oobShare()
-    val reply = replyReference()
+    val share = if (protection == null) oobShare() else null
+    val reply = if (protection == null) replyReference() else null
     val parsed = if (reply == null) null else parseReplyBody()
-    val messageBody = if (parsed == null) {
+    val messageBody = if (protection != null) body.orEmpty() else if (parsed == null) {
         body?.takeIf(String::isNotEmpty) ?: share?.url ?: encryptedMessagePlaceholder()
     } else {
         parsed.body.takeIf(String::isNotEmpty) ?: share?.url ?: encryptedMessagePlaceholder()
@@ -1703,6 +1738,7 @@ internal fun Message.toIncomingEnvelope(
                 (sentTimeSource == MessageTimeSource.MAM && mucActorBareJid() == expectedBareJid),
             originId = structurallyValidOriginId(),
             body = messageBody,
+            protection = protection,
             thread = toThreadRef(),
             stanzaIds = trustedStanzaIds(trustedStableIdAuthority.takeIf { it == room }),
             kind = MessageKind.GROUPCHAT,
@@ -1729,6 +1765,7 @@ internal fun Message.toIncomingEnvelope(
             originId = structurallyValidOriginId(),
             messageId = stanzaId,
             body = messageBody,
+            protection = protection,
             thread = toThreadRef(),
             stanzaIds = trustedStanzaIds(trustedStableIdAuthority.takeIf { it == expectedBareJid }),
             kind = MessageKind.CHAT,
@@ -1812,6 +1849,7 @@ internal data class TrustedIncomingStanza(
     val receivedAtEpochMs: Long = System.currentTimeMillis(),
     val forwarded: Boolean = false,
     val carbonDirection: CarbonCarrier.Direction? = null,
+    val protectedCarrier: ProtectedCarrier? = null,
 )
 
 internal fun TrustedIncomingStanza.isRawLive(mamCarrier: Boolean): Boolean =
@@ -1827,6 +1865,8 @@ internal sealed interface MessageCarrier {
         val direction: CarbonCarrier.Direction,
         val message: Message,
         val delay: DelayInformation?,
+        val outerFrom: String? = null,
+        val outerTo: String? = null,
     ) : MessageCarrier
     data object Inert : MessageCarrier
 }
@@ -1835,7 +1875,7 @@ internal enum class BodylessCarbonEffect { SIGNAL, CHAT_STATE, RTT, REACTION }
 
 internal fun MessageCarrier.bodylessCarbonEffect(): BodylessCarbonEffect? {
     val carbon = this as? MessageCarrier.Carbon ?: return null
-    if (!carbon.message.body.isNullOrEmpty()) return null
+    if (carbon.message.hasProtectedContent() || !carbon.message.body.isNullOrEmpty()) return null
     return carbon.message.extensions.mapNotNull { extension ->
         when (extension.namespace) {
             CHAT_STATES_NAMESPACE -> BodylessCarbonEffect.CHAT_STATE.takeIf {
@@ -1870,7 +1910,7 @@ internal fun Message.classifyCarrier(expectedBareJid: String, boundFullJid: Stri
     if (carbon.elementName != direction.name.lowercase()) return MessageCarrier.Inert
     if (direction == CarbonCarrier.Direction.RECEIVED && to?.toString() != boundFullJid) return MessageCarrier.Inert
     val inner = carbon.forwarded.forwardedStanza as? Message ?: return MessageCarrier.Inert
-    return MessageCarrier.Carbon(direction, inner, carbon.forwarded.delayInformation)
+    return MessageCarrier.Carbon(direction, inner, carbon.forwarded.delayInformation, from?.toString(), to?.toString())
 }
 
 internal fun MessageCarrier.toTrustedCarbonMessage(
@@ -1907,6 +1947,9 @@ internal fun MessageCarrier.toTrustedCarbonMessage(
         receivedAtEpochMs = receivedAtEpochMs,
         forwarded = true,
         carbonDirection = direction,
+        protectedCarrier = ProtectedCarrier(
+            if (direction == CarbonCarrier.Direction.SENT) ProtectedCarrierKind.SENT_CARBON else ProtectedCarrierKind.RECEIVED_CARBON,
+            forwarded.from?.toString(), forwarded.to?.toString(), outerFrom, outerTo),
     )
 }
 
@@ -1934,8 +1977,8 @@ private fun isCarbonPayload(extension: org.jivesoftware.smack.packet.ExtensionEl
         OCCUPANT_ID_NAMESPACE -> setOf("occupant-id")
         MessageCorrectExtension.NAMESPACE -> setOf("replace")
         "jabber:x:oob", "jabber:x:encrypted" -> setOf("x")
-        "eu.siacs.conversations.axolotl" -> setOf("encrypted")
-        else -> if (extension.namespace.startsWith("urn:xmpp:omemo:")) setOf("encrypted") else emptySet()
+        "eu.siacs.conversations.axolotl", "urn:xmpp:omemo:2" -> setOf("encrypted")
+        else -> emptySet()
     }
     return extension.elementName in names
 }
@@ -1968,10 +2011,21 @@ internal fun normalizeMamResults(
         require(results.map { it.queryId }.distinct().size <= 1)
         require(carriers.zip(results).all { (carrier, result) -> MamResultExtension.from(carrier) === result })
     }
-    return results.map { result ->
+    return results.mapIndexed { index, result ->
         val owned = result as? NemaMamResultExtension
             ?: error("MAM result bypassed Nema normalization")
+        if (archiveRoom != null && owned.actualMessage != null) {
+            require(owned.id.isNotEmpty())
+            val inner = requireNotNull(owned.actualMessage)
+            require(inner.type == Message.Type.groupchat && inner.from?.asBareJid()?.toString() == expectedArchiveAuthority)
+            val claims = inner.stanzaIdClaims(expectedArchiveAuthority)
+            val identity = StanzaIdEnvelope(owned.id, expectedArchiveAuthority)
+            require(claims.isEmpty() || claims.size == 1 && inner.trustedStanzaIds(expectedArchiveAuthority) == listOf(identity)) {
+                "Room archive UID contradicts inner stanza identity"
+            }
+        }
         val signal = owned.actualMessage
+            ?.takeUnless { it.hasProtectedContent() }
             ?.takeIf { expectedArchiveAuthority == mappingBareJid }
             ?.toIncomingSignal(attempt, mappingBareJid)
         var mappedMessage = if (signal == null) {
@@ -1983,20 +2037,17 @@ internal fun normalizeMamResults(
                 owned.forwarded.delayInformation?.stamp?.time,
                 owned.forwarded.delayInformation?.let { MessageTimeSource.MAM },
                 receivedAtEpochMs,
+                protectedCarrier = ProtectedCarrier(ProtectedCarrierKind.MAM, owned.actualMessage?.from?.toString(),
+                    owned.actualMessage?.to?.toString(), outerFrom = carriers[index].from?.toString(),
+                    outerTo = carriers[index].to?.toString(), archiveAuthority = expectedArchiveAuthority, resultId = owned.id,
+                    archiveScope = if (archiveRoom == null) org.thanosapollo.nema.xmpp.transport.ACCOUNT_ARCHIVE_SCOPE else expectedArchiveAuthority),
             )
         } else {
             null
         }
         if (archiveRoom != null && owned.actualMessage != null) {
-            require(owned.id.isNotEmpty())
             val inner = requireNotNull(owned.actualMessage)
-            require(inner.type == Message.Type.groupchat && inner.from?.asBareJid()?.toString() == expectedArchiveAuthority)
-            require(mappedMessage == null || mappedMessage.kind == MessageKind.GROUPCHAT && mappedMessage.peer == expectedArchiveAuthority)
-            val claims = inner.stanzaIdClaims(expectedArchiveAuthority)
             val identity = StanzaIdEnvelope(owned.id, expectedArchiveAuthority)
-            require(claims.isEmpty() || claims.size == 1 && inner.trustedStanzaIds(expectedArchiveAuthority) == listOf(identity)) {
-                "Room archive UID contradicts inner stanza identity"
-            }
             val facts = inner.mucEventFacts(attempt, archiveRoom, org.thanosapollo.nema.storage.MucOccupantEvidence.ROOM_MAM)
             mappedMessage = mappedMessage?.copy(stanzaIds = listOf(identity), mucFacts = facts, messageId = facts?.messageId)
         }
@@ -2032,6 +2083,7 @@ internal data class StableIdMessageDecision(
     val sentTimeSource: MessageTimeSource? = null,
     val receivedAtEpochMs: Long = System.currentTimeMillis(),
     val carbonDirection: CarbonCarrier.Direction? = null,
+    val protectedCarrier: ProtectedCarrier? = null,
 )
 
 internal class StableIdDiscoveryGate {
@@ -2135,6 +2187,7 @@ private fun TrustedIncomingStanza.toDecision(
     sentTimeSource = sentTimeSource,
     receivedAtEpochMs = receivedAtEpochMs,
     carbonDirection = carbonDirection,
+    protectedCarrier = protectedCarrier,
 )
 
 internal fun drainStableIdGate(

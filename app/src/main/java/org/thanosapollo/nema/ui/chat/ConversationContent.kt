@@ -1900,6 +1900,7 @@ internal fun displayedMarkerCandidates(
 )
 
 internal fun TimelineMessage.correctionTargetOrNull(venue: ConversationVenue): DraftCorrection? {
+    if (protectedState != "NONE") return null
     val referenceId = correctionReferenceId?.takeIf(String::isNotEmpty) ?: return null
     if (venue is ConversationVenue.Room || groupChat || !outgoing || body.isBlank()) return null
     if (attachmentUrl != null || attachmentName != null || attachmentMime != null || attachmentSize != null) return null
@@ -1914,7 +1915,7 @@ internal fun TimelineMessage.correctionTargetOrNull(venue: ConversationVenue): D
     return DraftCorrection(id, referenceId, body)
 }
 
-internal fun canReact(venue: ConversationVenue, message: TimelineMessage): Boolean = when (venue) {
+internal fun canReact(venue: ConversationVenue, message: TimelineMessage): Boolean = message.protectedState == "NONE" && when (venue) {
     ConversationVenue.Direct -> !message.groupChat
     is ConversationVenue.Room -> message.groupChat && message.replyReferenceId != null
 }
@@ -2126,6 +2127,10 @@ internal fun MessageTimeline(
                 key = TimelineMessage::id,
                 contentType = { message -> if (message.outgoing) 1 else 0 },
             ) { message ->
+                if (message.protectedState != "NONE") {
+                    ProtectedMessageCard(message)
+                    return@items
+                }
                 var messageActionsOpen by remember(message.id) { mutableStateOf(false) }
                 val reactable = canReact(venue, message)
                 val (bubbleContainerColor, bubbleContentColor) = messageBubbleColors(message.outgoing)
@@ -2454,8 +2459,8 @@ private fun ThreadSummaryButton(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 48.dp)
             .padding(top = 5.dp)
+            .heightIn(min = 48.dp)
             .clickable(role = Role.Button, onClick = onClick)
             .semantics {
                 contentDescription =
@@ -2680,6 +2685,20 @@ private fun MessageAttachment(
     } else {
         OutlinedButton(onClick = open, modifier = Modifier.testTag("message-attachment")) {
             Text(attachmentActionLabel(image, downloaded, name))
+        }
+    }
+}
+
+@Composable
+internal fun ProtectedMessageCard(message: TimelineMessage) {
+    Surface(modifier = Modifier.fillMaxWidth().testTag("protected-message-${message.id}")) {
+        Column(Modifier.padding(12.dp)) {
+            Text(org.thanosapollo.nema.xmpp.omemo.protectedStatus(message.protectedState).orEmpty(),
+                style = MaterialTheme.typography.labelLarge)
+            if (message.body.isNotEmpty()) {
+                Text("Unauthenticated fallback", style = MaterialTheme.typography.labelSmall)
+                Text(message.body, style = MaterialTheme.typography.bodyMedium)
+            }
         }
     }
 }
