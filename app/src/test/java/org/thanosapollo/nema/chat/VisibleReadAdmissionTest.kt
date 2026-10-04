@@ -56,6 +56,83 @@ class VisibleReadAdmissionTest {
         override fun close() { release(); field.set(heldRequest, original) }
     }
 
+    /** Holds the exact read Runnable before Room's serial executor can obscure its caller. */
+    private class ReadTransactionHold(database: org.thanosapollo.nema.storage.NemaDatabase) : AutoCloseable {
+        val entered = kotlinx.coroutines.CompletableDeferred<Unit>()
+        private val lock = Any()
+        private var released = false
+        private var pending: Runnable? = null
+        private val original = database.transactionExecutor
+        private val field = androidx.room.RoomDatabase::class.java
+            .getDeclaredField("internalTransactionExecutor").apply { isAccessible = true }
+        private val heldDatabase = database
+
+        init {
+            // Room 2.8.4 has no setter here. Intercept before its serial queue, not after
+            // an unrelated route transaction may have become the dispatching caller.
+            field.set(database, java.util.concurrent.Executor { transaction ->
+                val isRead = Thread.currentThread().stackTrace.any {
+                    it.className == "org.thanosapollo.nema.storage.MessageStore" && it.methodName == "markMessagesRead"
+                }
+                val held = synchronized(lock) {
+                    if (isRead && !released && !entered.isCompleted) {
+                        pending = transaction
+                        entered.complete(Unit)
+                        true
+                    } else false
+                }
+                if (!held) original.execute(transaction)
+            })
+        }
+
+        fun release() {
+            val task = synchronized(lock) {
+                released = true
+                pending.also { pending = null }
+            }
+            task?.let(original::execute)
+        }
+
+        override fun close() {
+            release()
+            field.set(heldDatabase, original)
+        }
+    }
+
+    @Test
+    fun unrelatedRoomDispatchDoesNotProveReadAdmission() = runBlocking {
+        RoutePresentationFixture().use { f ->
+            val read = ReadTransactionHold(f.database)
+            try {
+                val p = f.presenter(); p.selectPeer(f.peer)
+                val ready = withTimeout(5_000) { p.state.first {
+                    it.messages.isNotEmpty() && it.conversationsReady && it.draft == "stored A"
+                } }
+                val request = VisibleReadRequest(f.account, ready.routeOccurrence, setOf("message-0"))
+                PreparationHold(request).use { preparation ->
+                    val write = async(start = CoroutineStart.UNDISPATCHED) { p.markVisibleConversationRead(request) }
+                    withTimeout(5_000) { preparation.entered.await() }
+                    val genericEntry = f.gate.hold()
+                    val unrelated = async(start = CoroutineStart.UNDISPATCHED) {
+                        f.database.messageDao().message(f.account, "message-1")
+                    }
+                    withTimeout(5_000) { genericEntry.await() }
+                    assertFalse("generic Room entry preceded read admission", read.entered.isCompleted)
+                    p.closeConversation()
+                    f.gate.release()
+                    preparation.release()
+                    assertNotNull(withTimeout(5_000) { unrelated.await() })
+                    assertFalse(withTimeout(5_000) { write.await() })
+                    assertFalse(read.entered.isCompleted)
+                    assertEquals(false, f.database.messageDao().message(f.account, "message-0")?.locallyRead)
+                }
+            } finally {
+                f.gate.release()
+                read.close()
+            }
+        }
+    }
+
     @Test fun sameOccurrenceReplacementExcludesLaterInsertionsAndRemovedRows() = runBlocking {
         RoutePresentationFixture().use { f ->
             val store = org.thanosapollo.nema.storage.MessageStore(f.database)
@@ -178,26 +255,35 @@ class VisibleReadAdmissionTest {
     @Test
     fun admittedWriteMayFinishAfterNavigationButLoadingAndFailedCannotAdmit() = runBlocking {
         RoutePresentationFixture().use { f ->
-            val p = f.presenter()
-            p.selectPeer(f.peer)
-            val ready = withTimeout(5_000) { p.state.first { it.messages.isNotEmpty() && it.conversationsReady && it.draft == "stored A" } }
-            val entered = f.gate.hold()
-            val write = async(start = CoroutineStart.UNDISPATCHED) {
-                p.markVisibleConversationRead(VisibleReadRequest(f.account, ready.routeOccurrence, setOf("message-0")))
+            val read = ReadTransactionHold(f.database)
+            try {
+                val p = f.presenter()
+                p.selectPeer(f.peer)
+                val ready = withTimeout(5_000) { p.state.first { it.messages.isNotEmpty() && it.conversationsReady && it.draft == "stored A" } }
+                val write = async(start = CoroutineStart.UNDISPATCHED) {
+                    p.markVisibleConversationRead(VisibleReadRequest(f.account, ready.routeOccurrence, setOf("message-0")))
+                }
+                withTimeout(5_000) { read.entered.await() }
+                assertFalse(write.isCompleted)
+                assertEquals(false, f.database.messageDao().message(f.account, "message-0")?.locallyRead)
+                f.gate.hold()
+                p.selectPeer(f.other)
+                val loading = withTimeout(5_000) { p.state.first { it.selectedPeer == f.other } }
+                assertEquals(ChatContentStatus.Loading, loading.contentStatus)
+                assertFalse(p.markVisibleConversationRead(VisibleReadRequest(f.account, loading.routeOccurrence, setOf("message-1"))))
+                f.gate.release()
+                read.release()
+                assertTrue(withTimeout(5_000) { write.await() })
+                withTimeout(5_000) { p.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == f.other } }
+                f.failLive.complete(Unit)
+                val failed = withTimeout(5_000) { p.state.first { it.contentStatus == ChatContentStatus.Failed } }
+                assertFalse(p.markVisibleConversationRead(VisibleReadRequest(f.account, failed.routeOccurrence, setOf("message-1"))))
+                assertEquals(true, f.database.messageDao().message(f.account, "message-0")?.locallyRead)
+                assertEquals(false, f.database.messageDao().message(f.account, "message-1")?.locallyRead)
+            } finally {
+                f.gate.release()
+                read.close()
             }
-            withTimeout(5_000) { entered.await() }
-            p.selectPeer(f.other)
-            val loading = withTimeout(5_000) { p.state.first { it.selectedPeer == f.other } }
-            assertEquals(ChatContentStatus.Loading, loading.contentStatus)
-            assertFalse(p.markVisibleConversationRead(VisibleReadRequest(f.account, loading.routeOccurrence, setOf("message-1"))))
-            f.gate.release()
-            assertTrue(withTimeout(5_000) { write.await() })
-            withTimeout(5_000) { p.state.first { it.contentStatus == ChatContentStatus.Ready && it.selectedPeer == f.other } }
-            f.failLive.complete(Unit)
-            val failed = withTimeout(5_000) { p.state.first { it.contentStatus == ChatContentStatus.Failed } }
-            assertFalse(p.markVisibleConversationRead(VisibleReadRequest(f.account, failed.routeOccurrence, setOf("message-1"))))
-            assertEquals(true, f.database.messageDao().message(f.account, "message-0")?.locallyRead)
-            assertEquals(false, f.database.messageDao().message(f.account, "message-1")?.locallyRead)
         }
     }
 
@@ -259,22 +345,29 @@ class VisibleReadAdmissionTest {
     @Test
     fun retiringPresenterCancelsHeldWriteWithoutTouchingReplacementAccount() = runBlocking {
         RoutePresentationFixture().use { f ->
-            val p = f.presenter()
-            p.selectPeer(f.peer)
-            val ready = withTimeout(5_000) { p.state.first { it.messages.isNotEmpty() && it.conversationsReady && it.draft == "stored A" } }
-            val entered = f.gate.hold()
-            val write = async(start = CoroutineStart.UNDISPATCHED) {
-                p.markVisibleConversationRead(VisibleReadRequest(f.account, ready.routeOccurrence, setOf("message-0")))
+            val read = ReadTransactionHold(f.database)
+            try {
+                val p = f.presenter()
+                p.selectPeer(f.peer)
+                val ready = withTimeout(5_000) { p.state.first { it.messages.isNotEmpty() && it.conversationsReady && it.draft == "stored A" } }
+                val write = async(start = CoroutineStart.UNDISPATCHED) {
+                    p.markVisibleConversationRead(VisibleReadRequest(f.account, ready.routeOccurrence, setOf("message-0")))
+                }
+                withTimeout(5_000) { read.entered.await() }
+                assertFalse(write.isCompleted)
+                p.close()
+                val replacement = f.presenter("replacement")
+                f.gate.release()
+                read.release()
+                withTimeout(5_000) { write.join() }
+                assertTrue(write.isCancelled)
+                assertEquals(false, f.database.messageDao().message(f.account, "message-0")?.locallyRead)
+                assertNull(f.database.messageDao().message("replacement", "message-0"))
+                assertEquals("replacement", replacement.state.value.accountId)
+            } finally {
+                f.gate.release()
+                read.close()
             }
-            withTimeout(5_000) { entered.await() }
-            p.close()
-            val replacement = f.presenter("replacement")
-            f.gate.release()
-            withTimeout(5_000) { write.join() }
-            assertTrue(write.isCancelled)
-            assertEquals(false, f.database.messageDao().message(f.account, "message-0")?.locallyRead)
-            assertNull(f.database.messageDao().message("replacement", "message-0"))
-            assertEquals("replacement", replacement.state.value.accountId)
         }
     }
 

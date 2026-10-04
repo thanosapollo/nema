@@ -1318,21 +1318,49 @@ class ConversationContentTest {
 
     @Test
     fun cachedAttachmentShowsOpenWithoutDownload() {
-        composeRule.setContent {
-            MaterialTheme {
-                MessageTimeline(
-                    messages = listOf(
-                        message("file body", outgoing = false).copy(
-                            attachmentUrl = "https://example.org/abc",
-                            attachmentName = "notes.txt",
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val hit = java.util.concurrent.atomic.AtomicBoolean(false)
+        val onMain = java.util.concurrent.atomic.AtomicBoolean(true)
+        val uses = java.util.concurrent.atomic.AtomicInteger()
+        val url = "https://example.org/abc"
+        try {
+            composeRule.setContent {
+                MaterialTheme {
+                    MessageTimeline(
+                        messages = listOf(
+                            message("file body", outgoing = false).copy(
+                                attachmentUrl = url,
+                                attachmentName = "notes.txt",
+                            ),
                         ),
-                    ),
-                    isAttachmentCached = { it == "https://example.org/abc" },
-                )
+                        isAttachmentCached = {
+                            onMain.set(android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
+                            entered.countDown()
+                            check(release.await(10, java.util.concurrent.TimeUnit.SECONDS))
+                            (it == url).also(hit::set)
+                        },
+                        onUseAttachment = { _, _, _ -> uses.incrementAndGet(); true },
+                    )
+                }
             }
+            assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            assertFalse(onMain.get())
+            composeRule.onNodeWithText("Download notes.txt", useUnmergedTree = true).assertIsDisplayed()
+            composeRule.onAllNodesWithText("Open notes.txt", useUnmergedTree = true).assertCountEquals(0)
+            release.countDown()
+            // A returned cache hit alone does not prove publication on the Compose thread.
+            composeRule.waitUntil(5_000) {
+                composeRule.onAllNodesWithText("Open notes.txt", useUnmergedTree = true)
+                    .fetchSemanticsNodes().size == 1
+            }
+            assertTrue(hit.get())
+            composeRule.onNodeWithText("Open notes.txt", useUnmergedTree = true).assertIsDisplayed()
+            composeRule.onAllNodesWithText("Download notes.txt", useUnmergedTree = true).assertCountEquals(0)
+            assertEquals(0, uses.get())
+        } finally {
+            release.countDown()
         }
-
-        composeRule.onNodeWithText("Open notes.txt", useUnmergedTree = true).assertIsDisplayed()
     }
 
     @Test
