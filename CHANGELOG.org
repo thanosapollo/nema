@@ -1,5 +1,11 @@
 #+TITLE: Nema changelog
 
+* Unreleased — 0.3.2-reliability.1
+
++ Keep native connectivity rejections retryable when a message has not reached transport admission. Ambiguous post-admission sends remain Delivery unknown and are not automatically replayed.
++ Prevent delayed reply-as-thread completion from replacing a newer conversation or Home destination. Retain committed reply drafts for recovery.
++ Add a bounded semantic codec for legacy and modern OMEMO envelopes as an internal foundation. Encryption, key management and protected-content persistence are not implemented.
+
 * 0.3.1 — 2026-09-29
 
 Patch release for the third alpha.

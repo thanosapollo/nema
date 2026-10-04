@@ -43,8 +43,8 @@ android {
         applicationId = "org.thanosapollo.nema"
         minSdk = 26
         targetSdk = 36
-        versionCode = 7
-        versionName = "0.3.1"
+        versionCode = 9
+        versionName = "0.3.2-reliability.1"
 
         // The opt-in network journey must never start NemaApplication against installed data.
         testInstrumentationRunner = if (providers.gradleProperty("nemaSharedThreadNetworkProof").orNull == "true")
