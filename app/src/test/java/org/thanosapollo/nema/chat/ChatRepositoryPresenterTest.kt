@@ -2165,6 +2165,134 @@ class ChatRepositoryPresenterTest {
     }
 
     @Test
+    fun committedThreadReplyPreservesLaterPeer() = committedThreadReplyPreservesOccurrence("peer")
+
+    @Test
+    fun committedThreadReplyPreservesHome() = committedThreadReplyPreservesOccurrence("home")
+
+    @Test
+    fun committedThreadReplyPreservesNewOccurrenceOfSameRoute() = committedThreadReplyPreservesOccurrence("return")
+
+    @Test
+    fun committedThreadReplyOpensForCurrentOccurrence() = committedThreadReplyPreservesOccurrence("current")
+
+    private fun committedThreadReplyPreservesOccurrence(destination: String) = runBlocking {
+        withTimeout(10_000) {
+            val submitted = kotlinx.coroutines.channels.Channel<Runnable>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+            val holdTransaction = java.util.concurrent.atomic.AtomicBoolean(false)
+            val transactionExecutor = java.util.concurrent.Executor { transaction ->
+                if (holdTransaction.compareAndSet(true, false)) {
+                    check(submitted.trySend(transaction).isSuccess)
+                } else Dispatchers.IO.dispatch(kotlin.coroutines.EmptyCoroutineContext, transaction)
+            }
+            database.close()
+            database = Room.databaseBuilder(context, NemaDatabase::class.java, databaseName)
+                .setTransactionExecutor(transactionExecutor)
+                .setQueryExecutor { query -> Dispatchers.IO.dispatch(kotlin.coroutines.EmptyCoroutineContext, query) }
+                .allowMainThreadQueries()
+                .build()
+            val repository = ChatRepository(database)
+            val thread = ThreadRef(ThreadId.require("reply-child"), ThreadId.require("reply-parent"))
+            MessageStore(database).ingest(
+                incoming(ACCOUNT, "held-reply-target", "target body", thread.id.value, thread.parentId?.value).copy(
+                    aliases = listOf(TrustedIdentityAlias(IdentityAliasKind.ORIGIN_ID, PEER, "held-wire-id")),
+                ),
+            )
+            repository.saveDraft(ACCOUNT, PEER, "main draft")
+            repository.saveDraft(ACCOUNT, OTHER_PEER, "other peer draft")
+            repository.saveDraft(OTHER_ACCOUNT, PEER, "other account draft")
+            val presenter = DirectChatPresenter(
+                accountConfiguration(ACCOUNT, SELF), repository, scope, { _, _ -> error("no send") },
+                restoreRouteOnStart = false,
+            )
+            val continuations = kotlinx.coroutines.channels.Channel<Runnable>(kotlinx.coroutines.channels.Channel.UNLIMITED)
+            val returned = CompletableDeferred<Unit>()
+            var released = false
+            val held = object : kotlinx.coroutines.CoroutineDispatcher() {
+                override fun dispatch(context: kotlin.coroutines.CoroutineContext, block: Runnable) {
+                    synchronized(continuations) {
+                        if (released) Dispatchers.Default.dispatch(context, block)
+                        else {
+                            check(continuations.trySend(block).isSuccess)
+                            returned.complete(Unit)
+                        }
+                    }
+                }
+            }
+            try {
+                assertTrue(presenter.selectPeer(PEER))
+                // With restoration disabled, this sole selection owns generation 1.
+                val source = ChatRouteOccurrence(ChatRoute(PEER), 1)
+                repository.observeRoute(ACCOUNT).first { it == source.route }
+                val selected = presenter.state.first {
+                    it.routeOccurrence == source && it.contentStatus == ChatContentStatus.Ready &&
+                        it.selectedPeer == PEER && it.selectedThread == null && it.messages.any { row ->
+                        row.id == "held-reply-target" && row.replyReferenceId != null
+                    }
+                }
+                val target = selected.messages.single { it.id == "held-reply-target" }
+                // Hold Room's actual transaction submission until the caller has suspended.
+                // The existing thread avoids an earlier session-allocation transaction.
+                holdTransaction.set(true)
+                val start = async(held, start = CoroutineStart.UNDISPATCHED) { presenter.startThreadFrom(target) }
+                if (start.isCompleted) {
+                    error(if (start.await()) "reply resumed synchronously before Room admission"
+                        else "reply refused before Room transaction submission")
+                }
+                val transaction = submitted.tryReceive().getOrNull()
+                assertTrue("reply did not submit its Room transaction", transaction != null)
+                assertTrue("reply continuation ran before Room admission", continuations.tryReceive().isFailure)
+                Dispatchers.IO.dispatch(kotlin.coroutines.EmptyCoroutineContext, requireNotNull(transaction))
+                returned.await()
+                assertTrue("reply caller escaped the held boundary", !start.isCompleted)
+                assertEquals(ChatRoute(PEER, thread), repository.observeRoute(ACCOUNT).first())
+                val key = DirectConversationKey(ACCOUNT, PEER, thread)
+                val committed = repository.observeStoredDraft(key).first()
+                assertEquals("held-wire-id", committed.reply?.id)
+                when (destination) {
+                    "peer", "return" -> {
+                        assertTrue(presenter.selectPeer(OTHER_PEER))
+                        if (destination == "return") assertTrue(presenter.selectPeer(PEER))
+                    }
+                    "home" -> presenter.closeConversation()
+                }
+                val expectedRoute = when (destination) {
+                    "peer" -> ChatRoute(OTHER_PEER)
+                    "home" -> null
+                    "return" -> ChatRoute(PEER)
+                    else -> ChatRoute(PEER, thread)
+                }
+                assertTrue("reply caller escaped before navigation settled", !start.isCompleted)
+                continuations.tryReceive().getOrThrow().run()
+                assertEquals(destination == "current", start.await())
+                if (destination != "current") assertTrue(!presenter.startChildThread())
+                val expectedGeneration = selected.routeOccurrence.generation + if (destination == "return") 2 else 1
+                val observed = presenter.state.first {
+                    it.routeOccurrence == ChatRouteOccurrence(expectedRoute, expectedGeneration) &&
+                        it.contentStatus == ChatContentStatus.Ready
+                }
+                assertEquals(expectedRoute, observed.routeOccurrence.route)
+                repository.observeRoute(ACCOUNT).first { it == expectedRoute }
+                assertEquals(committed, repository.observeStoredDraft(key).first())
+                assertEquals("main draft", repository.observeDraft(ACCOUNT, PEER).first())
+                assertEquals("other peer draft", repository.observeDraft(ACCOUNT, OTHER_PEER).first())
+                assertEquals("other account draft", repository.observeDraft(OTHER_ACCOUNT, PEER).first())
+                if (destination == "current") assertEquals(committed.reply, observed.draftReply)
+            } finally {
+                presenter.close()
+                holdTransaction.set(false)
+                while (true) {
+                    val pending = submitted.tryReceive().getOrNull() ?: break
+                    Dispatchers.IO.dispatch(kotlin.coroutines.EmptyCoroutineContext, pending)
+                }
+                // Release queued and future cancellation continuations after failures.
+                synchronized(continuations) { released = true }
+                while (true) (continuations.tryReceive().getOrNull() ?: break).run()
+            }
+        }
+    }
+
+    @Test
     fun replyAsThreadTransactionRejectsStaleRouteAndPreservesEveryDraft() = runBlocking {
         val repository = ChatRepository(database)
         MessageStore(database).ingest(

@@ -23,6 +23,11 @@ import kotlinx.coroutines.yield
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import org.jivesoftware.smack.AbstractXMPPConnection
+import org.jivesoftware.smack.packet.Stanza
+import org.jivesoftware.smack.tcp.XMPPTCPConnection
+import org.jivesoftware.smack.tcp.XMPPTCPConnectionConfiguration
+import org.jxmpp.jid.impl.JidCreate
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertSame
@@ -43,6 +48,8 @@ import org.thanosapollo.nema.storage.OutboxEntity
 import org.thanosapollo.nema.storage.OutboxStatus
 import org.thanosapollo.nema.storage.RetryUncertainKey
 import org.thanosapollo.nema.storage.TrustedIdentityAlias
+import org.thanosapollo.nema.session.ConnectionAttempt
+import org.thanosapollo.nema.session.SessionAttemptIdentity
 import org.thanosapollo.nema.session.DispatchLease
 import org.thanosapollo.nema.session.LifecycleEpoch
 import org.thanosapollo.nema.session.SessionIdentity
@@ -52,6 +59,8 @@ import org.thanosapollo.nema.thread.ThreadIdFactory
 import org.thanosapollo.nema.thread.ThreadRef
 import org.thanosapollo.nema.thread.draftKey
 import org.thanosapollo.nema.xmpp.reply.replyReference
+import org.thanosapollo.nema.xmpp.smack.SmackAndroid
+import org.thanosapollo.nema.xmpp.smack.SmackSessionConnection
 import org.thanosapollo.nema.xmpp.smack.toSmackMessage
 import org.thanosapollo.nema.xmpp.smack.toThreadRef
 import org.thanosapollo.nema.xmpp.transport.AccountId
@@ -245,6 +254,94 @@ class OutboxDispatcherTest {
 
         assertEquals(listOf(2), sent.map(OutgoingMessageEnvelope::attempt))
         assertOutbox(intent.operationId, OutboxStatus.UNCERTAIN, attempt = 2)
+    }
+
+    @Test
+    fun nativeConnectivityRejectionStaysPendingAndNextDispatchRetriesExactOperation() = runBlocking {
+        val intent = outbound("native-rejection")
+        store.compose(intent)
+        SmackAndroid.initialize(context)
+        val transport = OutboxXmppConnection()
+        val session = nativeSession(transport)
+        val interceptorsBefore = transport.messageInterceptorCount()
+        var entries = 0
+        val dispatcher = OutboxDispatcher(store) { envelope, entered ->
+            session.send(envelope) {
+                entries++
+                entered()
+            }
+        }
+        try {
+            dispatcher.dispatch(this, 1)
+            assertOutbox(intent.operationId, OutboxStatus.PENDING, attempt = 1)
+            assertEquals(0, entries)
+            assertTrue(transport.handoffs.isEmpty())
+            assertEquals(interceptorsBefore, transport.messageInterceptorCount())
+
+            transport.rejectBeforeInterception = false
+            dispatcher.dispatch(this, 1)
+            dispatcher.dispatch(this, 1)
+            assertOutbox(intent.operationId, OutboxStatus.UNCERTAIN, attempt = 2)
+            assertEquals(1, entries)
+            assertEquals(listOf(intent.operationId), transport.handoffs)
+            assertEquals(interceptorsBefore, transport.messageInterceptorCount())
+        } finally {
+            session.revoke()
+        }
+    }
+
+    @Test
+    fun nativeAttemptReplacementBeforeInterceptionRejectsOldClaimWithoutHandoff() = runBlocking {
+        val intent = outbound("native-stale-attempt")
+        store.compose(intent)
+        SmackAndroid.initialize(context)
+        val transport = OutboxXmppConnection().apply { rejectBeforeInterception = false }
+        val session = nativeSession(transport)
+        val interceptorsBefore = transport.messageInterceptorCount()
+        transport.beforeInterception = {
+            session.updateAttempt(SessionAttemptIdentity(
+                AccountId.require(ACCOUNT), generation(2), ConnectionAttempt.require(1), LifecycleEpoch.require(1),
+            ))
+        }
+        var entries = 0
+        val dispatcher = OutboxDispatcher(store) { envelope, entered ->
+            session.send(envelope) {
+                entries++
+                entered()
+            }
+        }
+        try {
+            dispatcher.dispatch(this, 1)
+            assertOutbox(intent.operationId, OutboxStatus.PENDING, attempt = 1)
+            assertEquals(0, entries)
+            assertTrue(transport.handoffs.isEmpty())
+            assertEquals(interceptorsBefore, transport.messageInterceptorCount())
+        } finally {
+            session.revoke()
+        }
+    }
+
+    @Test
+    fun nativePostInterceptionFailureIsUncertainAndNeverAutomaticallyResent() = runBlocking {
+        val intent = outbound("native-ambiguous")
+        store.compose(intent)
+        SmackAndroid.initialize(context)
+        val transport = OutboxXmppConnection().apply {
+            rejectBeforeInterception = false
+            failAfterHandoff = true
+        }
+        val session = nativeSession(transport)
+        val dispatcher = OutboxDispatcher(store, send = session::send)
+        val interceptorsBefore = transport.messageInterceptorCount()
+        try {
+            dispatcher.dispatch(this, 1)
+            dispatcher.dispatch(this, 1)
+            assertOutbox(intent.operationId, OutboxStatus.UNCERTAIN, attempt = 1)
+            assertEquals(listOf(intent.operationId), transport.handoffs)
+            assertEquals(interceptorsBefore, transport.messageInterceptorCount())
+        } finally {
+            session.revoke()
+        }
     }
 
     @Test
@@ -852,6 +949,59 @@ class OutboxDispatcherTest {
         assertSame(fatal, observed.await())
         dispatch.join()
         fatalScope.cancel()
+    }
+
+    private fun nativeSession(transport: OutboxXmppConnection) = SmackSessionConnection(
+        connection = transport,
+        authenticationId = ACCOUNT,
+        expectedBareJid = SELF,
+        event = {},
+    ).also {
+        it.updateAttempt(SessionAttemptIdentity(
+            AccountId.require(ACCOUNT), generation(1), ConnectionAttempt.require(1), LifecycleEpoch.require(1),
+        ))
+    }
+
+    private class OutboxXmppConnection : XMPPTCPConnection(
+        XMPPTCPConnectionConfiguration.builder()
+            .setXmppDomain(JidCreate.domainBareFrom("example.org"))
+            .setUsernameAndPassword(ACCOUNT, null)
+            .build(),
+    ) {
+        var rejectBeforeInterception = true
+        var failAfterHandoff = false
+        var beforeInterception: () -> Unit = {}
+        val handoffs = mutableListOf<String>()
+
+        init {
+            connected = true
+            authenticated = true
+            user = JidCreate.entityFullFrom("$SELF/test")
+        }
+
+        fun messageInterceptorCount(): Int {
+            val field = AbstractXMPPConnection::class.java.getDeclaredField("messageInterceptors")
+            field.isAccessible = true
+            return (field.get(this) as Map<*, *>).size
+        }
+
+        override fun throwNotConnectedExceptionIfAppropriate() {
+            // Smack constructs its writer eagerly. Model a stopped writer while the
+            // public connection flags still look usable, without starting any network IO.
+            val writerField = XMPPTCPConnection::class.java.getDeclaredField("packetWriter")
+            writerField.isAccessible = true
+            val writer = writerField.get(this)
+            val shutdownField = writer.javaClass.getDeclaredField("shutdownTimestamp")
+            shutdownField.isAccessible = true
+            shutdownField.set(writer, if (rejectBeforeInterception) 1L else null)
+            super.throwNotConnectedExceptionIfAppropriate()
+            beforeInterception()
+        }
+
+        override fun sendStanzaInternal(packet: Stanza) {
+            handoffs += packet.stanzaId
+            if (failAfterHandoff) throw org.jivesoftware.smack.SmackException.NotConnectedException()
+        }
     }
 
     private suspend fun assertOutbox(operationId: String, status: OutboxStatus, attempt: Int) {
