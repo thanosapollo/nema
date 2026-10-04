@@ -1138,8 +1138,10 @@ class DirectChatPresenter(
     }
 
     suspend fun startThreadFrom(message: TimelineMessage): Boolean {
-        val route = selectedRoute.value.route ?: return false
+        val origin = currentRouteOccurrence() ?: return false
+        val route = origin.route
         val current = state.value
+        if (current.routeOccurrence != ChatRouteOccurrence(route, origin.generation)) return false
         if (current.selectedPeer != route.peerJid || current.selectedThread != route.thread) return false
         if (current.selectedPeerGroupChat) return false
         if (current.messages.singleOrNull { it.id == message.id } != message) return false
@@ -1154,10 +1156,10 @@ class DirectChatPresenter(
             body = message.body,
             senderLabel = message.senderJid.replySenderLabel(),
         )
-        if (selectedRoute.value.route != route) return false
+        if (selectedRoute.value != ChatRouteOccurrence(route, origin.generation)) return false
         if (!repository.openThreadReply(account.id.value, route, nextRoute, message, reply)) return false
-        selectRoute(nextRoute)
-        return true
+        // The committed reply draft remains recoverable if its originating view was replaced.
+        return selectRouteIfCurrent(origin, nextRoute)
     }
 
     fun closeThread() {
