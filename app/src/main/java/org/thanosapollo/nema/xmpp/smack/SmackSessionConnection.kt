@@ -27,6 +27,7 @@ import org.jivesoftware.smack.filter.IQReplyFilter
 import org.jivesoftware.smack.filter.StanzaTypeFilter
 import org.jivesoftware.smack.packet.IQ
 import org.jivesoftware.smack.packet.Message
+import org.jivesoftware.smack.packet.MessageBuilder
 import org.jivesoftware.smack.packet.StandardExtensionElement
 import org.jivesoftware.smack.packet.StanzaError
 import org.jivesoftware.smack.packet.StanzaBuilder
@@ -35,6 +36,7 @@ import org.jivesoftware.smack.roster.Roster
 import org.jivesoftware.smack.sasl.SASLErrorException
 import org.jivesoftware.smack.tcp.XMPPTCPConnection
 import org.jivesoftware.smack.tcp.XMPPTCPConnectionConfiguration
+import org.jivesoftware.smack.util.Consumer
 import org.jivesoftware.smackx.blocking.BlockingCommandManager
 import org.jivesoftware.smackx.blocking.element.BlockContactsIQ
 import org.jivesoftware.smackx.blocking.element.BlockListIQ
@@ -408,21 +410,31 @@ internal class SmackSessionConnection(
 
     override suspend fun send(message: OutgoingMessageEnvelope, entered: () -> Unit) = runInterruptible(Dispatchers.IO) {
         val stanza = message.toSmackMessage()
-        synchronized(entryGate) {
-            val attempt = connectionListener.currentAttempt()
-            if (revoked.get() ||
-                attempt == null ||
-                attempt.accountId != message.accountId ||
-                attempt.generation != message.generation ||
-                !isUsable ||
-                (message.kind == MessageKind.GROUPCHAT &&
-                    roomStableIdAuthorities.snapshot(attempt, message.recipient) == null)
-            ) {
-                throw SendNotAttemptedException()
+        // Smack checks connectivity before invoking this synchronous interceptor. A rejection
+        // there has never reached its writer queue and must remain retryable in the outbox.
+        // After interception, a thrown send may already have queued the stanza.
+        val entryInterceptor = Consumer<MessageBuilder> {
+            synchronized(entryGate) {
+                val attempt = connectionListener.currentAttempt()
+                if (revoked.get() ||
+                    attempt == null ||
+                    attempt.accountId != message.accountId ||
+                    attempt.generation != message.generation ||
+                    !isUsable ||
+                    (message.kind == MessageKind.GROUPCHAT &&
+                        roomStableIdAuthorities.snapshot(attempt, message.recipient) == null)
+                ) {
+                    throw SendNotAttemptedException()
+                }
+                entered()
             }
-            entered()
         }
-        connection.sendStanza(stanza)
+        connection.addMessageInterceptor(entryInterceptor) { it === stanza }
+        try {
+            connection.sendStanza(stanza)
+        } finally {
+            connection.removeMessageInterceptor(entryInterceptor)
+        }
     }
 
     override suspend fun sendSignal(signal: OutgoingMessageSignal) = runInterruptible(Dispatchers.IO) {
