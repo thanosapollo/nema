@@ -1,6 +1,6 @@
 #+TITLE: Nema changelog
 
-* Unreleased
+* Unreleased — 0.3.2-reliability.5
 
 + Reconnect when the network returns beneath an always-on VPN, and when it returns while the last reconnect attempt is still running.
 + Show a protected message that could not be read once after reconnecting, instead of again from the archive.
