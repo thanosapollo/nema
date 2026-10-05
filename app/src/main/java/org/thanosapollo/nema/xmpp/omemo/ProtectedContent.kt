@@ -37,8 +37,16 @@ data class ProtectedContent(
         else -> ProtectedState.UNSUPPORTED_PAYLOAD
     }
 
-    internal fun sameContent(other: ProtectedContent): Boolean =
-        content != null && other.content != null && normalized() == other.normalized()
+    /**
+     * Whether two observations retain the same protected evidence. Accepted content must match
+     * exactly. Rejected input keeps no ciphertext, so copies agree only on protocols and reason;
+     * an accepted observation never matches a rejected one.
+     */
+    internal fun sameContent(other: ProtectedContent): Boolean = when {
+        content != null && other.content != null -> normalized() == other.normalized()
+        else -> content == null && other.content == null && rejection != null &&
+            rejection == other.rejection && protocols == other.protocols
+    }
 
     private fun normalized() = content?.copy(keys = content.keys.sortedWith(
         compareBy({ it.recipientBareJid.orEmpty() }, { it.device }),

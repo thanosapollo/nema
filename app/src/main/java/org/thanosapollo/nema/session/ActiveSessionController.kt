@@ -283,6 +283,14 @@ internal data class SessionLifecycleObservation(
     val owner: SessionIdentity?,
 )
 
+/** The account a state is published for while an authorization owns it; null for teardown and terminal states. */
+private fun ConnectionState.ownedAccountId(): AccountId? = when (this) {
+    is ConnectionState.Connecting -> accountId
+    is ConnectionState.ReconnectWait -> accountId
+    is ConnectionState.Connected -> accountId
+    else -> null
+}
+
 internal data class DispatchLease(
     val epoch: LifecycleEpoch,
     val identity: SessionIdentity,
@@ -368,11 +376,24 @@ internal class ActiveSessionController(
     internal suspend fun reconcile(observed: SessionLifecycleObservation) {
         stateMutex.withLock {
             val owner = current ?: return
-            if (!owns(owner) || mutableLifecycle.value != observed) return
+            // Recovery is fenced by authorization (epoch and account), not by the exact state:
+            // a queued wake stays valid while that authorization's reconnect cycle moves on.
+            // Teardown publications share the successor's epoch, so only owned states qualify.
+            if (!owns(owner) || observed.epoch != owner.epoch ||
+                observed.owner?.accountId != owner.identity.accountId ||
+                observed.state.ownedAccountId() != owner.identity.accountId
+            ) return
+            if (owner.reconnectJob?.isActive == true) {
+                // The running cycle can still exhaust; keep this wake for it rather than drop it.
+                owner.wakePending = true
+                return
+            }
             if (mutableState.value is ConnectionState.ReconnectWait) {
                 beginReconnectLocked(owner)
                 return
             }
+            // A health probe needs the exact connected observation that was woken.
+            if (mutableLifecycle.value != observed) return
             if (mutableState.value !is ConnectionState.Connected || owner.probeJob?.isActive == true) return
             val attempt = owner.attemptIdentity ?: return
             val job = controllerScope.launch(start = CoroutineStart.LAZY) {
@@ -828,6 +849,7 @@ internal class ActiveSessionController(
     private fun beginReconnectLocked(owner: OwnedSession): Boolean {
         if (!owns(owner) || owner.terminalLoss.get() != null || owner.reconnectJob?.isActive == true) return false
         owner.lossObserved.get()?.let { owner.handledLoss = it }
+        owner.wakePending = false
         val lease = mutableLifecycle.value.dispatchLease()
             ?.takeIf { it.identity == owner.identity }
         publishStateLocked(ConnectionState.ReconnectWait(
@@ -888,6 +910,7 @@ internal class ActiveSessionController(
                         return@withLock false
                     }
                     owner.reconnectJob = null
+                    owner.wakePending = false
                     publishStateLocked(ConnectionState.Connected(
                         owner.identity.accountId,
                         owner.identity.generation,
@@ -902,6 +925,8 @@ internal class ActiveSessionController(
             if (!owns(owner)) return
             owner.reconnectJob = null
             publishReconnectWait(owner)
+            // A wake that arrived during this cycle grants one fresh bounded cycle.
+            if (owner.wakePending) beginReconnectLocked(owner)
         }
     }
 
@@ -1250,6 +1275,8 @@ internal class ActiveSessionController(
         var reconnectJob: Job? = null,
         var probeJob: Job? = null,
         var handledLoss: SessionAttemptIdentity? = null,
+        /** A network or foreground wake observed while a reconnect cycle was running; stateMutex. */
+        var wakePending: Boolean = false,
     ) {
         @Synchronized
         fun nextAttempt(): SessionAttemptIdentity? {

@@ -73,6 +73,130 @@ class ActiveSessionControllerTest {
     }
 
     @Test
+    fun `restoration during the final retry starts one fresh bounded cycle when that retry fails`() = runTest {
+        // The wake is captured while the final connect is in flight or while its retry wait admits it,
+        // and is admitted either at once or only after the controller moved on (queued runtime launch).
+        for (heldInFlight in listOf(true, false)) for (admitLate in listOf(false, true)) {
+            val label = "heldInFlight=$heldInFlight admitLate=$admitLate"
+            val waitGate = CompletableDeferred<Unit>()
+            val connectGate = CompletableDeferred<Unit>()
+            val factory = FakeFactory().apply { next.reconnectFailure = SessionFailure(SessionFailureReason.NETWORK) }
+            val controller = ActiveSessionController(this, factory, retryWait = { retry ->
+                if (retry == 5) {
+                    if (!heldInFlight) waitGate.await()
+                    factory.created.single().reconnectGate = connectGate
+                }
+            })
+            controller.start(account("first"), "secret".toCharArray())
+            val connection = factory.created.single()
+            connection.emitLoss()
+            runCurrent()
+            assertEquals(label, if (heldInFlight) 5 else 4, connection.reconnectCalls)
+            val captured = controller.lifecycle.value
+            assertTrue(
+                label,
+                if (heldInFlight) captured.state is ConnectionState.Connecting else captured.state is ConnectionState.ReconnectWait,
+            )
+            if (!admitLate) {
+                controller.reconcile(captured)
+                runCurrent()
+                assertEquals(label, if (heldInFlight) 5 else 4, connection.reconnectCalls)
+            }
+            waitGate.complete(Unit)
+            runCurrent()
+            if (admitLate && !heldInFlight) {
+                // The final retry now owns a newer generation and is connecting.
+                assertEquals(label, 5, connection.reconnectCalls)
+                assertNotEquals(label, captured, controller.lifecycle.value)
+                controller.reconcile(captured)
+                runCurrent()
+            }
+            connection.reconnectGate = null
+            connectGate.complete(Unit)
+            advanceUntilIdle()
+            if (admitLate && heldInFlight) {
+                // The final retry already failed and the cycle exhausted before the wake was admitted.
+                assertEquals(label, 5, connection.reconnectCalls)
+                assertTrue(label, controller.state.value is ConnectionState.ReconnectWait)
+                controller.reconcile(captured)
+                advanceUntilIdle()
+            }
+            // The wake grants exactly one more bounded cycle, not a loop.
+            assertEquals(label, 10, connection.reconnectCalls)
+            assertTrue(label, controller.state.value is ConnectionState.ReconnectWait)
+            controller.stop()
+        }
+    }
+
+    @Test
+    fun `retained restoration cannot resurrect a stopped authorization`() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val factory = FakeFactory().apply { next.reconnectFailure = SessionFailure(SessionFailureReason.NETWORK) }
+        val controller = ActiveSessionController(this, factory, retryWait = { if (it == 5) gate.await() })
+        controller.start(account("first"), "secret".toCharArray())
+        val connection = factory.created.single()
+        connection.emitLoss()
+        runCurrent()
+        val captured = controller.lifecycle.value
+        controller.reconcile(captured)
+        controller.stop()
+        gate.complete(Unit)
+        controller.reconcile(captured)
+        advanceUntilIdle()
+        assertEquals(ConnectionState.Stopped, controller.state.value)
+        assertEquals(4, connection.reconnectCalls)
+    }
+
+    @Test
+    fun `teardown observation cannot schedule recovery for a same-account successor`() = runTest {
+        // Teardown publications carry the successor's epoch and the same account; they are not owned states.
+        for (switching in listOf(false, true)) for (admitDuringCycle in listOf(false, true)) {
+            val label = "switching=$switching admitDuringCycle=$admitDuringCycle"
+            val finalRetry = CompletableDeferred<Unit>()
+            val factory = FakeFactory()
+            val controller = ActiveSessionController(this, factory, retryWait = { retry ->
+                if (retry == 5 && admitDuringCycle) finalRetry.await()
+            })
+            controller.start(account("first"), "secret".toCharArray())
+            val first = factory.created.single()
+            first.disconnectGate = CompletableDeferred()
+            val successor = factory.next.apply { reconnectFailure = SessionFailure(SessionFailureReason.NETWORK) }
+            val restarting = async {
+                if (switching) controller.switchTo(account("first"), "secret".toCharArray()) {}
+                else controller.start(account("first"), "secret".toCharArray())
+            }
+            runCurrent()
+            val teardown = controller.lifecycle.value
+            assertTrue(
+                label,
+                if (switching) teardown.state is ConnectionState.Switching else teardown.state is ConnectionState.Disconnecting,
+            )
+            first.disconnectGate!!.complete(Unit)
+            restarting.await()
+            assertSame(label, successor, factory.created.last())
+            assertTrue(label, controller.state.value is ConnectionState.Connected)
+            assertEquals(label, teardown.epoch, controller.lifecycle.value.epoch)
+            successor.emitLoss()
+            runCurrent()
+            if (admitDuringCycle) {
+                assertEquals(label, 4, successor.reconnectCalls)
+                controller.reconcile(teardown)
+                runCurrent()
+                finalRetry.complete(Unit)
+            }
+            advanceUntilIdle()
+            assertTrue(label, controller.state.value is ConnectionState.ReconnectWait)
+            if (!admitDuringCycle) {
+                controller.reconcile(teardown)
+                advanceUntilIdle()
+            }
+            assertEquals(label, 5, successor.reconnectCalls)
+            assertEquals(label, 0, successor.probeCalls)
+            controller.stop()
+        }
+    }
+
+    @Test
     fun `foreground and network probes coalesce and have a finite timeout`() = runTest {
         val factory = FakeFactory()
         val controller = ActiveSessionController(this, factory, retryWait = {})

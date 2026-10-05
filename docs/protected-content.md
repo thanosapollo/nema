@@ -16,8 +16,10 @@ Schema 31 adds an inline state and versioned evidence record. Existing messages,
 including old `Encrypted message` placeholders, are not reclassified or treated
 as recoverable ciphertext. Unsupported input retains bounded validated-carrier
 observations. Rejected input retains recognized protocol presence and a finite
-reason, not truncated ciphertext. Different ciphertext, incomplete evidence,
-and ordinary/protected mismatches do not authorize destructive deduplication.
+reason, not truncated ciphertext. Copies of one rejected message that agree on
+protocols and reason reconcile into one row. Different ciphertext,
+accepted/rejected mismatches, and ordinary/protected mismatches do not
+authorize destructive deduplication.
 Unknown or damaged evidence is kept inert; it is never reinterpreted as an
 ordinary message.
 

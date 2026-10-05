@@ -90,4 +90,26 @@ class ProtectedContentCodecTest {
         val duplicated = ProtectedContentCodec.encode(evidence).replace("\"version\":1", "\"version\":2,\"version\":1")
         assertNull(ProtectedContentCodec.decode(evidence.state.name, duplicated))
     }
+
+    @Test fun rejectedObservationsMatchOnlyOnEqualProtocolsAndReason() {
+        val live = ProtectedCarrier(ProtectedCarrierKind.LIVE, "peer@example.org/a", "account@example.org/b")
+        val mam = ProtectedCarrier(ProtectedCarrierKind.MAM, "peer@example.org/a", "account@example.org/b")
+        fun rejected(reason: ProtectedRejection, protocols: Set<OmemoProtocol> = setOf(OmemoProtocol.LEGACY), carrier: ProtectedCarrier = live) =
+            ProtectedContent(protocols, null, reason, listOf(carrier))
+        val malformed = rejected(ProtectedRejection.MALFORMED)
+        assertTrue(malformed.sameContent(rejected(ProtectedRejection.MALFORMED, carrier = mam)))
+        assertEquals(listOf(ProtectedCarrierKind.LIVE, ProtectedCarrierKind.MAM),
+            malformed.union(rejected(ProtectedRejection.MALFORMED, carrier = mam)).carriers.map { it.kind })
+        // Carrier-dependent budgets and any other reason disagreement remain distinct evidence.
+        for (reason in ProtectedRejection.entries - ProtectedRejection.MALFORMED) {
+            assertFalse("$reason", malformed.sameContent(rejected(reason, carrier = mam)))
+        }
+        assertFalse(malformed.sameContent(rejected(ProtectedRejection.MALFORMED, OmemoProtocol.entries.toSet(), mam)))
+        assertFalse(malformed.sameContent(rejected(ProtectedRejection.MALFORMED, setOf(OmemoProtocol.MODERN), mam)))
+        // An accepted observation never matches a rejected one, in either direction.
+        val accepted = ProtectedFixtures.envelope(OmemoProtocol.LEGACY).protection!!
+        assertFalse(accepted.sameContent(malformed))
+        assertFalse(malformed.sameContent(accepted))
+        assertTrue(accepted.sameContent(accepted))
+    }
 }
