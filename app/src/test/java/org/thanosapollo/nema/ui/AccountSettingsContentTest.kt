@@ -33,6 +33,8 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -74,10 +76,13 @@ class AccountSettingsContentTest {
                 )
             }
         }
+        composeRule.onNodeWithTag("settings-list").performScrollToNode(hasText("Tor unavailable — start Orbot, then retry"))
         composeRule.onNodeWithText("Tor unavailable — start Orbot, then retry").assertIsDisplayed()
         assertEquals(0, opens)
         assertEquals(0, retries)
+        composeRule.onNodeWithTag("settings-list").performScrollToNode(hasTestTag("start-orbot"))
         composeRule.onNodeWithTag("start-orbot").assert(hasButtonRole).performClick()
+        composeRule.onNodeWithTag("settings-list").performScrollToNode(hasTestTag("retry-tor"))
         composeRule.onNodeWithTag("retry-tor").assert(hasButtonRole).performClick()
         assertEquals(1, opens)
         assertEquals(1, retries)

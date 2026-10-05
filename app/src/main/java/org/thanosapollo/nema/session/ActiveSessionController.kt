@@ -159,6 +159,7 @@ interface SessionConnection {
 
     val isUsable: Boolean
     val onionWithoutTls: Boolean get() = false
+    suspend fun probe(attempt: SessionAttemptIdentity): Boolean = isUsable
     fun revoke()
     suspend fun connect(credential: CharArray, attempt: SessionAttemptIdentity)
     suspend fun reconnect(attempt: SessionAttemptIdentity)
@@ -336,10 +337,14 @@ internal class ActiveSessionController(
     private var latestRevocation: RevocationRecord? = null
     private var destroyRequested = false
 
-    suspend fun start(configuration: AccountConfiguration, credential: CharArray) {
+    suspend fun start(
+        configuration: AccountConfiguration,
+        credential: CharArray,
+        onlyIfDisconnected: Boolean = false,
+    ) {
         val deadline = shutdownDeadline()
         commandMutex.withLock {
-            stopCurrent(ConnectionState.Stopped, deadline)
+            if (!stopCurrent(ConnectionState.Stopped, deadline, onlyIfDisconnected = onlyIfDisconnected)) return@withLock
             startConnection(configuration, credential)
         }
     }
@@ -356,6 +361,43 @@ internal class ActiveSessionController(
             persistActive(configuration.id)
             currentCoroutineContext().ensureActive()
             startConnection(configuration, credential)
+        }
+    }
+
+    /** A wake is evidence to check an existing authorization, never permission to start one. */
+    internal suspend fun reconcile(observed: SessionLifecycleObservation) {
+        stateMutex.withLock {
+            val owner = current ?: return
+            if (!owns(owner) || mutableLifecycle.value != observed) return
+            if (mutableState.value is ConnectionState.ReconnectWait) {
+                beginReconnectLocked(owner)
+                return
+            }
+            if (mutableState.value !is ConnectionState.Connected || owner.probeJob?.isActive == true) return
+            val attempt = owner.attemptIdentity ?: return
+            val job = controllerScope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    val healthy = try {
+                        kotlinx.coroutines.withTimeoutOrNull(11_000L) { owner.connection.probe(attempt) } ?: false
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        false
+                    }
+                    stateMutex.withLock {
+                        if (owns(owner, attempt) && !healthy) {
+                            owner.lossObserved.set(attempt)
+                            beginReconnectLocked(owner)
+                        }
+                    }
+                } finally {
+                    stateMutex.withLock {
+                        if (owner.probeJob === currentCoroutineContext()[Job]) owner.probeJob = null
+                    }
+                }
+            }
+            owner.probeJob = job
+            job.start()
         }
     }
 
@@ -706,9 +748,7 @@ internal class ActiveSessionController(
         when (event) {
             is SessionEvent.ConnectionLost -> {
                 val owner = current
-                if (owner?.accepts(event.attempt) == true) {
-                    owner.lossObserved.set(event.attempt)
-                }
+                owner?.observeLoss(event)
                 controllerScope.launch { handleConnectionLoss(event) }
             }
             is SessionEvent.Incoming -> runBlocking { handleDurableEvent(event.attempt, event) }
@@ -725,13 +765,18 @@ internal class ActiveSessionController(
     private suspend fun handleConnectionLoss(event: SessionEvent.ConnectionLost) {
         val terminalOwner = stateMutex.withLock {
             val owner = current
-            if (owner == null || !owns(owner, event.attempt)) return
-            if (owner.lossObserved.get() != event.attempt) return
-            if (event.reason == SessionFailureReason.NETWORK) {
+            if (owner == null || !owns(owner)) return
+            if (event.reason != SessionFailureReason.NETWORK) {
+                // Only the terminal event admitted while its attempt was current can
+                // revoke the owner; stale callbacks cannot install this marker.
+                if (owner.terminalLoss.get() != event) return
+                owner
+            } else {
+                if (!owns(owner, event.attempt) || owner.terminalLoss.get() != null ||
+                    owner.lossObserved.get() != event.attempt || owner.handledLoss == event.attempt) return
+                owner.handledLoss = event.attempt
                 beginReconnectLocked(owner)
                 null
-            } else {
-                owner
             }
         }
         terminalOwner?.let { fail(it, event.attempt, event.reason) }
@@ -781,7 +826,8 @@ internal class ActiveSessionController(
     }
 
     private fun beginReconnectLocked(owner: OwnedSession): Boolean {
-        if (!owns(owner) || owner.reconnectJob?.isActive == true) return false
+        if (!owns(owner) || owner.terminalLoss.get() != null || owner.reconnectJob?.isActive == true) return false
+        owner.lossObserved.get()?.let { owner.handledLoss = it }
         val lease = mutableLifecycle.value.dispatchLease()
             ?.takeIf { it.identity == owner.identity }
         publishStateLocked(ConnectionState.ReconnectWait(
@@ -803,14 +849,14 @@ internal class ActiveSessionController(
             retryWait(retry)
             val attempt = inboundGate.withLock {
                 stateMutex.withLock {
-                    if (!owns(owner)) return
+                    if (!owns(owner) || owner.terminalLoss.get() != null) return
                     owner.identity = SessionIdentity(owner.identity.accountId, nextGeneration())
-                    owner.nextAttempt().also(owner.connection::updateAttempt).also {
+                    owner.nextAttempt()?.also(owner.connection::updateAttempt)?.also {
                         publishStateLocked(ConnectionState.Connecting(
                             owner.identity.accountId,
                             owner.identity.generation,
                         ))
-                    }
+                    } ?: return
                 }
             }
             val connected = try {
@@ -825,7 +871,8 @@ internal class ActiveSessionController(
                 }
                 false
             } catch (_: Exception) {
-                false
+                fail(owner, attempt, SessionFailureReason.CONFIGURATION)
+                return
             }
             if (!connected) {
                 stateMutex.withLock {
@@ -851,11 +898,11 @@ internal class ActiveSessionController(
             }
             if (finished) return
         }
-        val finalAttempt = stateMutex.withLock {
+        stateMutex.withLock {
             if (!owns(owner)) return
-            owner.attemptIdentity ?: return
+            owner.reconnectJob = null
+            publishReconnectWait(owner)
         }
-        fail(owner, finalAttempt, SessionFailureReason.RETRY_EXHAUSTED)
     }
 
     private fun retireDispatchLocked(lease: DispatchLease): RetiredDispatch? {
@@ -926,10 +973,11 @@ internal class ActiveSessionController(
     ) {
         val deadline = shutdownDeadline()
         val record = stateMutex.withLock {
-            if (!owns(owner, attempt)) return
+            val terminal = owner.terminalLoss.get()
+            if (!owns(owner) || (!owns(owner, attempt) && terminal != SessionEvent.ConnectionLost(attempt, reason))) return
             revokeOwnerLocked(
                 owner,
-                ConnectionState.Failed(owner.identity.accountId, owner.identity.generation, reason),
+                ConnectionState.Failed(owner.identity.accountId, owner.identity.generation, terminal?.reason ?: reason),
                 deadline,
                 currentCoroutineContext()[Job],
             )
@@ -941,8 +989,14 @@ internal class ActiveSessionController(
         finalState: ConnectionState,
         deadlineMillis: Long,
         preserveTerminalStorageFailure: Boolean = false,
-    ) {
+        onlyIfDisconnected: Boolean = false,
+    ): Boolean {
         val record = stateMutex.withLock {
+            // Credential loading can overlap automatic recovery. Admission must share
+            // the revocation lock, not rely on a state check before suspended IO.
+            if (onlyIfDisconnected && (mutableState.value is ConnectionState.Connected ||
+                    mutableState.value is ConnectionState.Connecting || mutableState.value is ConnectionState.Switching ||
+                    mutableState.value is ConnectionState.Disconnecting)) return false
             val owner = current
             when {
                 owner != null -> revokeOwnerLocked(owner, finalState, deadlineMillis)
@@ -957,6 +1011,7 @@ internal class ActiveSessionController(
             }
         }
         record?.let { awaitRevocation(it) }
+        return true
     }
 
     private fun revokeOwnerLocked(
@@ -1009,6 +1064,9 @@ internal class ActiveSessionController(
             .also { owner.reconnectJob = null }
             ?.takeUnless { it === initiatingJob }
         reconnectJob?.cancel()
+        val probeJob = owner.probeJob.also { owner.probeJob = null }
+            ?.takeUnless { it === initiatingJob }
+        probeJob?.cancel()
         val disconnectJob = controllerScope.launch(start = CoroutineStart.LAZY) {
             disconnectSafely(owner.connection)
         }
@@ -1016,6 +1074,7 @@ internal class ActiveSessionController(
         record.cleanupJob = controllerScope.launch(start = CoroutineStart.LAZY) {
             inboundGate.withLock { Unit }
             reconnectJob?.join()
+            probeJob?.join()
             val dispatchResult = record.dispatchSettlement?.await()
                 ?: record.attachment?.finish()
                 ?: DispatchRevocationResult.COMPLETE
@@ -1175,9 +1234,9 @@ internal class ActiveSessionController(
     }
 
     private fun isHealthy(owner: OwnedSession, vararg acceptedAttempts: SessionAttemptIdentity): Boolean {
-        if (owner.lossObserved.get() in acceptedAttempts) return false
+        if (owner.terminalLoss.get() != null || owner.lossObserved.get() in acceptedAttempts) return false
         if (!owner.connection.isUsable) return false
-        return owner.lossObserved.get() !in acceptedAttempts
+        return owner.terminalLoss.get() == null && owner.lossObserved.get() !in acceptedAttempts
     }
 
     private data class OwnedSession(
@@ -1185,11 +1244,16 @@ internal class ActiveSessionController(
         val epoch: LifecycleEpoch,
         val connection: SessionConnection,
         val lossObserved: AtomicReference<SessionAttemptIdentity?> = AtomicReference(null),
+        val terminalLoss: AtomicReference<SessionEvent.ConnectionLost?> = AtomicReference(null),
         @Volatile var attemptIdentity: SessionAttemptIdentity? = null,
         var lastAttempt: Long = 0,
         var reconnectJob: Job? = null,
+        var probeJob: Job? = null,
+        var handledLoss: SessionAttemptIdentity? = null,
     ) {
-        fun nextAttempt(): SessionAttemptIdentity {
+        @Synchronized
+        fun nextAttempt(): SessionAttemptIdentity? {
+            if (terminalLoss.get() != null) return null
             lossObserved.set(null)
             lastAttempt += 1
             return SessionAttemptIdentity(
@@ -1200,8 +1264,14 @@ internal class ActiveSessionController(
             ).also { attemptIdentity = it }
         }
 
-        fun accepts(attempt: SessionAttemptIdentity): Boolean =
-            attempt.epoch == epoch && attemptIdentity == attempt
+        @Synchronized
+        fun observeLoss(event: SessionEvent.ConnectionLost) {
+            if (event.attempt.epoch != epoch || attemptIdentity != event.attempt) return
+            // Admission and successor allocation share this monitor. A delayed old
+            // callback cannot pass ownership then install its marker on a successor.
+            if (event.reason != SessionFailureReason.NETWORK) terminalLoss.compareAndSet(null, event)
+            lossObserved.set(event.attempt)
+        }
     }
 
     private data class RetiredDispatch(

@@ -694,13 +694,16 @@ class SessionRuntime(
         return true
     }
 
-    suspend fun retryUncertain(account: AccountConfiguration, key: RetryUncertainKey) {
-        if (key.accountId != account.id.value || messages.retryUncertain(key) == null) return
+    suspend fun retryUncertain(account: AccountConfiguration, key: RetryUncertainKey): Boolean {
+        if (key.accountId != account.id.value ||
+            messages.retryUncertain(key, requireActiveAccount = true) == null
+        ) return false
         val observation = controller.lifecycle.value
         val lease = observation.dispatchLease()
         if (lease?.identity?.accountId == account.id) {
             launchDispatch(lease, observation)
         }
+        return true
     }
 
     private suspend fun launchDispatch(
@@ -803,6 +806,26 @@ class SessionRuntime(
         }
     }
 
+    internal fun acceptsReconnectAction(accountId: String): Boolean =
+        controller.lifecycle.value.owner?.accountId?.value?.let { it == accountId } ?: true
+
+    fun reconcileConnection(accountId: AccountId? = null) {
+        val observed = controller.lifecycle.value
+        if (accountId != null && observed.owner?.accountId != accountId) return
+        scope.launch { controller.reconcile(observed) }
+    }
+
+    suspend fun reconnectAccount(
+        accountId: AccountId,
+        isCurrent: () -> Boolean = { true },
+    ): ConnectionCommandOutcome = accountCommands.withLock {
+        if (!isCurrent() || accounts.activeAccount.first()?.id != accountId) return@withLock ConnectionCommandOutcome.STALE
+        if (state.value is ConnectionState.Connected || state.value is ConnectionState.Connecting ||
+            state.value is ConnectionState.Switching || state.value is ConnectionState.Disconnecting
+        ) return@withLock ConnectionCommandOutcome.RUNNING
+        connectStoredActive(isCurrent, onlyIfDisconnected = true)
+    }
+
     suspend fun activate(
         accountId: AccountId,
         isCurrent: () -> Boolean = { true },
@@ -855,6 +878,7 @@ class SessionRuntime(
 
     private suspend fun connectStoredActive(
         isCurrent: () -> Boolean = { true },
+        onlyIfDisconnected: Boolean = false,
     ): ConnectionCommandOutcome {
         val active = accounts.activeAccount.first() ?: run {
             if (isCurrent()) controller.requireCredentials()
@@ -871,7 +895,7 @@ class SessionRuntime(
                 }
                 messages.attemptIdentitylessRepair(active.id.value)
                 if (!isCurrent()) return@withContext ConnectionCommandOutcome.STALE
-                controller.start(active, access.value)
+                controller.start(active, access.value, onlyIfDisconnected = onlyIfDisconnected)
                 outcome()
             } finally {
                 if (access is CredentialAccess.Available) access.value.fill('\u0000')
@@ -1209,6 +1233,9 @@ internal class SerializedServiceCommandRunner(private val scope: CoroutineScope)
     private var latestId = 0
     private var active: Job? = null
 
+    val isRunning: Boolean
+        @Synchronized get() = active?.isActive == true
+
     @Synchronized
     fun submit(startId: Int, block: suspend (() -> Boolean) -> Unit) {
         latestId = startId
@@ -1335,6 +1362,7 @@ class XmppConnectionService : Service() {
     private var latestStartId = 0
     private var stateJob: Job? = null
     private var visibilityJob: Job? = null
+    private var networkMonitor: ConnectionNetworkMonitor? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -1375,11 +1403,14 @@ class XmppConnectionService : Service() {
     private fun attachRuntime(app: NemaApplication) {
         if (::runtime.isInitialized) return
         runtime = app.sessionRuntime
+        networkMonitor = ConnectionNetworkMonitor(getSystemService(android.net.ConnectivityManager::class.java)) {
+            runtime.reconcileConnection()
+        }.also { it.start() }
         runtime.onInsertedInbound = { accountId, peer, preview, thread -> notifyInbound(accountId, peer, preview, thread) }
         stateJob = serviceScope.launch {
             runtime.state.collect { state ->
-                sessionOwner.claimTerminal(state, runtime.state.value)?.let { startId ->
-                    stopAfterTerminal(startId)
+                sessionOwner.claimTerminal(state, runtime.state.value)?.let {
+                    stopAfterTerminal()
                     return@collect
                 }
                 if (!foregroundRequired) return@collect
@@ -1397,6 +1428,9 @@ class XmppConnectionService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Android stopSelf(id) must cover every delivered start, even an ignored
+        // Reconnect. Command/session authority is still owned by their own tokens.
+        latestStartId = startId
         val app = application as NemaApplication
         val startup = app.databaseStartup.value
         if (startup != DatabaseStartup.OPENING && startup != DatabaseStartup.READY) {
@@ -1406,10 +1440,16 @@ class XmppConnectionService : Service() {
             stopSelf(startId)
             return START_NOT_STICKY
         }
-        visibilityShutdown.supersede()
-        latestStartId = startId
         val action = intent?.action ?: ACTION_CONNECT
         val accountId = intent?.getStringExtra(EXTRA_ACCOUNT_ID)
+        // Reconnect is not an account-activation command and cannot supersede an in-flight
+        // Connect, Switch, Stop or Sign out. Check before canceling commands or ownership.
+        if (action == ACTION_RECONNECT && (commands.isRunning || accountId == null ||
+                (::runtime.isInitialized && !runtime.acceptsReconnectAction(accountId)))) {
+            if (!foregroundRequired && !commands.isRunning) stopSelf(startId)
+            return if (foregroundRequired) START_STICKY else START_NOT_STICKY
+        }
+        visibilityShutdown.supersede()
         foregroundRequired = commandRequiresForegroundVisibility(action)
         if (!foregroundRequired && ::runtime.isInitialized) {
             runtime.invalidatePendingActivation()
@@ -1444,7 +1484,7 @@ class XmppConnectionService : Service() {
                     val ready = app.databaseStartup.first { it != DatabaseStartup.OPENING }
                     if (!current()) return@command
                     if (ready != DatabaseStartup.READY) {
-                        stopAfterCommand(startId, current)
+                        stopAfterCommand(current)
                         return@command
                     }
                     attachRuntime(app)
@@ -1460,27 +1500,45 @@ class XmppConnectionService : Service() {
                             finishOutcome(outcome, startId, current)
                         }
                         ACTION_CONNECT -> finishOutcome(runtime.connectActive(current), startId, current)
+                        ACTION_RECONNECT -> {
+                            val account = intent?.getStringExtra(EXTRA_ACCOUNT_ID)?.let(AccountId::require)
+                            val outcome = if (account == null) ConnectionCommandOutcome.STALE
+                                else runtime.reconnectAccount(account, current)
+                            // A delayed action for another account must not stop its successor's service.
+                            val retained = outcome == ConnectionCommandOutcome.STALE &&
+                                (runtime.state.value is ConnectionState.Connected ||
+                                    runtime.state.value is ConnectionState.Connecting ||
+                                    runtime.state.value is ConnectionState.ReconnectWait)
+                            val finished = when {
+                                retained -> ConnectionCommandOutcome.RUNNING
+                                outcome == ConnectionCommandOutcome.STALE -> ConnectionCommandOutcome.TERMINAL
+                                else -> outcome
+                            }
+                            finishOutcome(finished, startId, current)
+                        }
                         ACTION_STOP -> {
                             runtime.stop()
-                            stopAfterCommand(startId, current)
+                            stopAfterCommand(current)
                         }
                         ACTION_SIGN_OUT -> {
                             runtime.signOut()
-                            stopAfterCommand(startId, current)
+                            stopAfterCommand(current)
                         }
                         else -> {
                             runtime.stop()
-                            stopAfterCommand(startId, current)
+                            stopAfterCommand(current)
                         }
                     }
                 },
-                failCurrent = { failCurrentCommand(startId, current) },
+                failCurrent = { failCurrentCommand(current) },
             )
         }
         return if (action == ACTION_STOP || action == ACTION_SIGN_OUT) START_NOT_STICKY else START_STICKY
     }
 
     override fun onDestroy() {
+        networkMonitor?.close()
+        networkMonitor = null
         stateJob?.cancel()
         visibilityJob?.cancel()
         visibilityShutdown.supersede()
@@ -1502,32 +1560,32 @@ class XmppConnectionService : Service() {
             ConnectionCommandOutcome.RUNNING -> sessionOwner.activate(startId, current)
             ConnectionCommandOutcome.NEEDS_CREDENTIALS,
             ConnectionCommandOutcome.TERMINAL,
-            -> stopAfterCommand(startId, current)
+            -> stopAfterCommand(current)
             ConnectionCommandOutcome.STALE -> Unit
         }
     }
 
-    private suspend fun stopAfterCommand(startId: Int, current: () -> Boolean) {
+    private suspend fun stopAfterCommand(current: () -> Boolean) {
         if (!current()) return
         foregroundRequired = false
         sessionOwner.invalidate()
         failClosedForeground(
             stopRuntime = {},
             removeForeground = { stopForeground(STOP_FOREGROUND_REMOVE) },
-            stopService = { stopSelf(startId) },
+            stopService = { stopSelf(latestStartId) },
         )
     }
 
-    private suspend fun stopAfterTerminal(startId: Int) {
+    private suspend fun stopAfterTerminal() {
         foregroundRequired = false
         failClosedForeground(
             stopRuntime = {},
             removeForeground = { stopForeground(STOP_FOREGROUND_REMOVE) },
-            stopService = { stopSelf(startId) },
+            stopService = { stopSelf(latestStartId) },
         )
     }
 
-    private suspend fun failCurrentCommand(startId: Int, current: () -> Boolean) {
+    private suspend fun failCurrentCommand(current: () -> Boolean) {
         if (!current()) return
         foregroundRequired = false
         sessionOwner.invalidate()
@@ -1535,7 +1593,7 @@ class XmppConnectionService : Service() {
             current = current,
             stopRuntime = { if (::runtime.isInitialized) runtime.stop() },
             removeForeground = { stopForeground(STOP_FOREGROUND_REMOVE) },
-            stopService = { stopSelf(startId) },
+            stopService = { stopSelf(latestStartId) },
         )
     }
 
@@ -1549,7 +1607,7 @@ class XmppConnectionService : Service() {
                 current = { visibilityShutdown.isCurrent(token) },
                 stopRuntime = { if (::runtime.isInitialized) runtime.stop() },
                 removeForeground = { stopForeground(STOP_FOREGROUND_REMOVE) },
-                stopService = { stopSelf(token.ownerStartId) },
+                stopService = { stopSelf(latestStartId) },
             )
         }
     }
@@ -1611,6 +1669,7 @@ class XmppConnectionService : Service() {
 
     companion object {
         const val ACTION_ACTIVATE = "org.thanosapollo.nema.action.ACTIVATE_ACCOUNT"
+        const val ACTION_RECONNECT = "org.thanosapollo.nema.RECONNECT"
         const val ACTION_CONNECT = "org.thanosapollo.nema.action.CONNECT"
         const val ACTION_STOP = "org.thanosapollo.nema.action.STOP"
         const val ACTION_SIGN_OUT = "org.thanosapollo.nema.action.SIGN_OUT"
@@ -1620,6 +1679,11 @@ class XmppConnectionService : Service() {
         private const val NOTIFICATION_ID = 1001
         private const val MESSAGE_NOTIFICATION_BASE = 2000
         private const val VISIBILITY_CHECK_MILLIS = 1_000L
+
+        fun reconnectIntent(context: Context, accountId: AccountId) =
+            Intent(context, XmppConnectionService::class.java)
+                .setAction(ACTION_RECONNECT)
+                .putExtra(EXTRA_ACCOUNT_ID, accountId.value)
 
         fun activateIntent(context: Context, accountId: AccountId) =
             Intent(context, XmppConnectionService::class.java)

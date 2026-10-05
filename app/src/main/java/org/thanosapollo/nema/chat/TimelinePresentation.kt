@@ -23,7 +23,9 @@ internal fun TimelineRow.toPresentation(replyReferenceIds: Set<String>) = Timeli
     } else {
         null
     },
-    retryUncertainKey = if (protectedState == "NONE" && outboxStatus == OutboxStatus.UNCERTAIN.name) {
+    retryUncertainKey = if (protectedState == "NONE" && direction == MessageDirection.OUTBOUND &&
+        receiptStage == null && outboxStatus == OutboxStatus.UNCERTAIN.name
+    ) {
         RetryUncertainKey(
             accountId = accountId,
             operationId = requireNotNull(operationId),

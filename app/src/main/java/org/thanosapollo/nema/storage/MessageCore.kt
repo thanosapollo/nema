@@ -3765,9 +3765,13 @@ class MessageStore private constructor(
     suspend fun claim(accountId: String, operationId: String, generation: Long): OutboxClaim? {
         require(generation > 0) { "Connection generation must be positive" }
         return database.withTransaction {
-            val current = database.messageDao().outbox(accountId, operationId)
-                ?: return@withTransaction null
-            if (current.status != OutboxStatus.PENDING) return@withTransaction null
+            val dao = database.messageDao()
+            val current = dao.outbox(accountId, operationId) ?: return@withTransaction null
+            val message = dao.message(accountId, current.messageId) ?: return@withTransaction null
+            // Positive evidence may follow requeue but precede dispatch admission.
+            if (current.status != OutboxStatus.PENDING || current.receiptStage != null ||
+                message.isProtected() || message.direction != MessageDirection.OUTBOUND
+            ) return@withTransaction null
             val claimed = current.copy(
                 status = OutboxStatus.IN_FLIGHT,
                 generation = generation,
@@ -3789,18 +3793,26 @@ class MessageStore private constructor(
             it.copy(status = OutboxStatus.UNCERTAIN, failureReason = null)
         }
 
-    suspend fun retryUncertain(key: RetryUncertainKey): OutboxEntity? =
-        database.withTransaction {
-            val current = database.messageDao().outbox(key.accountId, key.operationId)
-                ?: return@withTransaction null
-            if (current.status != OutboxStatus.UNCERTAIN ||
-                current.generation != key.generation ||
-                current.attempt != key.attempt
-            ) return@withTransaction null
-            current.copy(status = OutboxStatus.PENDING, generation = null, failureReason = null).also {
-                database.messageDao().updateOutbox(it)
-            }
+    suspend fun retryUncertain(
+        key: RetryUncertainKey,
+        requireActiveAccount: Boolean = false,
+    ): OutboxEntity? = database.withTransaction {
+        // Read evidence and the target under the same Room transaction as requeue.
+        // A captured dialog key is authority for one attempt, not a new send.
+        if (requireActiveAccount && database.accountDao().activeAccountId() != key.accountId) {
+            return@withTransaction null
         }
+        val dao = database.messageDao()
+        val current = dao.outbox(key.accountId, key.operationId) ?: return@withTransaction null
+        val message = dao.message(key.accountId, current.messageId) ?: return@withTransaction null
+        if (current.status != OutboxStatus.UNCERTAIN || current.receiptStage != null ||
+            message.isProtected() || message.direction != MessageDirection.OUTBOUND ||
+            current.generation != key.generation || current.attempt != key.attempt
+        ) return@withTransaction null
+        current.copy(status = OutboxStatus.PENDING, generation = null, failureReason = null).also {
+            dao.updateOutbox(it)
+        }
+    }
 
     suspend fun recordDefiniteFailure(
         claim: OutboxClaim,

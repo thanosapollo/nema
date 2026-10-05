@@ -13,6 +13,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import org.thanosapollo.nema.createRobolectricComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.dp
@@ -104,6 +105,36 @@ class UnknownDeliveryTest {
             composeRule.onNodeWithText(label, useUnmergedTree = true).assertIsDisplayed()
             composeRule.onNodeWithText("Delivery unknown", useUnmergedTree = true).assertDoesNotExist()
         }
+    }
+
+    @Test fun uncertainMessageOffersRetryInActualMessageMenu() {
+        composeRule.setContent {
+            MaterialTheme { MessageTimeline(messages = listOf(row().toPresentation(emptySet()))) }
+        }
+        composeRule.onNodeWithTag("message-bubble-message")
+            .performSemanticsAction(SemanticsActions.OnClick)
+        composeRule.onNodeWithText("Retry send…").assertIsDisplayed()
+    }
+
+    @Test fun noKeyOrPositiveEvidenceNeverOffersRetry() {
+        val current = mutableStateOf(row().copy(receiptStage = MessageReceiptStage.RECEIVED.name))
+        composeRule.setContent {
+            MaterialTheme { MessageTimeline(messages = listOf(current.value.toPresentation(emptySet()))) }
+        }
+        composeRule.onNodeWithTag("message-bubble-message").performSemanticsAction(SemanticsActions.OnClick)
+        composeRule.onNodeWithText("Retry send…").assertDoesNotExist()
+        for (status in OutboxStatus.entries.filter { it != OutboxStatus.UNCERTAIN }) {
+            composeRule.runOnIdle { current.value = row().copy(outboxStatus = status.name) }
+            composeRule.onNodeWithText("Retry send…").assertDoesNotExist()
+        }
+    }
+
+    @Test fun protectedMessageHasNoRetryOrActionsEvenWithMalformedKey() {
+        val protected = row().toPresentation(emptySet()).copy(protectedState = "UNSUPPORTED")
+        composeRule.setContent { MaterialTheme { MessageTimeline(messages = listOf(protected)) } }
+        composeRule.onNodeWithTag("message-bubble-message").assertDoesNotExist()
+        composeRule.onNodeWithText("Retry send…").assertDoesNotExist()
+        composeRule.onNodeWithTag("retry-send-confirmation").assertDoesNotExist()
     }
 
     private fun row() = TimelineRow(

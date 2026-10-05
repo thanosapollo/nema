@@ -27,6 +27,11 @@ The first-class thread proof is specified in
 chats, synchronization requirements, and what has actually been demonstrated.
 Shared thread names are experimental work, not a released interoperability claim.
 
+* Connection recovery
+
+See [[file:docs/connection-recovery.md][Connection health and recovery]] for server probes, automatic recovery,
+Reconnect controls, and the limits of background delivery on Android.
+
 * Requirements
 
 + Android 8.0 (API 26) or newer

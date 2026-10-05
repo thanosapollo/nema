@@ -1,10 +1,15 @@
 #+TITLE: Nema changelog
 
-* Unreleased — 0.3.2-reliability.1
+* Unreleased — 0.3.2-reliability.2
+
++ Detect unresponsive XMPP connections with attempt-owned server probes; retain authorized recovery after transient outages and expose account-qualified Reconnect on Home, in chats and in Settings. Android idle restrictions can still delay background detection.
++ Offer Retry send for Delivery unknown messages with a duplicate warning. Retain the original operation and refuse a stale retry or one superseded by positive delivery evidence.
++ Retain unsupported legacy and modern OMEMO content through live delivery, archive replay and database upgrades. Show an honest protected-content placeholder, without decryption or unauthenticated message actions.
++ Give every physical reconnect its own native transport so delayed predecessor shutdown cannot retire its successor.
 
 + Keep native connectivity rejections retryable when a message has not reached transport admission. Ambiguous post-admission sends remain Delivery unknown and are not automatically replayed.
 + Prevent delayed reply-as-thread completion from replacing a newer conversation or Home destination. Retain committed reply drafts for recovery.
-+ Add a bounded semantic codec for legacy and modern OMEMO envelopes as an internal foundation. Encryption, key management and protected-content persistence are not implemented.
++ Add a bounded semantic codec for legacy and modern OMEMO envelopes as an internal foundation. Encryption, decryption, trust and key management are not implemented.
 
 * 0.3.1 — 2026-09-29
 

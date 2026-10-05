@@ -335,6 +335,9 @@ internal class SmackSessionConnection(
     private val mucOrderInstance = java.util.UUID.randomUUID().toString()
     private val rosterLifecycle = RosterConnectionLifecycle(entryGate)
     private val revoked = AtomicBoolean(false)
+    private val transportFailed = AtomicBoolean(false)
+    private val pingManager = org.jivesoftware.smackx.ping.PingManager.getInstanceFor(connection)
+    private var pingFailure: org.jivesoftware.smackx.ping.PingFailedListener? = null
     private val disconnectStarted = AtomicBoolean(false)
     private val dialStarted = AtomicBoolean(false)
     private val stableIdGate = StableIdDiscoveryGate()
@@ -406,7 +409,7 @@ internal class SmackSessionConnection(
     }
 
     override val isUsable: Boolean
-        get() = !revoked.get() && (connection !is OnionXmppConnection ||
+        get() = !revoked.get() && !transportFailed.get() && (connection !is OnionXmppConnection ||
             connectionListener.currentAttempt()?.let(connection::permitsTransport) == true) && isSmackSessionUsable(
             expectedBareJid = expectedBareJid,
             boundBareJid = connection.user?.asBareJid()?.toString(),
@@ -420,6 +423,11 @@ internal class SmackSessionConnection(
 
     override fun revoke() {
         synchronized(entryGate) { if (!revoked.compareAndSet(false, true)) return }
+        synchronized(entryGate) {
+            pingFailure?.let(pingManager::unregisterPingFailedListener)
+            pingFailure = null
+            pingManager.setPingInterval(-1)
+        }
         torSockets?.close()
         httpTransfer.close()
         rosterLifecycle.retireCurrent()
@@ -428,6 +436,29 @@ internal class SmackSessionConnection(
             connectionListener.localDisconnect()
             true
         }
+    }
+
+    private fun livenessFailed(attempt: SessionAttemptIdentity) {
+        val admitted = synchronized(entryGate) {
+            if (revoked.get() || connectionListener.currentAttempt() != attempt ||
+                !transportFailed.compareAndSet(false, true)) return@synchronized false
+            // Cached native flags may still say authenticated. Retire admission before publishing loss.
+            connectionListener.livenessFailed()
+            true
+        }
+        if (admitted) {
+            revoke()
+            runCatching { connection.instantShutdown() }
+        }
+    }
+
+    override suspend fun probe(attempt: SessionAttemptIdentity): Boolean = runInterruptible(Dispatchers.IO) {
+        synchronized(entryGate) {
+            if (revoked.get() || connectionListener.currentAttempt() != attempt || !isUsable) return@runInterruptible false
+        }
+        val healthy = try { pingManager.pingMyServer(false, 10_000L) } catch (_: org.jivesoftware.smack.SmackException.NotConnectedException) { false }
+        if (!healthy) livenessFailed(attempt)
+        synchronized(entryGate) { healthy && !revoked.get() && connectionListener.currentAttempt() == attempt && isUsable }
     }
 
     override suspend fun connect(credential: CharArray, attempt: SessionAttemptIdentity) {
@@ -1216,7 +1247,14 @@ internal class SmackSessionConnection(
                 }
             ) throw CancellationException("Session attempt replaced")
             if (isUsable) {
-                connectionListener.connected()
+                synchronized(entryGate) {
+                    if (revoked.get()) throw CancellationException("Session revoked")
+                    connectionListener.connected()
+                    pingFailure = org.jivesoftware.smackx.ping.PingFailedListener { livenessFailed(attempt) }
+                        .also(pingManager::registerPingFailedListener)
+                    // Smack 4.4.8 uses max(replyTimeout, 120 seconds) for automatic ping failure.
+                    pingManager.setPingInterval(60)
+                }
             } else {
                 connectionListener.attemptFailed(attempt)
             }
@@ -1294,6 +1332,8 @@ internal class SmackSessionConnection(
             rosterLifecycle.retire(attempt)
             lossNotifier.attemptFailed()
         }
+
+        fun livenessFailed() = lossNotifier.remoteClosed(SessionFailureReason.NETWORK)
 
         fun connected() = lossNotifier.connected()
 
@@ -1391,6 +1431,19 @@ internal fun classifySmackFailure(error: Exception): SessionFailureReason {
                 it is SmackException.SecurityRequiredException
         } -> SessionFailureReason.TLS_CERTIFICATE
         causes.any { it is SASLErrorException } -> SessionFailureReason.AUTHENTICATION
+        causes.any { it is org.jivesoftware.smack.XMPPException.StreamErrorException } -> when (
+            causes.filterIsInstance<org.jivesoftware.smack.XMPPException.StreamErrorException>().first().streamError.condition
+        ) {
+            org.jivesoftware.smack.packet.StreamError.Condition.not_authorized -> SessionFailureReason.AUTHENTICATION
+            org.jivesoftware.smack.packet.StreamError.Condition.connection_timeout,
+            org.jivesoftware.smack.packet.StreamError.Condition.system_shutdown,
+            org.jivesoftware.smack.packet.StreamError.Condition.reset,
+            org.jivesoftware.smack.packet.StreamError.Condition.conflict,
+            org.jivesoftware.smack.packet.StreamError.Condition.internal_server_error,
+            org.jivesoftware.smack.packet.StreamError.Condition.remote_connection_failed,
+            org.jivesoftware.smack.packet.StreamError.Condition.resource_constraint -> SessionFailureReason.NETWORK
+            else -> SessionFailureReason.CONFIGURATION
+        }
         causes.any { it is IOException || it is SmackException } -> SessionFailureReason.NETWORK
         else -> SessionFailureReason.CONFIGURATION
     }

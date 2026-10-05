@@ -527,6 +527,22 @@ private fun AccountConnectionScreen(
                 )
             }
         }
+        LaunchedEffect(activityResumed, account.id) {
+            if (activityResumed) application.sessionRuntime.reconcileConnection(account.id)
+        }
+        var reconnectPending by remember(account.id) { mutableStateOf(false) }
+        LaunchedEffect(connectionState) { reconnectPending = false }
+        val reconnectBusy = connectionState is ConnectionState.Connecting ||
+            connectionState is ConnectionState.Switching || connectionState is ConnectionState.Disconnecting
+        val recovery = org.thanosapollo.nema.ui.ConnectionRecovery(account.id, !reconnectPending && !reconnectBusy)
+            .takeUnless { connectionState is ConnectionState.Connected }
+        fun reconnectAccount(id: org.thanosapollo.nema.xmpp.transport.AccountId) {
+            if (id != account.id || reconnectPending || reconnectBusy) return
+            reconnectPending = true
+            runCatching {
+                context.startForegroundService(XmppConnectionService.reconnectIntent(context, id))
+            }.onFailure { reconnectPending = false }
+        }
         val shellAppearance = AppearanceSpec(themeMode = themeAuthority.palette.mode)
         Scaffold(
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -565,12 +581,15 @@ private fun AccountConnectionScreen(
                             onLoadOlder = presenter::loadOlderHistory,
                             composerOwner = composerOwner,
                             connectionStatus = privacySafeStatus(connectionState),
+                            connectionRecovery = recovery,
+                            onReconnect = ::reconnectAccount,
                             onSelectPeer = presenter::selectPeer,
                             onJoinRoom = presenter::joinRoom,
                             onCloseConversation = presenter::closeConversation,
                             onMarkVisibleRead = presenter::markVisibleConversationRead,
                             onDraftChange = presenter::updateDraft,
                             onSend = presenter::sendDraft,
+                            onRetryUncertain = presenter::retryUncertain,
                             onAcknowledgeCompletedSends = presenter::acknowledgeCompletedSends,
                             onStartNewThread = presenter::startNewThread,
                             onContinueThread = presenter::continueThread,
@@ -691,10 +710,10 @@ private fun AccountConnectionScreen(
                                     android.widget.Toast.makeText(context, "Install Orbot from orbot.app, then retry", android.widget.Toast.LENGTH_LONG).show()
                                 }
                             },
-                            onRetryTor = {
-                                context.startForegroundService(XmppConnectionService.activateIntent(context, account.id))
-                            },
+                            onRetryTor = { reconnectAccount(account.id) },
                             connectionStatus = privacySafeStatus(connectionState),
+                            connectionRecovery = recovery,
+                            onReconnect = ::reconnectAccount,
                             appearanceScope = appearanceScope,
                             appearance = shellAppearance,
                             appearanceInherited = appearanceScope !is AppearanceScope.App &&

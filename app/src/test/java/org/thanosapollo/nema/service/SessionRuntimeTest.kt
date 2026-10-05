@@ -98,6 +98,77 @@ import org.thanosapollo.nema.xmpp.transport.OutgoingReactionEnvelope
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34], application = Application::class)
 class SessionRuntimeTest {
+    @Test
+    fun `reconnect admitted while waiting cannot replace transport recovered during credential load`() = runTest {
+        val blobs = MemoryBlobStore()
+        val f = connectedRuntime(backgroundScope, "reconnect-io-race", blobs = blobs)
+        val entered = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val releaseRecovery = CompletableDeferred<Unit>()
+        f.connection.nextReconnectGate = releaseRecovery
+        try {
+            f.connection.emitLoss(SessionFailureReason.NETWORK)
+            f.runtime.state.first { it is ConnectionState.ReconnectWait }
+            runCurrent()
+            blobs.beforeRead = {
+                entered.countDown()
+                check(release.await(10, java.util.concurrent.TimeUnit.SECONDS)) { "credential read barrier expired" }
+            }
+            val manual = async(Dispatchers.IO) { f.runtime.reconnectAccount(f.account.id) }
+            // Keep virtual retry time paused until the real IO boundary admits this action.
+            assertTrue("manual Reconnect reached credential loading", entered.await(5, java.util.concurrent.TimeUnit.SECONDS))
+            advanceTimeBy(1_000L)
+            releaseRecovery.complete(Unit)
+            runCurrent()
+            val recovered = f.runtime.state.first { it is ConnectionState.Connected }
+            val attempt = f.connection.attemptIdentity
+            release.countDown()
+            assertEquals(ConnectionCommandOutcome.RUNNING, manual.await())
+            assertEquals(recovered, f.runtime.state.value)
+            assertEquals(attempt, f.connection.attemptIdentity)
+            assertEquals(1, f.connections.created.size)
+            assertEquals(0, f.connection.disconnectCalls)
+        } finally {
+            release.countDown()
+            releaseRecovery.complete(Unit)
+            f.runtime.stop()
+        }
+    }
+
+    @Test
+    fun `delayed same account reconnect leaves recovered healthy transport intact`() = runTest {
+        val f = connectedRuntime(backgroundScope, "reconnect-healthy")
+        val connected = f.runtime.state.value
+        assertEquals(ConnectionCommandOutcome.RUNNING, f.runtime.reconnectAccount(f.account.id))
+        assertEquals(connected, f.runtime.state.value)
+        assertEquals(1, f.connections.created.size)
+    }
+
+    @Test
+    fun `reconnect action cannot reactivate a retired account and explicit stop needs fresh user intent`() = runTest {
+        val f = connectedRuntime(backgroundScope, "reconnect-first")
+        val successor = account("reconnect-second")
+        f.accounts.save(successor)
+        f.credentials.store(successor.id, "secret".toCharArray())
+        assertEquals(ConnectionCommandOutcome.RUNNING, f.runtime.activate(successor.id))
+        val connected = f.runtime.state.value
+        assertEquals(ConnectionCommandOutcome.STALE, f.runtime.reconnectAccount(f.account.id))
+        assertEquals(connected, f.runtime.state.value)
+        assertEquals(successor.id, f.accounts.activeAccount.first()!!.id)
+        assertEquals(2, f.connections.created.size)
+        f.runtime.stop()
+        f.runtime.reconcileConnection(successor.id)
+        runCurrent()
+        assertEquals(ConnectionState.Stopped, f.runtime.state.value)
+        assertEquals(ConnectionCommandOutcome.RUNNING, f.runtime.reconnectAccount(successor.id))
+        assertEquals(3, f.connections.created.size)
+        f.runtime.signOut()
+        f.runtime.reconcileConnection(successor.id)
+        runCurrent()
+        assertTrue(f.runtime.state.value is ConnectionState.NeedsCredentials)
+        assertEquals(ConnectionCommandOutcome.STALE, f.runtime.reconnectAccount(successor.id))
+    }
+
     private lateinit var context: Context
     private lateinit var databaseName: String
     private lateinit var database: NemaDatabase
@@ -2840,10 +2911,11 @@ class SessionRuntimeTest {
     }
 
     private suspend fun connectedRuntime(
-        scope: CoroutineScope, id: String, clock: () -> Long = { REACTION_NOW },
+        scope: CoroutineScope, id: String, blobs: CredentialBlobStore = MemoryBlobStore(),
+        clock: () -> Long = { REACTION_NOW },
     ): RuntimeFixture {
         val accounts = AccountRepository(database.accountDao())
-        val credentials = CredentialVault(MemoryBlobStore(), PlaintextTestCipher())
+        val credentials = CredentialVault(blobs, PlaintextTestCipher())
         val store = repairObserver?.let { MessageStore.observingWrites(database, observer = it) }
             ?: MessageStore(database) { REACTION_NOW }
         val connections = RecordingConnectionFactory()
@@ -3047,7 +3119,12 @@ class SessionRuntimeTest {
     private class MemoryBlobStore : CredentialBlobStore {
         private val values = mutableMapOf<AccountId, WrappedCredential>()
 
-        override fun read(accountId: AccountId): WrappedCredential? = values[accountId]
+        @Volatile var beforeRead: () -> Unit = {}
+
+        override fun read(accountId: AccountId): WrappedCredential? {
+            beforeRead()
+            return values[accountId]
+        }
 
         override fun write(accountId: AccountId, credential: WrappedCredential) {
             values[accountId] = credential
@@ -3204,9 +3281,14 @@ class SessionRuntimeTest {
             isUsable = true
         }
 
+        var nextReconnectGate: CompletableDeferred<Unit>? = null
+
         override suspend fun reconnect(attempt: SessionAttemptIdentity) {
             attemptIdentity = attempt
             repairRegistry.begin(attempt)
+            val gate = nextReconnectGate
+            nextReconnectGate = null
+            gate?.await()
             isUsable = true
         }
 

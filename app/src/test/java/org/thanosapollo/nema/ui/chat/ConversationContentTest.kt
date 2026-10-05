@@ -1759,12 +1759,15 @@ class ConversationContentTest {
             useUnmergedTree = true,
         ).assertIsDisplayed()
         composeRule.onNodeWithText("Talos is typing...").assertIsDisplayed()
-        composeRule.onNode(
-            hasTestTag("conversation-top-bar") and hasAnyDescendant(
+        // Home stays composed beneath the chat; select the foreground chat row.
+        val recoveryRows = composeRule.onAllNodes(
+            hasTestTag("connection-status") and hasAnyDescendant(
                 androidx.compose.ui.test.hasText("Reconnecting"),
             ),
             useUnmergedTree = true,
-        ).assertIsDisplayed()
+        )
+        recoveryRows.assertCountEquals(2)
+        recoveryRows[1].assertIsDisplayed()
         composeRule.onNode(
             hasTestTag("conversation-top-bar") and hasAnyDescendant(hasTestTag("typing-indicator")),
             useUnmergedTree = true,

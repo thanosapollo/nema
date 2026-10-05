@@ -47,6 +47,8 @@ fun AccountSettingsContent(
     torRequired: Boolean = false,
     onStartOrbot: () -> Unit = {},
     onRetryTor: () -> Unit = {},
+    connectionRecovery: ConnectionRecovery? = null,
+    onReconnect: (AccountId) -> Unit = {},
     update: UpdateUiModel? = null,
     onCheckForUpdates: () -> Unit = {},
     onDownloadUpdate: () -> Unit = {},
@@ -64,17 +66,6 @@ fun AccountSettingsContent(
             title = "Settings",
             listTag = "settings-list",
         ) {
-            connectionStatus?.let { status ->
-                quietConnectionStatus(status)?.let { quietStatus ->
-                    item {
-                        Text(
-                            quietStatus,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
             if (torRequired) {
                 item {
                     SettingsRow(
@@ -90,6 +81,7 @@ fun AccountSettingsContent(
                         title = "Retry Tor connection",
                         supportingText = "Start Orbot first. Nema never retries over a direct connection.",
                         onClick = onRetryTor,
+                        enabled = connectionRecovery?.enabled ?: (connectionStatus != "Connecting" && connectionStatus != "Switching account"),
                         modifier = Modifier.testTag("retry-tor"),
                         role = Role.Button,
                     )
@@ -138,6 +130,9 @@ fun AccountSettingsContent(
                     title = "Session",
                     modifier = Modifier.testTag("settings-section-session"),
                 )
+            }
+            connectionStatus?.let { status ->
+                item { ConnectionStatusRow(status, connectionRecovery, onReconnect) }
             }
             item {
                 SettingsRow(

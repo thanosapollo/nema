@@ -71,6 +71,8 @@ fun HomeContent(
     onJoinRoom: suspend (String) -> Boolean = onSelectPeer,
     onOpenOwnProfile: () -> Unit = {},
     ownPhotoBytes: ByteArray? = null,
+    connectionRecovery: ConnectionRecovery? = null,
+    onReconnect: (org.thanosapollo.nema.xmpp.transport.AccountId) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val scope = rememberCoroutineScope()
@@ -98,7 +100,6 @@ fun HomeContent(
     LaunchedEffect(newestPeer, followNewest) {
         if (followNewest) listState.scrollToItem(0)
     }
-    val status = quietConnectionStatus(connectionStatus)
     Box(modifier.fillMaxSize()) {
         Column(Modifier.fillMaxSize()) {
             TopAppBar(
@@ -120,9 +121,6 @@ fun HomeContent(
                     } else {
                         Column {
                             Text("Nema", style = MaterialTheme.typography.titleLarge)
-                            status?.let {
-                                Text(it, style = MaterialTheme.typography.labelSmall)
-                            }
                         }
                     }
                 },
@@ -148,6 +146,7 @@ fun HomeContent(
                 ),
                 windowInsets = WindowInsets(0, 0, 0, 0),
             )
+            ConnectionStatusRow(connectionStatus, connectionRecovery, onReconnect)
             if (visible.isEmpty()) {
                 Box(Modifier.weight(1f).fillMaxSize()) {
                     if (!conversationsReady) {

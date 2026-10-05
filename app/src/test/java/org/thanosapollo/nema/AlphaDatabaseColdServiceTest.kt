@@ -51,6 +51,7 @@ class AlphaDatabaseColdServiceTest {
 
     @After fun close() {
         app.release.countDown()
+        app.credentialDeleteRelease.countDown()
         settled()
         service?.destroy()
         app.fixtureScope.cancel()
@@ -135,6 +136,67 @@ class AlphaDatabaseColdServiceTest {
         assertNull(app.sessionRuntime.onInsertedInbound)
     }
 
+    @Test fun reconnectDuringSignOutCannotStopServiceBeforeDeletionCompletes() {
+        val running = start()
+        ready()
+        awaitCommand()
+        app.holdCredentialDelete = true
+        running.onStartCommand(Intent().setAction(XmppConnectionService.ACTION_SIGN_OUT), 0, 2)
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (!app.credentialDeleteEntered.await(1, TimeUnit.MILLISECONDS) && System.nanoTime() < deadline) {
+            shadowOf(Looper.getMainLooper()).idle()
+        }
+        assertEquals(0L, app.credentialDeleteEntered.count)
+        running.onStartCommand(XmppConnectionService.reconnectIntent(app, AccountId.require("a")), 0, 3)
+        assertFalse("ignored Reconnect cannot destroy unfinished Sign out", shadowOf(running).isStoppedBySelf)
+        app.credentialDeleteRelease.countDown()
+        val stoppedDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+        while (!shadowOf(running).isStoppedBySelf && System.nanoTime() < stoppedDeadline) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.yield()
+        }
+        assertEquals(listOf("a"), app.deletedCredentials.toList())
+        assertNull(runBlocking { app.sessionRuntime.activeAccount.first() })
+        assertTrue(shadowOf(running).isStoppedBySelf)
+        assertEquals("Android stop must cover the ignored newer startId", 3, shadowOf(running).stopSelfId)
+        assertTrue(shadowOf(running).isForegroundStopped)
+    }
+
+    @Test fun staleReconnectAfterSignOutStopsItsUnownedForegroundService() {
+        start()
+        ready()
+        awaitCommand()
+        runBlocking { app.sessionRuntime.signOut() }
+        service!!.destroy()
+        service = null
+        val fresh = Robolectric.buildService(XmppConnectionService::class.java).create()
+        service = fresh
+        val running = fresh.get()
+        running.onStartCommand(XmppConnectionService.reconnectIntent(app, AccountId.require("a")), 0, 2)
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (!shadowOf(running).isStoppedBySelf && System.nanoTime() < deadline) {
+            shadowOf(Looper.getMainLooper()).idle()
+            Thread.yield()
+        }
+        assertTrue("stale retry must stop its unowned foreground service", shadowOf(running).isStoppedBySelf)
+        assertTrue(shadowOf(running).isForegroundStopped)
+        assertEquals(listOf("a"), app.connects.toList())
+        assertNull(runBlocking { app.sessionRuntime.activeAccount.first() })
+    }
+
+    @Test fun staleReconnectCannotCancelPendingSuccessorActivation() {
+        val running = start()
+        running.onStartCommand(Intent().setAction(XmppConnectionService.ACTION_ACTIVATE)
+            .putExtra(XmppConnectionService.EXTRA_ACCOUNT_ID, "b"), 0, 2)
+        running.onStartCommand(Intent().setAction(XmppConnectionService.ACTION_RECONNECT)
+            .putExtra(XmppConnectionService.EXTRA_ACCOUNT_ID, "a"), 0, 3)
+        ready()
+        awaitCommand()
+        assertEquals(listOf("b"), app.connects.toList())
+        assertFalse(shadowOf(running).isStoppedBySelf)
+        assertFalse(shadowOf(running).isForegroundStopped)
+    }
+
     @Test fun latestActivationReplacesDeferredStickyConnect() {
         val running = start()
         running.onStartCommand(Intent().setAction(XmppConnectionService.ACTION_ACTIVATE)
@@ -213,6 +275,10 @@ open class ColdServiceApplication : NemaApplication() {
     val entered = CountDownLatch(1)
     val release = CountDownLatch(1)
     val connected = CountDownLatch(1)
+    val credentialDeleteEntered = CountDownLatch(1)
+    val credentialDeleteRelease = CountDownLatch(1)
+    val deletedCredentials = CopyOnWriteArrayList<String>()
+    @Volatile var holdCredentialDelete = false
     val connects = CopyOnWriteArrayList<String>()
     val deletedNames = CopyOnWriteArrayList<String>()
     val fixtureScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -247,7 +313,13 @@ open class ColdServiceApplication : NemaApplication() {
         val vault = CredentialVault(object : CredentialBlobStore {
             override fun read(accountId: AccountId) = WrappedCredential(byteArrayOf(1), "fixture-only".toByteArray())
             override fun write(accountId: AccountId, credential: WrappedCredential) = error("No credential writes")
-            override fun delete(accountId: AccountId) = Unit
+            override fun delete(accountId: AccountId) {
+                if (holdCredentialDelete) {
+                    credentialDeleteEntered.countDown()
+                    check(credentialDeleteRelease.await(20, TimeUnit.SECONDS)) { "credential deletion barrier expired" }
+                }
+                deletedCredentials += accountId.value
+            }
         }, object : CredentialCipher {
             override fun encrypt(accountId: AccountId, plaintext: ByteArray) = error("No encryption")
             override fun decrypt(accountId: AccountId, credential: WrappedCredential) = credential.ciphertext.copyOf()

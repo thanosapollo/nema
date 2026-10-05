@@ -161,7 +161,6 @@ import org.thanosapollo.nema.ui.SettingsProfileScreen
 import org.thanosapollo.nema.ui.SettingsRow
 import org.thanosapollo.nema.ui.SettingsRowTone
 import org.thanosapollo.nema.ui.SettingsSectionHeader
-import org.thanosapollo.nema.ui.quietConnectionStatus
 import org.thanosapollo.nema.ui.theme.LocalChatBackgroundUri
 import org.thanosapollo.nema.ui.theme.readableOn
 import org.thanosapollo.nema.ui.theme.toComposeColor
@@ -251,6 +250,7 @@ fun ConversationContent(
     onMarkVisibleRead: suspend (VisibleReadRequest) -> Boolean = { true },
     onDraftChange: (DraftSnapshot) -> Deferred<Boolean>,
     onSend: (DraftSnapshot) -> Deferred<Boolean>,
+    onRetryUncertain: suspend (org.thanosapollo.nema.storage.RetryUncertainKey) -> Boolean = { false },
     onAcknowledgeCompletedSends: (Set<PendingSendIdentity>) -> Unit = {},
     onStartNewThread: suspend () -> Boolean = { false },
     onContinueThread: suspend (ThreadRef) -> Boolean = { false },
@@ -291,6 +291,8 @@ fun ConversationContent(
     onReact: suspend (TimelineMessage, String) -> Boolean = { _, _ -> false },
     modifier: Modifier = Modifier,
     composerOwner: ComposerOwner = rememberComposerOwner(state.accountId),
+    connectionRecovery: org.thanosapollo.nema.ui.ConnectionRecovery? = null,
+    onReconnect: (org.thanosapollo.nema.xmpp.transport.AccountId) -> Unit = {},
     olderHistory: OlderHistoryState = OlderHistoryState(),
     onLoadOlder: suspend (ChatRouteOccurrence) -> Unit = {},
 ) {
@@ -322,6 +324,8 @@ fun ConversationContent(
                 conversations = state.conversations,
                 conversationsReady = state.conversationsReady,
                 connectionStatus = connectionStatus,
+                connectionRecovery = connectionRecovery,
+                onReconnect = onReconnect,
                 ownLabel = ownLabel,
                 ownPhotoBytes = ownPhotoBytes,
                 onSelectPeer = onSelectPeer,
@@ -358,6 +362,7 @@ fun ConversationContent(
                                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
                                 windowInsets = WindowInsets(0, 0, 0, 0),
                             )
+                            org.thanosapollo.nema.ui.ConnectionStatusRow(connectionStatus, connectionRecovery, onReconnect)
                             if (state.contentStatus == ChatContentStatus.Failed) {
                                 Text("Unable to load conversation")
                             } else {
@@ -459,7 +464,6 @@ fun ConversationContent(
                                     .background(MaterialTheme.colorScheme.background),
                             )
                         } else {
-                            val status = quietConnectionStatus(connectionStatus)
                             var actionsOpen by remember { mutableStateOf(false) }
                             if (conversationKey !in composerStates) {
                                 composerStates += conversationKey to ComposerState(
@@ -602,12 +606,6 @@ fun ConversationContent(
                                                     overflow = TextOverflow.Ellipsis,
                                                 )
                                                 when {
-                                                    status != null -> Text(
-                                                        requireNotNull(status),
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                        maxLines = 1,
-                                                        overflow = TextOverflow.Ellipsis,
-                                                    )
                                                     state.selectedThread == null && venue is ConversationVenue.Room -> Text(
                                                         roomSubtitle(venue.subject, venue.occupantCount),
                                                         style = MaterialTheme.typography.labelSmall,
@@ -670,6 +668,7 @@ fun ConversationContent(
                                     ),
                                     windowInsets = WindowInsets(0, 0, 0, 0),
                                 )
+                                org.thanosapollo.nema.ui.ConnectionStatusRow(connectionStatus, connectionRecovery, onReconnect)
                                 ThreadSwitcher(
                                     occurrence = state.routeOccurrence,
                                     selected = state.selectedThread,
@@ -690,6 +689,7 @@ fun ConversationContent(
                                         pendingSendIdentities.none { it.key == conversationKey }
                                     MessageTimeline(
                                         messages = state.messages,
+                                        onRetryUncertain = onRetryUncertain,
                                         olderHistoryStatus = olderHistory.takeIf { it.occurrence == state.routeOccurrence }?.status
                                             ?: OlderHistoryStatus.Available,
                                         onLoadOlder = { onLoadOlder(state.routeOccurrence) },
@@ -1929,6 +1929,7 @@ internal fun canReact(conversationIsGroupChat: Boolean, message: TimelineMessage
 @Composable
 internal fun MessageTimeline(
     messages: List<TimelineMessage>,
+    onRetryUncertain: suspend (org.thanosapollo.nema.storage.RetryUncertainKey) -> Boolean = { false },
     olderHistoryStatus: OlderHistoryStatus? = null,
     onLoadOlder: suspend () -> Unit = {},
     accountId: String = "",
@@ -1958,6 +1959,12 @@ internal fun MessageTimeline(
     val scope = rememberCoroutineScope()
     var reactionPickerMessageId by remember { mutableStateOf<String?>(null) }
     var reactionPickerShown by remember { mutableStateOf(false) }
+    var retrySelection by remember(accountId, routeOccurrence) {
+        mutableStateOf<Pair<String, org.thanosapollo.nema.storage.RetryUncertainKey>?>(null)
+    }
+    var retryInProgress by remember(accountId, routeOccurrence) { mutableStateOf(false) }
+    var retryResult by remember(accountId, routeOccurrence) { mutableStateOf<String?>(null) }
+    val currentOnRetryUncertain by rememberUpdatedState(onRetryUncertain)
     val currentOnViewportChanged by rememberUpdatedState(onViewportChanged)
     val currentOnMessageDisplayed by rememberUpdatedState(onMessageDisplayed)
     // Draft revisions replace composer callbacks, not timeline content. Read them at
@@ -2345,6 +2352,16 @@ internal fun MessageTimeline(
                             expanded = messageActionsOpen,
                             onDismissRequest = { messageActionsOpen = false },
                         ) {
+                            message.retryUncertainKey?.let { retryKey ->
+                                DropdownMenuItem(
+                                    text = { Text("Retry send…") },
+                                    onClick = {
+                                        messageActionsOpen = false
+                                        retryResult = null
+                                        retrySelection = message.id to retryKey
+                                    },
+                                )
+                            }
                             if (message.replyReferenceId != null) {
                                 DropdownMenuItem(
                                     text = { Text("Reply") },
@@ -2442,6 +2459,61 @@ internal fun MessageTimeline(
                 }
             }
         }
+    }
+    retrySelection?.let { (messageId, retryKey) ->
+        val eligible = messages.any {
+            it.id == messageId && it.protectedState == "NONE" && it.retryUncertainKey == retryKey
+        }
+        AlertDialog(
+            modifier = Modifier.testTag("retry-send-confirmation"),
+            onDismissRequest = { if (!retryInProgress) retrySelection = null },
+            title = { Text("Retry send?") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("The recipient may already have this message. Retrying can create a duplicate.")
+                    if (retryInProgress) Text("Queueing retry…")
+                    else if (retryResult != null) Text(requireNotNull(retryResult))
+                    else if (!eligible) Text("This message is no longer eligible for retry.")
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    modifier = Modifier.testTag("confirm-retry-send"),
+                    enabled = eligible && !retryInProgress && retryResult == null,
+                    onClick = {
+                        // Recheck the current projection, then let the Room transaction
+                        // arbitrate evidence that has not reached Compose yet.
+                        if (!retryInProgress && retryResult == null && currentMessages.value.any {
+                                it.id == messageId && it.protectedState == "NONE" && it.retryUncertainKey == retryKey
+                            }
+                        ) {
+                            retryInProgress = true
+                            scope.launch {
+                                try {
+                                    retryResult = if (currentOnRetryUncertain(retryKey)) {
+                                        "Retry queued"
+                                    } else {
+                                        "Retry was not queued. The message or account may have changed."
+                                    }
+                                } catch (cancelled: CancellationException) {
+                                    throw cancelled
+                                } catch (_: Exception) {
+                                    retryResult = "Could not queue retry. Try again."
+                                } finally {
+                                    retryInProgress = false
+                                }
+                            }
+                        }
+                    },
+                ) { Text("Retry send") }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !retryInProgress,
+                    onClick = { retrySelection = null },
+                ) { Text(if (retryResult != null || !eligible) "Close" else "Cancel") }
+            },
+        )
     }
 }
 

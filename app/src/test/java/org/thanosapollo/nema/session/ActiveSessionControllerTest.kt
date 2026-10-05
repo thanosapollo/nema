@@ -38,6 +38,199 @@ import org.thanosapollo.nema.xmpp.transport.SendNotAttemptedException
 @OptIn(ExperimentalCoroutinesApi::class)
 class ActiveSessionControllerTest {
     @Test
+    fun `exhausted authorization wakes once and stale wakes cannot resurrect a retired account`() = runTest {
+        val factory = FakeFactory().apply { next.reconnectFailure = SessionFailure(SessionFailureReason.NETWORK) }
+        val controller = ActiveSessionController(this, factory, retryWait = {})
+        controller.start(account("first"), "secret".toCharArray())
+        val connection = factory.created.single()
+        connection.emitLoss()
+        advanceUntilIdle()
+        val exhausted = controller.lifecycle.value
+        assertTrue(exhausted.state is ConnectionState.ReconnectWait)
+        assertEquals(5, connection.reconnectCalls)
+        connection.emitLoss(connection.attemptIdentity.copy(generation = generation(1), attempt = ConnectionAttempt.require(1)))
+        advanceUntilIdle()
+        assertEquals(exhausted, controller.lifecycle.value)
+        connection.reconnectFailure = null
+        controller.reconcile(controller.lifecycle.value)
+        controller.reconcile(controller.lifecycle.value)
+        advanceUntilIdle()
+        assertTrue(controller.state.value is ConnectionState.Connected)
+        val recoveredCalls = connection.reconnectCalls
+        controller.reconcile(exhausted)
+        advanceUntilIdle()
+        assertEquals(recoveredCalls, connection.reconnectCalls)
+        val old = controller.lifecycle.value
+        controller.switchTo(account("second"), "secret".toCharArray()) {}
+        controller.reconcile(old)
+        advanceUntilIdle()
+        assertEquals(0, factory.created.last().probeCalls)
+        controller.stop()
+        controller.reconcile(controller.lifecycle.value)
+        controller.reconcile(old)
+        advanceUntilIdle()
+        assertEquals(ConnectionState.Stopped, controller.state.value)
+    }
+
+    @Test
+    fun `foreground and network probes coalesce and have a finite timeout`() = runTest {
+        val factory = FakeFactory()
+        val controller = ActiveSessionController(this, factory, retryWait = {})
+        controller.start(account("first"), "secret".toCharArray())
+        val connection = factory.created.single()
+        connection.probeGate = CompletableDeferred()
+        val observed = controller.lifecycle.value
+        repeat(20) { controller.reconcile(observed) }
+        runCurrent()
+        assertEquals(1, connection.probeCalls)
+        advanceTimeBy(11_001)
+        runCurrent()
+        assertEquals(1, connection.reconnectCalls)
+        assertTrue(controller.state.value is ConnectionState.Connected)
+        controller.reconcile(observed)
+        advanceUntilIdle()
+        assertEquals(1, connection.probeCalls)
+        controller.stop()
+    }
+
+    @Test
+    fun `late failed probe cannot steal replacement and healthy probe leaves connection intact`() = runTest {
+        val factory = FakeFactory()
+        val controller = ActiveSessionController(this, factory, retryWait = {})
+        controller.start(account("first"), "secret".toCharArray())
+        val connection = factory.created.single()
+        controller.reconcile(controller.lifecycle.value)
+        advanceUntilIdle()
+        assertEquals(1, connection.probeCalls)
+        assertEquals(0, connection.reconnectCalls)
+        connection.probeGate = CompletableDeferred()
+        connection.probeHealthy = false
+        connection.ignoreProbeCancellation = true
+        controller.reconcile(controller.lifecycle.value)
+        runCurrent()
+        val switching = async { controller.switchTo(account("second"), "secret".toCharArray()) {} }
+        runCurrent()
+        connection.probeGate!!.complete(Unit)
+        advanceUntilIdle()
+        switching.await()
+        assertEquals(AccountId.require("second"), (controller.state.value as ConnectionState.Connected).accountId)
+        assertEquals(0, connection.reconnectCalls)
+        controller.stop()
+    }
+
+    @Test
+    fun `terminal loss admission is serialized with successor attempt allocation`() = runTest {
+        val factory = FakeFactory()
+        val controller = ActiveSessionController(this, factory, retryWait = {})
+        controller.start(account("first"), "secret".toCharArray())
+        val connection = factory.created.single()
+        val oldAttempt = connection.attemptIdentity
+        // Observe (not mutate) the private owner to hold its admission monitor.
+        val owner = ActiveSessionController::class.java.getDeclaredField("current").apply {
+            isAccessible = true
+        }.get(controller)
+        val started = java.util.concurrent.CountDownLatch(1)
+        val callback = Thread {
+            started.countDown()
+            connection.emitLoss(oldAttempt, SessionFailureReason.TLS_CERTIFICATE)
+        }
+        try {
+            synchronized(owner) {
+                callback.start()
+                assertTrue(started.await(5, java.util.concurrent.TimeUnit.SECONDS))
+                val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5)
+                while (callback.state != Thread.State.BLOCKED && callback.isAlive && System.nanoTime() < deadline) Thread.yield()
+                assertTrue(callback.state == Thread.State.BLOCKED || !callback.isAlive)
+                // The callback is delayed at admission; allocate B before releasing it.
+                connection.emitLoss()
+                runCurrent()
+                assertEquals(1, connection.reconnectCalls)
+                assertTrue(controller.state.value is ConnectionState.Connected)
+                assertNotEquals(oldAttempt, connection.attemptIdentity)
+            }
+            callback.join(5_000)
+            assertFalse(callback.isAlive)
+            runCurrent()
+            assertTrue(controller.state.value is ConnectionState.Connected)
+            assertEquals(1, connection.reconnectCalls)
+        } finally {
+            callback.join(5_000)
+            controller.destroy()
+        }
+    }
+
+    @Test
+    fun `recorded terminal loss wins over queued failed probe or timeout`() = runTest {
+        for (timeout in listOf(false, true)) {
+            for (reason in listOf(SessionFailureReason.AUTHENTICATION, SessionFailureReason.TLS_CERTIFICATE,
+                SessionFailureReason.CONFIGURATION, SessionFailureReason.PROTOCOL)) {
+                val factory = FakeFactory()
+                val controller = ActiveSessionController(this, factory, retryWait = {})
+                controller.start(account("first"), "secret".toCharArray())
+                val connection = factory.created.single()
+                connection.probeGate = CompletableDeferred()
+                connection.probeHealthy = false
+                controller.reconcile(controller.lifecycle.value)
+                runCurrent()
+                // Queue the probe continuation ahead of the loss handler, but record
+                // the terminal event before either can acquire the controller mutex.
+                if (timeout) advanceTimeBy(11_000) else connection.probeGate!!.complete(Unit)
+                connection.emitLoss(reason = reason)
+                runCurrent()
+                advanceUntilIdle()
+                assertEquals("timeout=$timeout reason=$reason", reason,
+                    (controller.state.value as? ConnectionState.Failed)?.reason)
+                assertEquals(0, connection.reconnectCalls)
+                controller.reconcile(controller.lifecycle.value)
+                advanceUntilIdle()
+                assertEquals(0, connection.reconnectCalls)
+                controller.destroy()
+            }
+        }
+    }
+
+    @Test
+    fun `initial network failure retains intent and recovers after exhausted cycle`() = runTest {
+        val factory = FakeFactory().apply {
+            next.connectFailure = SessionFailure(SessionFailureReason.NETWORK)
+            next.reconnectFailure = SessionFailure(SessionFailureReason.NETWORK)
+        }
+        val controller = ActiveSessionController(this, factory, retryWait = {})
+        controller.start(account("first"), "secret".toCharArray())
+        advanceUntilIdle()
+        val connection = factory.created.single()
+        assertTrue(controller.state.value is ConnectionState.ReconnectWait)
+        assertEquals(5, connection.reconnectCalls)
+        connection.reconnectFailure = null
+        controller.reconcile(controller.lifecycle.value)
+        advanceUntilIdle()
+        assertTrue(controller.state.value is ConnectionState.Connected)
+        assertEquals(6, connection.reconnectCalls)
+        controller.stop()
+    }
+
+    @Test
+    fun `wake never restarts stopped signed out authentication TLS configuration or protocol owners`() = runTest {
+        for (reason in listOf(SessionFailureReason.AUTHENTICATION, SessionFailureReason.TLS_CERTIFICATE,
+            SessionFailureReason.CONFIGURATION, SessionFailureReason.PROTOCOL)) {
+            val factory = FakeFactory().apply { next.connectFailure = SessionFailure(reason) }
+            val controller = ActiveSessionController(this, factory, retryWait = {})
+            controller.start(account("first"), "secret".toCharArray())
+            val failed = controller.lifecycle.value
+            controller.reconcile(failed)
+            advanceUntilIdle()
+            assertEquals(failed, controller.lifecycle.value)
+            assertEquals(0, factory.created.single().reconnectCalls)
+            controller.requireCredentials(AccountId.require("first"))
+            controller.reconcile(failed)
+            controller.reconcile(controller.lifecycle.value)
+            advanceUntilIdle()
+            assertTrue(controller.state.value is ConnectionState.NeedsCredentials)
+            controller.destroy()
+        }
+    }
+
+    @Test
     fun `connection notification exposes matching lifecycle authority before consumers refresh`() = runTest {
         val controller = ActiveSessionController(this, FakeFactory(), retryWait = {})
         val observations = mutableListOf<Pair<ConnectionState, SessionLifecycleObservation>>()
@@ -1509,11 +1702,7 @@ class ActiveSessionControllerTest {
         advanceUntilIdle()
 
         assertEquals(
-            ConnectionState.Failed(
-                AccountId.require("first"),
-                generation(6),
-                SessionFailureReason.RETRY_EXHAUSTED,
-            ),
+            ConnectionState.ReconnectWait(AccountId.require("first"), generation(6)),
             controller.state.value,
         )
         assertEquals(generation(6), connection.attemptIdentity.generation)
@@ -1695,6 +1884,17 @@ class ActiveSessionControllerTest {
         val httpQueries = mutableListOf<String>()
         val blockingQueries = mutableListOf<String>()
         val blockingMutations = mutableListOf<Pair<String, Boolean>>()
+        var probeCalls = 0
+        var probeGate: CompletableDeferred<Unit>? = null
+        var probeHealthy = true
+        var ignoreProbeCancellation = false
+        override suspend fun probe(attempt: SessionAttemptIdentity): Boolean {
+            assertEquals(attemptIdentity, attempt)
+            probeCalls++
+            if (ignoreProbeCancellation) withContext(NonCancellable) { probeGate?.await() }
+            else probeGate?.await()
+            return probeHealthy
+        }
         var authenticationCalls = 0
         var reconnectCalls = 0
         var disconnectCalls = 0

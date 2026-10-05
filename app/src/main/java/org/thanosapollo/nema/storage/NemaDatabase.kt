@@ -214,6 +214,9 @@ abstract class AccountDao {
     )
     abstract fun observeActiveAccount(): Flow<AccountEntity?>
 
+    @Query("SELECT accountId FROM active_account WHERE singletonId = 1")
+    abstract suspend fun activeAccountId(): String?
+
     @Query("DELETE FROM chat_navigation WHERE accountId = :accountId")
     protected abstract suspend fun clearNavigation(accountId: String): Int
 

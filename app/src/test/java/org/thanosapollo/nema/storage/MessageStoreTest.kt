@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.Context
 import android.database.sqlite.SQLiteConstraintException
 import androidx.test.core.app.ApplicationProvider
+import androidx.room.withTransaction
 import java.util.UUID
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -4391,6 +4392,87 @@ class MessageStoreTest {
         assertOutbox(uncertain, OutboxStatus.UNCERTAIN, attempt = 2, originId = intent.originId)
         assertNull(store.recordDefinitePreHandoffFailure(secondClaim))
         Unit
+    }
+
+    @Test
+    fun retryConfirmationCannotRequeueAfterPositiveReceipt() = runBlocking {
+        val store = MessageStore(database)
+        for (stage in MessageReceiptStage.entries) {
+            val intent = outbound("retry-receipt-${stage.name}")
+            store.compose(intent)
+            store.recordPotentialDelivery(requireNotNull(store.claim(ACCOUNT, intent.operationId, 7)))
+            val key = retryKey(requireNotNull(store.outbox(ACCOUNT, intent.operationId)))
+            assertTrue(store.recordReceiptSignal(ACCOUNT, PEER, PEER, intent.operationId, stage) != null)
+            val settled = store.outbox(ACCOUNT, intent.operationId)
+            assertNull("Positive $stage evidence must suppress captured retry", store.retryUncertain(key))
+            assertEquals(settled, store.outbox(ACCOUNT, intent.operationId))
+            assertTrue(store.pendingOutbound(ACCOUNT).isEmpty())
+        }
+    }
+
+    @Test
+    fun retryWaitsForPositiveEvidenceTransactionAndRefusesCapturedKey() = runBlocking {
+        kotlinx.coroutines.withTimeout(5_000) {
+            val store = MessageStore(database)
+            val intent = outbound("retry-transaction-race")
+            store.compose(intent)
+            store.recordPotentialDelivery(requireNotNull(store.claim(ACCOUNT, intent.operationId, 7)))
+            val key = retryKey(requireNotNull(store.outbox(ACCOUNT, intent.operationId)))
+            val written = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+            val evidence = async(kotlinx.coroutines.Dispatchers.IO) {
+                database.withTransaction {
+                    store.recordReceiptSignal(ACCOUNT, PEER, PEER, intent.operationId, MessageReceiptStage.RECEIVED)
+                    written.complete(Unit)
+                    release.await()
+                }
+            }
+            try {
+                written.await()
+                val retry = async(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { store.retryUncertain(key) }
+                assertFalse("Retry must wait for the held evidence writer", retry.isCompleted)
+                release.complete(Unit)
+                evidence.await()
+                assertNull("Queued retry must see the newly committed receipt", retry.await())
+                assertEquals(OutboxStatus.UNCERTAIN, store.outbox(ACCOUNT, intent.operationId)?.status)
+                assertTrue(store.pendingOutbound(ACCOUNT).isEmpty())
+            } finally {
+                release.complete(Unit)
+            }
+        }
+    }
+
+    @Test
+    fun receiptBetweenExplicitRequeueAndDispatchSuppressesClaim() = runBlocking {
+        val store = MessageStore(database)
+        val intent = outbound("retry-before-claim")
+        store.compose(intent)
+        store.recordPotentialDelivery(requireNotNull(store.claim(ACCOUNT, intent.operationId, 7)))
+        val key = retryKey(requireNotNull(store.outbox(ACCOUNT, intent.operationId)))
+        assertTrue(store.retryUncertain(key) != null)
+        store.recordReceiptSignal(ACCOUNT, PEER, PEER, intent.operationId, MessageReceiptStage.RECEIVED)
+        assertNull(store.claim(ACCOUNT, intent.operationId, 8))
+        assertEquals(1, store.messages(ACCOUNT).size)
+    }
+
+    @Test
+    fun protectedOrInboundMessageCannotBeRetriedDespiteCapturedOutboxKey() = runBlocking {
+        val store = MessageStore(database)
+        for (inbound in listOf(false, true)) {
+            val intent = outbound("inert-retry-$inbound")
+            store.compose(intent)
+            store.recordPotentialDelivery(requireNotNull(store.claim(ACCOUNT, intent.operationId, 7)))
+            val key = retryKey(requireNotNull(store.outbox(ACCOUNT, intent.operationId)))
+            // Model a stale/malformed outbox projection. Metadata updates cannot clear
+            // protected evidence; use SQL only to seed the persisted regression fixture.
+            database.openHelper.writableDatabase.execSQL(
+                if (inbound) "UPDATE messages SET direction = 'INBOUND' WHERE localMessageId = ?"
+                else "UPDATE messages SET protectedState = 'UNSUPPORTED' WHERE localMessageId = ?",
+                arrayOf(intent.localMessageId),
+            )
+            assertNull(store.retryUncertain(key))
+            assertEquals(OutboxStatus.UNCERTAIN, store.outbox(ACCOUNT, intent.operationId)?.status)
+        }
     }
 
     @Test

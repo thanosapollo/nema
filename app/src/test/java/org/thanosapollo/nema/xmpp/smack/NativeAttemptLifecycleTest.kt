@@ -44,6 +44,56 @@ class NativeAttemptLifecycleTest {
     private fun attempt(n: Long) = SessionAttemptIdentity(account, ConnectionGeneration.require(n),
         ConnectionAttempt.require(n), LifecycleEpoch.require(1))
 
+    @Test fun actualServerProbeAcceptsPongAndRetiresBlackholedSocket() = runBlocking {
+        Fixture().use { f ->
+            f.session.connect("fixture-only".toCharArray(), attempt(1))
+            assertTrue(f.session.probe(attempt(1)))
+            assertTrue(f.session.isUsable)
+            assertEquals(1, f.pings.get())
+            f.events.clear()
+            f.blackholePing.set(true)
+            val started = System.nanoTime()
+            assertFalse(f.session.probe(attempt(1)))
+            assertTrue("native probe must complete within its bounded timeout plus scheduling allowance",
+                System.nanoTime() - started < 15_000_000_000L)
+            assertFalse(f.transports.single().second.isConnected)
+            assertEquals(2, f.pings.get())
+            assertEquals(1, f.events.filterIsInstance<SessionEvent.ConnectionLost>().size)
+            f.session.reconnect(attempt(2))
+            assertFalse(f.session.probe(attempt(1)))
+            f.assertOwner(attempt(2))
+            assertEquals(2, f.pings.get())
+        }
+    }
+
+    @Test fun pingFailureRetiresHealthyFlagsOnceAndStaleListenerCannotTouchSuccessor() = runBlocking {
+        Fixture().use { f ->
+            f.session.connect("fixture-only".toCharArray(), attempt(1))
+            val native = f.transports.single().second
+            val manager = org.jivesoftware.smackx.ping.PingManager.getInstanceFor(native)
+            @Suppress("UNCHECKED_CAST")
+            val listeners = manager.javaClass.getDeclaredField("pingFailedListeners").apply { isAccessible = true }
+                .get(manager) as Set<org.jivesoftware.smackx.ping.PingFailedListener>
+            assertEquals("physical attempt must install one ping failure owner", 1, listeners.size)
+            val old = listeners.single()
+            f.events.clear()
+            assertTrue(native.isConnected && native.isAuthenticated)
+            old.pingFailed()
+            assertFalse(f.session.isUsable)
+            assertFalse("the exact physical socket must be closed", native.isConnected)
+            old.pingFailed()
+            assertEquals(1, f.events.filterIsInstance<SessionEvent.ConnectionLost>().size)
+            assertEquals(attempt(1), f.events.filterIsInstance<SessionEvent.ConnectionLost>().single().attempt)
+            assertEquals(SessionFailureReason.NETWORK, f.events.filterIsInstance<SessionEvent.ConnectionLost>().single().reason)
+            assertTrue(listeners.isEmpty())
+            f.session.reconnect(attempt(2))
+            f.events.clear()
+            old.pingFailed()
+            f.assertOwner(attempt(2))
+            assertTrue(f.events.isEmpty())
+        }
+    }
+
     @Test fun heldOldNativeErrorCannotTearDownAuthenticatedSuccessor() = heldNativeError(false)
     @Test fun heldOldNativeWriterErrorCannotTearDownAuthenticatedSuccessor() = heldNativeError(true)
 
@@ -525,9 +575,13 @@ class NativeAttemptLifecycleTest {
         val transports = CopyOnWriteArrayList<Pair<TorSocketFactory, OnionXmppConnection>>()
         val events = LinkedBlockingQueue<SessionEvent>()
         val httpEntries = AtomicInteger()
+        val pings = AtomicInteger()
+        val blackholePing = AtomicBoolean()
         val proxy = SocksFixture { socket, _ ->
             peers += socket
-            try { serveXmpp(socket, credentials, mutableListOf()) } catch (failure: Exception) {
+            try { serveXmpp(socket, credentials, mutableListOf(), onPing = {
+                pings.incrementAndGet(); !blackholePing.get()
+            }) } catch (failure: Exception) {
                 println("NATIVE_PEER_FAILURE ${failure.javaClass.name} ${failure.stackTrace.toList()}")
                 throw failure
             }

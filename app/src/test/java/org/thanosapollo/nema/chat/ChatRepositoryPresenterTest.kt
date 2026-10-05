@@ -3103,7 +3103,7 @@ class ChatRepositoryPresenterTest {
             repository = repository,
             scope = scope,
             enqueue = { _, _ -> error("send not expected") },
-            retry = { _, key -> retried += key },
+            retry = { _, key -> retried += key; true },
         )
 
         assertTrue(presenter.selectPeer("$PEER/resource"))
@@ -3123,6 +3123,25 @@ class ChatRepositoryPresenterTest {
         presenter.retryUncertain(retryKey)
         assertEquals(listOf(retryKey), retried)
         assertEquals("survives restart", repository.observeDraft(ACCOUNT, PEER).first())
+    }
+
+    @Test
+    fun presenterSuppressesRetryKeyAfterPositiveReceipt() = runBlocking {
+        val store = MessageStore(database)
+        val intent = outbound("retry-receipt")
+        store.compose(intent)
+        store.recordPotentialDelivery(requireNotNull(store.claim(ACCOUNT, intent.operationId, 3)))
+        val presenter = DirectChatPresenter(
+            account = accountConfiguration(ACCOUNT, SELF), repository = ChatRepository(database), scope = scope,
+            enqueue = { _, _ -> error("send not expected") },
+        )
+        presenter.selectPeer(PEER)
+        val key = presenter.state.first { it.messages.isNotEmpty() }.messages.single().retryUncertainKey
+        assertTrue(key != null)
+        store.recordReceiptSignal(ACCOUNT, PEER, PEER, intent.operationId,
+            org.thanosapollo.nema.xmpp.transport.MessageReceiptStage.RECEIVED)
+        val delivered = presenter.state.first { it.messages.singleOrNull()?.delivery == DeliveryPresentation.DELIVERED }
+        org.junit.Assert.assertNull("Delivered message must not offer Retry", delivered.messages.single().retryUncertainKey)
     }
 
     @Test

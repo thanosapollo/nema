@@ -676,7 +676,7 @@ class DirectChatPresenter(
     private val repository: ChatRepository,
     scope: CoroutineScope,
     private val enqueue: suspend (AccountConfiguration, DraftSnapshot) -> Boolean,
-    private val retry: suspend (AccountConfiguration, RetryUncertainKey) -> Unit = { _, _ -> },
+    private val retry: suspend (AccountConfiguration, RetryUncertainKey) -> Boolean = { _, _ -> false },
     private val ensurePeerIdentities: suspend (AccountId, Collection<String>) -> Unit = { _, _ -> },
     private val joinMuc: suspend (String) -> Boolean = { false },
     private val loadOlder: suspend (AccountConfiguration, OlderHistoryScope, () -> Boolean) -> OlderHistoryStatus = { _, _, _ -> OlderHistoryStatus.Error },
@@ -1371,8 +1371,11 @@ class DirectChatPresenter(
         )
     }
 
-    suspend fun retryUncertain(key: RetryUncertainKey) {
-        if (key.accountId == account.id.value) retry(account, key)
+    suspend fun retryUncertain(key: RetryUncertainKey): Boolean {
+        if (key.accountId != account.id.value ||
+            state.value.messages.none { it.protectedState == "NONE" && it.retryUncertainKey == key }
+        ) return false
+        return retry(account, key)
     }
 
     private suspend fun flushCoalescedDrafts() {

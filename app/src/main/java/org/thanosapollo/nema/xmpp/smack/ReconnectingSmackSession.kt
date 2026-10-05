@@ -152,6 +152,12 @@ internal class ReconnectingSmackSession(
         }
     }
 
+    override suspend fun probe(attempt: SessionAttemptIdentity): Boolean {
+        val physical = synchronized(gate) { current?.takeIf { !revoked && requested == attempt && it.attempt == attempt } }
+            ?: return false
+        return physical.connection.probe(attempt)
+    }
+
     override suspend fun send(message: OutgoingMessageEnvelope, entered: () -> Unit) = active().send(message, entered)
     override suspend fun sendSignal(signal: OutgoingMessageSignal) = active().sendSignal(signal)
     override suspend fun sendReaction(reaction: OutgoingReactionEnvelope) = active().sendReaction(reaction)

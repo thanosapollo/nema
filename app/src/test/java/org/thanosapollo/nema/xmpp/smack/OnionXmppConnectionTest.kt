@@ -501,7 +501,7 @@ private fun element(socket: Socket): String {
     return opening + readThrough(socket, "</$name>")
 }
 internal fun serveXmpp(socket: Socket, credentials: MutableList<String>, messages: MutableList<String>,
-    domain: String = VALID_ONION, password: String = "fixture-only") {
+    domain: String = VALID_ONION, password: String = "fixture-only", onPing: () -> Boolean = { true }) {
     readThrough(socket, ">", "<stream:stream")
     send(socket, stream(domain) + "<stream:features>" + mechanisms() + "</stream:features>")
     val auth = element(socket)
@@ -516,6 +516,7 @@ internal fun serveXmpp(socket: Socket, credentials: MutableList<String>, message
         val stanza = element(socket)
         if (stanza.isEmpty() || stanza.startsWith("</stream")) return
         if (stanza.startsWith("<iq")) {
+            if (stanza.contains("urn:xmpp:ping") && !onPing()) continue
             val id = Regex("\\bid=['\"]([^'\"]+)['\"]").find(stanza)!!.groupValues[1]
             val payload = when {
                 stanza.contains("<bind") -> "<bind xmlns='urn:ietf:params:xml:ns:xmpp-bind'><jid>fixture@$domain/resource</jid></bind>"
