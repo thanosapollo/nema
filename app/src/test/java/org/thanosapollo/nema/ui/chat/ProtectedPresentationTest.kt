@@ -33,6 +33,46 @@ class ProtectedPresentationTest {
     @get:Rule val compose = createRobolectricComposeRule()
     private val context = ApplicationProvider.getApplicationContext<Application>()
 
+    @Test fun protectedCardsShowDirectionAndTimeWithoutDeliveryOrContentAffordances() {
+        val sentAt = 1_700_000_000_000L
+        val incoming = TimelineMessage("protected-in", ProtectedFixtures.peer, "fallback in", false,
+            delivery = null, retryUncertainKey = null, thread = null, sentAtEpochMs = sentAt,
+            attachmentUrl = "https://example.org/in.png", attachmentMime = "image/png",
+            protectedState = "UNSUPPORTED_PAYLOAD")
+        val outgoing = TimelineMessage("protected-out", ProtectedFixtures.self, "fallback out", true,
+            delivery = DeliveryPresentation.DELIVERED, retryUncertainKey = null, thread = null,
+            sentAtEpochMs = sentAt + 60_000, protectedState = "UNSUPPORTED_PAYLOAD")
+        var effects = 0
+        compose.setContent {
+            MaterialTheme {
+                MessageTimeline(listOf(incoming, outgoing), readReceiptsEnabled = true, activityResumed = true,
+                    isAttachmentCached = { effects++; true }, onLoadInlineImage = { effects++; null },
+                    onUseAttachment = { _, _, _ -> effects++; true }, onEdit = { effects++ },
+                    onReact = { _, _ -> effects++; true })
+            }
+        }
+        val received = compose.onNodeWithTag("protected-message-protected-in", useUnmergedTree = true)
+        val sent = compose.onNodeWithTag("protected-message-protected-out", useUnmergedTree = true)
+        compose.onNodeWithText("Received · ${formatMessageTime(sentAt)}", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("Sent · ${formatMessageTime(sentAt + 60_000)}", useUnmergedTree = true).assertIsDisplayed()
+        received.assertHasNoClickAction()
+        sent.assertHasNoClickAction()
+        // Direction is also spatial: received cards start at the leading edge, sent cards end at the trailing edge.
+        val root = compose.onNodeWithTag("message-timeline").getUnclippedBoundsInRoot()
+        val inBounds = received.getUnclippedBoundsInRoot()
+        val outBounds = sent.getUnclippedBoundsInRoot()
+        assertEquals(root.left.value, inBounds.left.value, 0.5f)
+        assertTrue(inBounds.right < root.right)
+        assertEquals(root.right.value, outBounds.right.value, 0.5f)
+        assertTrue(outBounds.left > root.left)
+        // No receipt tick, delivery state, download or edit affordance on protected content.
+        compose.onAllNodesWithTag("message-status", useUnmergedTree = true).assertCountEquals(0)
+        compose.onAllNodesWithContentDescription("Delivered", useUnmergedTree = true).assertCountEquals(0)
+        compose.onAllNodesWithText("Download", substring = true, ignoreCase = true, useUnmergedTree = true).assertCountEquals(0)
+        compose.onAllNodesWithText("Unauthenticated fallback").assertCountEquals(2)
+        compose.runOnIdle { assertEquals(0, effects) }
+    }
+
     @Test fun reopenedRepositoryDrivesInertCardsHomeThreadsRepliesAndDurableActionRefusal() = runBlocking {
         SmackAndroid.initialize(context)
         installNemaOmemoProviders()

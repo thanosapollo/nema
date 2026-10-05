@@ -1134,7 +1134,17 @@ internal class SmackSessionConnection(
         connection.removeStanzaListener(messageListener)
         ReconnectionManager.getInstanceFor(connection).disableAutomaticReconnection()
         if (connection.isConnected) runCatching { synchronized(connection) { connection.disconnect() } }
+        ensureNativeDisconnected()
         Unit
+    }
+
+    /**
+     * Smack's graceful disconnect sends unavailable presence before shutdown and skips shutdown
+     * entirely when that send reports NotConnected, leaving the native connection connected
+     * until its reader fails. Enforce the closed postcondition without waiting for the reader.
+     */
+    private fun ensureNativeDisconnected() {
+        if (connection.isConnected) runCatching { connection.instantShutdown() }
     }
 
     private fun requireExactAttempt(accountId: AccountId, generation: ConnectionGeneration) {
@@ -1209,6 +1219,7 @@ internal class SmackSessionConnection(
             ) {
                 connectionListener.localDisconnect()
                 runCatching { connection.disconnect() }
+                ensureNativeDisconnected()
                 connectionListener.attemptStarting(attempt)
             }
             synchronized(connection) {
@@ -1221,6 +1232,7 @@ internal class SmackSessionConnection(
                 (connection !is OnionXmppConnection || !connection.permitsTransport(attempt))) {
                 connectionListener.localDisconnect()
                 runCatching { connection.disconnect() }
+                ensureNativeDisconnected()
                 throw SessionFailure(SessionFailureReason.TLS_CERTIFICATE)
             }
             synchronized(connection) {
@@ -1233,6 +1245,7 @@ internal class SmackSessionConnection(
             if (connection.user?.asBareJid()?.toString() != expectedBareJid) {
                 connectionListener.localDisconnect()
                 runCatching { connection.disconnect() }
+                ensureNativeDisconnected()
                 throw SessionFailure(SessionFailureReason.AUTHENTICATION)
             }
             val carbons = resolveCarbonCapability(CarbonManager.getInstanceFor(connection))

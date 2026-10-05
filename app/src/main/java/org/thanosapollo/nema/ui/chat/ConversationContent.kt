@@ -1916,7 +1916,7 @@ internal fun TimelineMessage.correctionTargetOrNull(venue: ConversationVenue): D
 }
 
 internal fun canReact(venue: ConversationVenue, message: TimelineMessage): Boolean = message.protectedState == "NONE" && when (venue) {
-    ConversationVenue.Direct -> !message.groupChat
+    ConversationVenue.Direct -> !message.groupChat && !message.unresolvedCorrection
     is ConversationVenue.Room -> message.groupChat && message.replyReferenceId != null
 }
 
@@ -2763,13 +2763,30 @@ private fun MessageAttachment(
 
 @Composable
 internal fun ProtectedMessageCard(message: TimelineMessage) {
-    Surface(modifier = Modifier.fillMaxWidth().testTag("protected-message-${message.id}")) {
-        Column(Modifier.padding(12.dp)) {
-            Text(org.thanosapollo.nema.xmpp.omemo.protectedStatus(message.protectedState).orEmpty(),
-                style = MaterialTheme.typography.labelLarge)
-            if (message.body.isNotEmpty()) {
-                Text("Unauthenticated fallback", style = MaterialTheme.typography.labelSmall)
-                Text(message.body, style = MaterialTheme.typography.bodyMedium)
+    // Inert by design: direction and time only, with no delivery, receipt or content affordance.
+    val direction = if (message.outgoing) "Sent" else "Received"
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Surface(
+            modifier = Modifier
+                .align(if (message.outgoing) Alignment.CenterEnd else Alignment.CenterStart)
+                .padding(start = if (message.outgoing) 32.dp else 0.dp, end = if (message.outgoing) 0.dp else 32.dp)
+                .testTag("protected-message-${message.id}"),
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surfaceVariant,
+            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        ) {
+            Column(Modifier.padding(12.dp)) {
+                Text(org.thanosapollo.nema.xmpp.omemo.protectedStatus(message.protectedState).orEmpty(),
+                    style = MaterialTheme.typography.labelLarge)
+                if (message.body.isNotEmpty()) {
+                    Text("Unauthenticated fallback", style = MaterialTheme.typography.labelSmall)
+                    Text(message.body, style = MaterialTheme.typography.bodyMedium)
+                }
+                Text(
+                    message.sentAtEpochMs?.let { "$direction · ${formatMessageTime(it)}" } ?: direction,
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.align(Alignment.End),
+                )
             }
         }
     }

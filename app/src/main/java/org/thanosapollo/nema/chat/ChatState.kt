@@ -213,6 +213,8 @@ data class TimelineMessage(
     val edited: Boolean = false,
     val correctionReferenceId: String? = null,
     val sentAtEpochMs: Long? = null,
+    /** A visible direct correction whose original is missing or ineligible; it has no reaction target. */
+    val unresolvedCorrection: Boolean = false,
     val threadSummaries: List<ThreadSummary> = emptyList(),
     val reactions: List<org.thanosapollo.nema.xmpp.reactions.ReactionDisplay> = emptyList(),
     val protectedState: String = "NONE",

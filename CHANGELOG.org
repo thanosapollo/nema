@@ -1,5 +1,11 @@
 #+TITLE: Nema changelog
 
+* Unreleased
+
++ Show protected and unsupported messages as one inert card aligned by direction, with sent or received time and no delivery ticks, download or edit actions.
++ Do not offer React on a correction whose original is missing, since it has no reaction target yet. When such a correction was already read and its original arrives, keep the original read.
++ Ensure a local disconnect always closes the native connection, even when the server can no longer receive unavailable presence.
+
 * Unreleased — 0.3.2-reliability.3
 
 + Keep message corrections visible as ordinary messages when their original is missing or cannot be edited, for example after a thread mismatch. Hide a correction only once it is applied to its original.

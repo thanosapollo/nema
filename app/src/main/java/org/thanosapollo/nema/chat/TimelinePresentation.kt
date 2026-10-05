@@ -56,6 +56,7 @@ internal fun TimelineRow.toPresentation(replyReferenceIds: Set<String>) = Timeli
     edited = protectedState == "NONE" && edited,
     correctionReferenceId = operationId.takeIf { protectedState == "NONE" },
     sentAtEpochMs = sentAtEpochMs,
+    unresolvedCorrection = messageKind != MessageKind.GROUPCHAT && replaceId != null,
 )
 
 internal fun chronologicalTimelineRows(rows: List<TimelineRow>) = chronological(

@@ -55,6 +55,17 @@ import org.jxmpp.jid.impl.JidCreate
 @Config(sdk = [34], application = Application::class)
 class SmackSessionConnectionTest {
     @Test
+    fun `disconnect leaves native transport closed when unavailable presence cannot be sent`() = runBlocking {
+        SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
+        // Smack's disconnect(Presence) propagates NotConnectedException from the unavailable
+        // presence before shutdown(); disconnect() then logs and returns while still connected.
+        val transport = PresenceRejectingXmppConnection()
+        session(transport).disconnect()
+        assertFalse(transport.isConnected)
+        assertEquals(listOf("presence:unavailable", "instant-shutdown"), transport.events.toList())
+    }
+
+    @Test
     fun `independent receipt manager cannot acknowledge before durable application admission`() {
         SmackAndroid.initialize(ApplicationProvider.getApplicationContext())
         val transport = RecordingXmppConnection()
@@ -656,7 +667,7 @@ class SmackSessionConnectionTest {
     }
 
     private fun session(
-        connection: RecordingXmppConnection,
+        connection: XMPPTCPConnection,
         event: (SessionEvent) -> Unit = {},
         rosterHandoffFactory: (SessionAttemptIdentity) -> RosterAttemptHandoff = { RecordingRosterHandoff() },
     ) = SmackSessionConnection(
@@ -765,6 +776,38 @@ class SmackSessionConnectionTest {
                 else -> error("Unexpected IQ ${request.javaClass.simpleName}")
             }
             processStanza(response)
+        }
+    }
+
+    private class PresenceRejectingXmppConnection : XMPPTCPConnection(
+        XMPPTCPConnectionConfiguration.builder()
+            .setXmppDomain(JidCreate.domainBareFrom("example.org"))
+            .setUsernameAndPassword("account", null)
+            .build(),
+    ) {
+        val events = Collections.synchronizedList(mutableListOf<String>())
+
+        init {
+            connected = true
+            authenticated = true
+            user = JidCreate.entityFullFrom("$ACCOUNT_BARE_JID/test")
+        }
+
+        override fun sendStanzaInternal(packet: Stanza) {
+            if (packet is org.jivesoftware.smack.packet.Presence) {
+                events += "presence:${packet.type}"
+                throw org.jivesoftware.smack.SmackException.NotConnectedException()
+            }
+        }
+
+        override fun shutdown() {
+            events += "shutdown"
+            connected = false
+        }
+
+        @Synchronized override fun instantShutdown() {
+            events += "instant-shutdown"
+            connected = false
         }
     }
 

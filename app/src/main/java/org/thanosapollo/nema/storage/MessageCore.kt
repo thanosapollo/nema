@@ -1872,6 +1872,7 @@ data class TimelineRow(
     val unreadEligible: Boolean = true,
     val locallyRead: Boolean = false,
     val protectedState: String = "NONE",
+    val replaceId: String? = null,
 )
 
 data class RetryUncertainKey(
@@ -3014,6 +3015,7 @@ class MessageStore private constructor(
             if (target != null && winner.canCorrect(target)) {
                 winner = winner.copy(correctionTargetMessageId = target.localMessageId)
                 dao.updateMessage(winner)
+                carryCorrectionRead(dao, winner, target)
             }
         }
         dao.directReactionTarget(winner)?.takeIf { it.localMessageId != winner.localMessageId }?.let { original ->
@@ -3034,6 +3036,7 @@ class MessageStore private constructor(
                     if (resolved.add(correction.localMessageId) && correction.canCorrect(winner)) {
                         val linked = correction.copy(correctionTargetMessageId = winner.localMessageId)
                         dao.updateMessage(linked)
+                        winner = carryCorrectionRead(dao, linked, winner)
                         reparentReactions(correction, winner)
                         attachPendingReactions(dao, linked)
                     }
@@ -3041,6 +3044,14 @@ class MessageStore private constructor(
             }
         }
         return winner
+    }
+
+    /** Linking hides a correction the user may already have read; its original must not resurface as unread. */
+    private suspend fun carryCorrectionRead(dao: MessageDao, correction: MessageEntity, original: MessageEntity): MessageEntity {
+        if (!correction.locallyRead || original.locallyRead) return original
+        // updateMessage writes metadata only; read state has its own guarded writer.
+        dao.mergeReadState(original.accountId, original.peerJid, original.localMessageId, correction.localMessageId)
+        return original.copy(locallyRead = true)
     }
 
     private suspend fun attachArchivePosition(

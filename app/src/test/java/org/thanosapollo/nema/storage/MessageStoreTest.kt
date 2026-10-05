@@ -19,6 +19,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.thanosapollo.nema.chat.toPresentation
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import org.thanosapollo.nema.thread.MessageKind
@@ -594,6 +595,54 @@ class MessageStoreTest {
             assertEquals(1, summaries.single().unreadCount)
         }
         assertEquals(0, dao.markMessageIdsRead(ACCOUNT, PEER, listOf("orphan-correction")))
+    }
+
+    @Test
+    fun unresolvedDirectCorrectionOffersNoReactionUntilLinkedAndCarriesReadStateToItsOriginal() = runBlocking {
+        val store = MessageStore(database)
+        val dao = database.messageDao()
+        store.ingest(
+            incoming(
+                localId = "orphan-correction",
+                body = "fixed typo",
+                aliases = listOf(TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "edit-wire-id")),
+                replaceId = "bootstrap-missing-id",
+            ).copy(sentAtEpochMs = 2_000L, sentTimeSource = MessageTimeSource.MAM),
+        )
+        store.ingest(
+            incoming(
+                localId = "unrelated",
+                body = "still unread",
+                aliases = listOf(TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "unrelated-id")),
+            ).copy(sentAtEpochMs = 3_000L, sentTimeSource = MessageTimeSource.MAM),
+        )
+        val orphan = dao.observeDirectTimeline(ACCOUNT, PEER).first().single { it.localMessageId == "orphan-correction" }
+        // The store has no reaction target for an unresolved correction, so React must not be offered.
+        assertEquals(null, store.resolveDirectReactionTarget(ACCOUNT, PEER, "orphan-correction"))
+        assertFalse(org.thanosapollo.nema.ui.chat.canReact(
+            org.thanosapollo.nema.ui.chat.ConversationVenue.Direct, orphan.toPresentation(emptySet())))
+        assertEquals(1, dao.markMessageIdsRead(ACCOUNT, PEER, listOf("orphan-correction")))
+        assertEquals(1, dao.cachedConversationSummaries(ACCOUNT).single().unreadCount)
+
+        store.ingest(
+            incoming(
+                localId = "late-original",
+                body = "fixed tpyo",
+                aliases = listOf(TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "bootstrap-missing-id")),
+            ).copy(sentAtEpochMs = 1_000L, sentTimeSource = MessageTimeSource.MAM),
+        )
+        val timeline = dao.observeDirectTimeline(ACCOUNT, PEER).first()
+        assertEquals(listOf("late-original", "unrelated"), timeline.map { it.localMessageId }.sorted())
+        val original = timeline.single { it.localMessageId == "late-original" }
+        assertEquals("fixed typo", original.correctedBody)
+        assertTrue(original.locallyRead)
+        assertFalse(timeline.single { it.localMessageId == "unrelated" }.locallyRead)
+        for (summaries in listOf(dao.observeConversationSummaries(ACCOUNT).first(), dao.cachedConversationSummaries(ACCOUNT))) {
+            assertEquals(1, summaries.single().unreadCount)
+        }
+        assertTrue(org.thanosapollo.nema.ui.chat.canReact(
+            org.thanosapollo.nema.ui.chat.ConversationVenue.Direct, original.toPresentation(emptySet())))
+        assertEquals("late-original", store.resolveDirectReactionTarget(ACCOUNT, PEER, "late-original")?.canonicalLocalId)
     }
 
     @Test
