@@ -93,9 +93,11 @@ class CarbonMessageMappingTest {
         listOf(
             inner("room@conference.example.org/nick", "$own/device", extension = mucUser),
             inner("peer@example.org/phone", "$own/device", extension = private),
-            inner("peer@example.org/phone", "$own/device", extension = unknown),
+            inner("peer@example.org/phone", "$own/device", body = null, extension = unknown),
             inner("peer@example.org/phone", "$own/device", Message.Type.headline),
         ).forEach { assertNull(mapped(CarbonExtension.Direction.received, it)) }
+        assertEquals("body", mapped(CarbonExtension.Direction.received,
+            inner("peer@example.org/phone", "$own/device", extension = unknown))?.message?.body)
     }
 
     @Test
@@ -128,8 +130,12 @@ class CarbonMessageMappingTest {
             }
             assertNull("wrong element in $namespace", mapped(
                 CarbonExtension.Direction.received,
-                inner("peer@example.org/phone", "$own/device", extension = extension("wrong", namespace)),
+                inner("peer@example.org/phone", "$own/device", body = null, extension = extension("wrong", namespace)),
             ))
+            assertEquals("wrong element beside a body in $namespace", "body", mapped(
+                CarbonExtension.Direction.received,
+                inner("peer@example.org/phone", "$own/device", extension = extension("wrong", namespace)),
+            )?.message?.body)
         }
     }
 
@@ -222,17 +228,99 @@ class CarbonMessageMappingTest {
         }
     }
 
+    private val eme = "<encryption xmlns='urn:xmpp:eme:0' namespace='eu.siacs.conversations.axolotl' name='OMEMO'/>"
+
     @Test
-    fun `unknown versions never gain carbon admission from an ordinary fallback`() {
+    fun `authentic native carbons admit a body beside unknown inert extensions like live delivery`() {
+        val decorations = listOf(
+            eme,
+            "<future xmlns='urn:example:future'><child>opaque</child></future>",
+            "$eme<store xmlns='urn:xmpp:hints'/><future xmlns='urn:example:future'/>",
+        )
+        for (direction in listOf("sent", "received")) for (decoration in decorations) {
+            val content = "<body>hello</body>$decoration"
+            val carbon = requireNotNull(nativeCarbon(direction, content)
+                .classifyCarrier(own, "$own/device").toTrustedCarbonMessage(own)) { "$direction $decoration" }
+            val envelope = requireNotNull(carbon.message.toIncomingEnvelope(ProtectedFixtures.attempt, own,
+                carbonDirection = carbon.carbonDirection, protectedCarrier = carbon.protectedCarrier))
+            val direct = requireNotNull(ProtectedFixtures.parse(content).toIncomingEnvelope(ProtectedFixtures.attempt, own))
+            assertEquals("hello", envelope.body)
+            assertEquals(direct.body, envelope.body)
+            assertNull(envelope.protection)
+            assertNull(envelope.replaceId)
+            assertEquals(false, envelope.receiptRequested)
+            assertEquals(direction == "sent", envelope.outbound)
+        }
+    }
+
+    @Test
+    fun `unknown extensions gain no carbon admission or signal authority on their own`() {
+        val impostors = listOf(
+            "<future xmlns='urn:example:future'/>",
+            eme,
+            "<received xmlns='urn:example:future' id='wire'/>",
+            "<replace xmlns='urn:example:future' id='wire'/>",
+            "<reactions xmlns='urn:example:future' id='wire'><reaction>x</reaction></reactions>",
+        )
+        for (direction in listOf("sent", "received")) for (impostor in impostors) {
+            assertNull("$direction $impostor", nativeCarbon(direction, impostor)
+                .classifyCarrier(own, "$own/device").toTrustedCarbonMessage(own))
+            val bodied = requireNotNull(nativeCarbon(direction, "<body>text</body>$impostor")
+                .classifyCarrier(own, "$own/device").toTrustedCarbonMessage(own))
+            val envelope = requireNotNull(bodied.message.toIncomingEnvelope(ProtectedFixtures.attempt, own,
+                carbonDirection = bodied.carbonDirection, protectedCarrier = bodied.protectedCarrier))
+            assertEquals("text", envelope.body)
+            assertNull(envelope.replaceId)
+            assertNull(bodied.message.toIncomingSignal(ProtectedFixtures.attempt, own))
+        }
+        val composing = requireNotNull(nativeCarbon("received",
+            "<composing xmlns='http://jabber.org/protocol/chatstates'/>$eme").classifyCarrier(own, "$own/device"))
+        assertEquals(BodylessCarbonEffect.CHAT_STATE, composing.bodylessCarbonEffect())
+    }
+
+    @Test
+    fun `unknown extensions never relax carbon addressing private or muc exclusions`() {
+        val content = "<body>hello</body>$eme"
+        fun raw(outerFrom: String, outerTo: String, direction: String = "received", extra: String = "") =
+            org.jivesoftware.smack.util.PacketParserUtils.parseStanza<Message>(
+                "<message xmlns='jabber:client' from='$outerFrom' to='$outerTo'>" +
+                    "<$direction xmlns='urn:xmpp:carbons:2'><forwarded xmlns='urn:xmpp:forward:0'>" +
+                    "<message xmlns='jabber:client' type='chat' from='peer@example.org/phone' to='$own/device'>" +
+                    "$content$extra</message></forwarded></$direction></message>")
+        val refused = listOf(
+            raw("peer@example.org", "$own/device"),
+            raw("$own/other", "$own/device"),
+            raw(own, "$own/elsewhere"),
+            raw("other@example.org", "other@example.org/device"),
+            raw(own, "$own/device", extra = "<private xmlns='urn:xmpp:carbons:2'/>"),
+            raw(own, "$own/device", extra = "<x xmlns='http://jabber.org/protocol/muc#user'/>"),
+        )
+        refused.forEachIndexed { index, message ->
+            assertNull("case $index", message.classifyCarrier(own, "$own/device").toTrustedCarbonMessage(own))
+        }
+        assertNotNull(raw(own, "$own/device").classifyCarrier(own, "$own/device").toTrustedCarbonMessage(own))
+        val wrongAccount = nativeCarbon("sent", content).classifyCarrier("other@example.org", "other@example.org/device")
+        assertNull(wrongAccount.toTrustedCarbonMessage("other@example.org"))
+    }
+
+    @Test
+    fun `unknown versions gain no carbon protection and fall back like live delivery`() {
         for (namespace in listOf("urn:xmpp:omemo:1", "urn:xmpp:omemo:99")) {
             for (direction in listOf("sent", "received")) for (body in listOf("", "<body>ordinary fallback</body>")) {
                 val content = "<encrypted xmlns='$namespace'><payload>AQID</payload></encrypted>"
-                assertNull(nativeCarbon(direction, content + body)
-                    .classifyCarrier(own, "$own/device").toTrustedCarbonMessage(own))
+                val carbon = nativeCarbon(direction, content + body)
+                    .classifyCarrier(own, "$own/device").toTrustedCarbonMessage(own)
                 val direct = ProtectedFixtures.parse(content + body).toIncomingEnvelope(ProtectedFixtures.attempt, own)
-                if (body.isEmpty()) assertNull(direct) else {
-                    assertEquals("ordinary fallback", requireNotNull(direct).body)
-                    assertNull(direct.protection)
+                if (body.isEmpty()) {
+                    assertNull(carbon)
+                    assertNull(direct)
+                } else {
+                    val mapped = requireNotNull(requireNotNull(carbon).message.toIncomingEnvelope(ProtectedFixtures.attempt,
+                        own, carbonDirection = carbon.carbonDirection, protectedCarrier = carbon.protectedCarrier))
+                    for (envelope in listOf(mapped, requireNotNull(direct))) {
+                        assertEquals("ordinary fallback", envelope.body)
+                        assertNull(envelope.protection)
+                    }
                 }
             }
         }

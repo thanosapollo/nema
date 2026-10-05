@@ -159,7 +159,7 @@ abstract class MessageDao {
         WHERE accountId = :accountId AND peerJid = :peerJid
           AND localMessageId IN (:messageIds)
           AND locallyRead = 0
-          AND direction = 'INBOUND' AND replaceId IS NULL
+          AND direction = 'INBOUND' AND (replaceId IS NULL OR correctionTargetMessageId IS NULL)
     """)
     abstract suspend fun markMessageIdsRead(accountId: String, peerJid: String, messageIds: List<String>): Int
 
@@ -670,7 +670,7 @@ abstract class MessageDao {
           (SELECT COUNT(*) FROM messages AS message
            WHERE message.accountId = thread.accountId AND message.peerJid = thread.peerJid
              AND message.messageKind = thread.messageKind AND message.threadId = thread.threadId
-             AND message.direction = 'INBOUND' AND message.replaceId IS NULL
+             AND message.direction = 'INBOUND' AND (message.replaceId IS NULL OR message.correctionTargetMessageId IS NULL)
              AND message.unreadEligible = 1 AND message.locallyRead = 0) AS unreadCount
         FROM message_threads AS thread
         JOIN thread_destinations AS title ON title.accountId = thread.accountId
@@ -1082,7 +1082,7 @@ abstract class MessageDao {
            END
           WHERE messages.accountId = :accountId
             AND messages.messageKind IN ('CHAT', 'GROUPCHAT')
-            AND messages.replaceId IS NULL
+            AND (messages.replaceId IS NULL OR messages.correctionTargetMessageId IS NULL)
         ),
         latest_archive_ordinals AS (
           SELECT peerJid, conversationArchiveAuthority, conversationArchiveScope,
@@ -1186,7 +1186,7 @@ abstract class MessageDao {
             WHERE unread.accountId = :accountId
               AND unread.peerJid = messages.peerJid
               AND unread.direction = 'INBOUND'
-              AND unread.replaceId IS NULL
+              AND (unread.replaceId IS NULL OR unread.correctionTargetMessageId IS NULL)
               AND unread.unreadEligible = 1
               AND unread.locallyRead = 0
           ) AS unreadCount
@@ -1209,7 +1209,7 @@ abstract class MessageDao {
         """
         SELECT * FROM messages
         WHERE accountId = :accountId AND messageKind = 'CHAT'
-          AND replaceId IS NULL
+          AND (replaceId IS NULL OR correctionTargetMessageId IS NULL)
         ORDER BY archiveOrdinal IS NULL, archiveOrdinal, localSequence, localMessageId
         """,
     )
@@ -1336,7 +1336,7 @@ abstract class MessageDao {
          AND message_outbox.messageId = messages.localMessageId
         WHERE messages.accountId = :accountId AND messages.peerJid = :peerJid
           AND messages.messageKind IN ('CHAT', 'GROUPCHAT')
-          AND messages.replaceId IS NULL
+          AND (messages.replaceId IS NULL OR messages.correctionTargetMessageId IS NULL)
         ORDER BY (
           SELECT position.archiveOrdinal
           FROM archive_message_positions AS position

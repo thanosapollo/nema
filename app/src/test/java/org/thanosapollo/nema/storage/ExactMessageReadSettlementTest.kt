@@ -61,31 +61,32 @@ class ExactMessageReadSettlementTest {
         val first = row("first", 1)
         val historical = row("historical", 3).copy(unreadEligible = false)
         val new = row("new", 5)
+        val unresolvedCorrection = row("unresolved-correction", 8).copy(replaceId = "wire-missing")
         val excluded = listOf(
             row("hole", 2),
             row("other-peer", 4).copy(peerJid = OTHER_PEER),
             row("outbound", 6).copy(direction = MessageDirection.OUTBOUND),
-            row("correction", 7).copy(replaceId = "wire-original"),
+            row("correction", 7).copy(replaceId = "wire-original", correctionTargetMessageId = "first"),
             row("first", 1).copy(accountId = OTHER_ACCOUNT),
         )
         database.withTransaction {
-            (listOf(first, historical, new) + excluded).forEach { dao.insertMessage(it) }
+            (listOf(first, historical, new, unresolvedCorrection) + excluded).forEach { dao.insertMessage(it) }
         }
-        val requested = listOf("first", "historical", "other-peer", "outbound", "correction", "missing")
-        assertEquals(2, dao.markMessageIdsRead(ACCOUNT, PEER, requested))
+        val requested = listOf("first", "historical", "other-peer", "outbound", "correction", "unresolved-correction", "missing")
+        assertEquals(3, dao.markMessageIdsRead(ACCOUNT, PEER, requested))
         assertEquals(0, dao.markMessageIdsRead(ACCOUNT, PEER, requested))
         assertEquals(1, dao.markMessageIdsRead(ACCOUNT, PEER, requested + "new"))
         assertEquals(0, dao.markMessageIdsRead(ACCOUNT, PEER, emptyList()))
         assertEquals(0, dao.markMessageIdsRead("missing-account", PEER, requested))
         assertEquals(0, dao.markMessageIdsRead(ACCOUNT, "missing-peer", requested))
         assertEquals(0, dao.markMessageIdsRead(ACCOUNT, PEER, listOf("missing")))
-        for (message in listOf(first, historical, new)) {
+        for (message in listOf(first, historical, new, unresolvedCorrection)) {
             assertEquals(message.copy(locallyRead = true), dao.message(message.accountId, message.localMessageId))
         }
         for (message in excluded) {
             assertEquals(message, dao.message(message.accountId, message.localMessageId))
         }
-        assertEquals(listOf("first", "historical", "new"), updatedIds())
+        assertEquals(listOf("first", "historical", "unresolved-correction", "new"), updatedIds())
     }
 
     @Test

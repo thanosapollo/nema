@@ -39,7 +39,7 @@ internal const val CHEAP_CONVERSATION_SUMMARIES = """
             WHERE unread.accountId = :accountId
               AND unread.peerJid = messages.peerJid
               AND unread.direction = 'INBOUND'
-              AND unread.replaceId IS NULL
+              AND (unread.replaceId IS NULL OR unread.correctionTargetMessageId IS NULL)
               AND unread.unreadEligible = 1
               AND unread.locallyRead = 0
           ) AS unreadCount
@@ -52,7 +52,7 @@ internal const val CHEAP_CONVERSATION_SUMMARIES = """
             FROM messages
             WHERE accountId = :accountId
               AND messageKind IN ('CHAT', 'GROUPCHAT')
-              AND replaceId IS NULL
+              AND (replaceId IS NULL OR correctionTargetMessageId IS NULL)
             GROUP BY peerJid
           ) AS latest_time
             ON latest_time.peerJid = messages.peerJid
@@ -62,7 +62,7 @@ internal const val CHEAP_CONVERSATION_SUMMARIES = """
            )
           WHERE messages.accountId = :accountId
             AND messages.messageKind IN ('CHAT', 'GROUPCHAT')
-            AND messages.replaceId IS NULL
+            AND (messages.replaceId IS NULL OR messages.correctionTargetMessageId IS NULL)
           GROUP BY messages.peerJid
         ) AS latest
           ON latest.peerJid = messages.peerJid
@@ -71,5 +71,5 @@ internal const val CHEAP_CONVERSATION_SUMMARIES = """
           ON peers.accountId = messages.accountId
          AND peers.jid = messages.peerJid
         WHERE messages.accountId = :accountId
-          AND messages.replaceId IS NULL
+          AND (messages.replaceId IS NULL OR messages.correctionTargetMessageId IS NULL)
         """

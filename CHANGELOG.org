@@ -6,6 +6,8 @@
 + Offer Retry send for Delivery unknown messages with a duplicate warning. Retain the original operation and refuse a stale retry or one superseded by positive delivery evidence.
 + Retain unsupported legacy and modern OMEMO content through live delivery, archive replay and database upgrades. Show an honest protected-content placeholder, without decryption or unauthenticated message actions.
 + Give every physical reconnect its own native transport so delayed predecessor shutdown cannot retire its successor.
++ Keep message corrections visible as ordinary messages when their original is missing or cannot be edited, for example after a thread mismatch. Hide a correction only once it is applied to its original.
++ Accept authentic Carbons that carry a readable body beside unknown extensions, such as XEP-0380 encryption hints, so messages from other own clients and OMEMO fallbacks appear live instead of after the next reconnect. Unknown extensions gain no receipt, correction or reaction authority.
 
 + Keep native connectivity rejections retryable when a message has not reached transport admission. Ambiguous post-admission sends remain Delivery unknown and are not automatically replayed.
 + Prevent delayed reply-as-thread completion from replacing a newer conversation or Home destination. Retain committed reply drafts for recovery.

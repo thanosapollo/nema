@@ -2006,13 +2006,11 @@ internal fun MessageCarrier.toTrustedCarbonMessage(
     )
 }
 
-private fun Message.hasCarbonPayload(): Boolean {
-    val payloads = extensions.filterNot {
-        it.namespace == "jabber:client" && it.elementName in setOf("body", "thread")
-    }
-    return !body.isNullOrEmpty() && payloads.all(::isCarbonPayload) ||
-        body.isNullOrEmpty() && payloads.isNotEmpty() && payloads.all(::isCarbonPayload)
-}
+// Carbon authenticity and forbidden carriers are checked separately. A readable body is
+// admitted beside unknown inert extensions, which gain no authority from admission; a
+// bodyless carbon still needs at least one recognized payload.
+private fun Message.hasCarbonPayload(): Boolean =
+    !body.isNullOrEmpty() || extensions.any(::isCarbonPayload)
 
 private fun isCarbonPayload(extension: org.jivesoftware.smack.packet.ExtensionElement): Boolean {
     val names = when (extension.namespace) {

@@ -184,6 +184,59 @@ class ProtectedIngressTest {
         }
     }
 
+    @Test fun emeDecoratedLegacyOmemoAgreesAcrossLiveCarbonAndArchive() {
+        // Exact device shapes: injected B2 and the neomacs client's legacy OMEMO message.
+        val shapes = listOf(
+            "<encrypted xmlns='eu.siacs.conversations.axolotl'><header sid='1'><key rid='2'>AAAA</key><iv>AAAA</iv></header>" +
+                "<payload>AAAA</payload></encrypted><store xmlns='urn:xmpp:hints'/>" +
+                "<encryption xmlns='urn:xmpp:eme:0' namespace='eu.siacs.conversations.axolotl' name='OMEMO'/>" +
+                "<body>B2 omemo-shaped fallback</body>",
+            "<encrypted xmlns='eu.siacs.conversations.axolotl'><header sid='1'><key rid='2' prekey='true'>AAAA</key>" +
+                "<iv>AAAA</iv></header><payload>AAAA</payload></encrypted><store xmlns='urn:xmpp:hints'/>" +
+                "<encryption xmlns='urn:xmpp:eme:0' namespace='eu.siacs.conversations.axolotl' name='OMEMO'/>" +
+                "<request xmlns='urn:xmpp:receipts'/><markable xmlns='urn:xmpp:chat-markers:0'/>" +
+                "<active xmlns='http://jabber.org/protocol/chatstates'/><origin-id xmlns='urn:xmpp:sid:0' id='origin'/>" +
+                "<body>neomacs fallback</body><thread>0123456789abcdef</thread>",
+        )
+        val self = ProtectedFixtures.self
+        val peer = ProtectedFixtures.peer
+        for (content in shapes) for (outbound in listOf(false, true)) {
+            val from = if (outbound) "$self/neomacs" else "$peer/test"
+            val to = if (outbound) peer else self
+            val inner = "<message xmlns='jabber:client' type='chat' from='$from' to='$to' id='wire'>$content</message>"
+            val mapped = mutableMapOf<ProtectedCarrierKind, IncomingMessageEnvelope>()
+            if (!outbound) {
+                mapped[ProtectedCarrierKind.LIVE] = requireNotNull(PacketParserUtils.parseStanza<Message>(inner)
+                    .toIncomingEnvelope(ProtectedFixtures.attempt, self))
+            }
+            val direction = if (outbound) "sent" else "received"
+            val carbon = PacketParserUtils.parseStanza<Message>("<message xmlns='jabber:client' from='$self' to='$self/test'>" +
+                "<$direction xmlns='urn:xmpp:carbons:2'><forwarded xmlns='urn:xmpp:forward:0'>$inner</forwarded></$direction></message>")
+            val trusted = requireNotNull(carbon.classifyCarrier(self, "$self/test").toTrustedCarbonMessage(self)) { "$direction carbon" }
+            mapped[if (outbound) ProtectedCarrierKind.SENT_CARBON else ProtectedCarrierKind.RECEIVED_CARBON] =
+                requireNotNull(trusted.message.toIncomingEnvelope(ProtectedFixtures.attempt, self,
+                    suppliedSentAtEpochMs = trusted.sentAtEpochMs, suppliedSentTimeSource = trusted.sentTimeSource,
+                    carbonDirection = trusted.carbonDirection, protectedCarrier = trusted.protectedCarrier))
+            val archive = PacketParserUtils.parseStanza<Message>("<message xmlns='jabber:client' from='$self'>" +
+                "<result xmlns='urn:xmpp:mam:2' queryid='query' id='r1'><forwarded xmlns='urn:xmpp:forward:0'>$inner</forwarded></result></message>")
+            mapped[ProtectedCarrierKind.MAM] = requireNotNull(normalizeMamResults(listOf(archive),
+                listOf(org.jivesoftware.smackx.mam.element.MamElements.MamResultExtension.from(archive)),
+                ProtectedFixtures.attempt, self, false).single().message)
+            val fallback = Regex("<body>(.*)</body>").find(content)!!.groupValues[1]
+            for ((kind, envelope) in mapped) {
+                val evidence = requireNotNull(envelope.protection) { "$kind" }
+                assertEquals("$kind", fallback, envelope.body)
+                assertEquals(outbound, envelope.outbound)
+                assertEquals(ProtectedState.UNSUPPORTED_PAYLOAD, evidence.state)
+                assertEquals(setOf(OmemoProtocol.LEGACY), evidence.protocols)
+                assertEquals(kind, evidence.carriers.single().kind)
+                assertNull(envelope.replaceId)
+                assertNull(envelope.attachmentUrl)
+                assertFalse(envelope.receiptRequested)
+            }
+        }
+    }
+
     @Test fun unknownVersionCannotAuthorizeCarbonAndValidatedCarbonCarriesItsOwnProvenance() {
         for (protocol in OmemoProtocol.entries) {
             val xml = "<message xmlns='jabber:client' from='${ProtectedFixtures.self}' to='${ProtectedFixtures.self}/test'>" +

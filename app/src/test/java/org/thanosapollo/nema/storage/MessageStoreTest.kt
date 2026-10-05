@@ -517,7 +517,7 @@ class MessageStoreTest {
                 replaceId = "original-wire-id",
             ).copy(sentAtEpochMs = 2_000L, sentTimeSource = MessageTimeSource.MAM),
         )
-        assertTrue(database.messageDao().observeDirectTimeline(ACCOUNT, PEER).first().isEmpty())
+        assertEquals("correction-first", database.messageDao().observeDirectTimeline(ACCOUNT, PEER).first().single().localMessageId)
 
         store.ingest(
             incoming(
@@ -554,6 +554,79 @@ class MessageStoreTest {
         assertEquals("corrected body", row.correctedBody)
         assertTrue(row.edited)
         assertEquals("correction-first", store.messages(ACCOUNT).single { it.body == "corrected body" }.localMessageId)
+    }
+
+    @Test
+    fun unresolvedDirectCorrectionStaysVisibleUntilItsTargetArrives() = runBlocking {
+        val store = MessageStore(database)
+        val dao = database.messageDao()
+        store.ingest(
+            incoming(
+                localId = "orphan-correction",
+                body = "fixed typo",
+                aliases = listOf(TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "edit-wire-id")),
+                replaceId = "bootstrap-missing-id",
+            ).copy(sentAtEpochMs = 2_000L, sentTimeSource = MessageTimeSource.MAM),
+        )
+        val orphan = dao.observeDirectTimeline(ACCOUNT, PEER).first().single()
+        assertEquals("orphan-correction", orphan.localMessageId)
+        assertEquals("fixed typo", orphan.body)
+        assertEquals(null, orphan.correctedBody)
+        assertFalse(orphan.edited)
+        for (summaries in listOf(dao.observeConversationSummaries(ACCOUNT).first(), dao.cachedConversationSummaries(ACCOUNT))) {
+            assertEquals("fixed typo", summaries.single().preview)
+            assertEquals(1, summaries.single().unreadCount)
+        }
+
+        store.ingest(
+            incoming(
+                localId = "late-original",
+                body = "fixed tpyo",
+                aliases = listOf(TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, "bootstrap-missing-id")),
+            ).copy(sentAtEpochMs = 1_000L, sentTimeSource = MessageTimeSource.MAM),
+        )
+        val reconciled = dao.observeDirectTimeline(ACCOUNT, PEER).first().single()
+        assertEquals("late-original", reconciled.localMessageId)
+        assertEquals("fixed typo", reconciled.correctedBody)
+        assertTrue(reconciled.edited)
+        for (summaries in listOf(dao.observeConversationSummaries(ACCOUNT).first(), dao.cachedConversationSummaries(ACCOUNT))) {
+            assertEquals("fixed typo", summaries.single().preview)
+            assertEquals(1, summaries.single().unreadCount)
+        }
+        assertEquals(0, dao.markMessageIdsRead(ACCOUNT, PEER, listOf("orphan-correction")))
+    }
+
+    @Test
+    fun rejectedDirectCorrectionsStayVisibleAsOrdinaryMessages() = runBlocking {
+        val store = MessageStore(database)
+        val dao = database.messageDao()
+        fun alias(value: String) = listOf(TrustedIdentityAlias(IdentityAliasKind.MESSAGE_ID, PEER, value))
+        store.ingest(incoming(localId = "threaded", body = "threaded original", aliases = alias("threaded-id"), threadId = "thread")
+            .copy(sentAtEpochMs = 1_000L, sentTimeSource = MessageTimeSource.MAM))
+        store.ingest(incoming(localId = "attachment", body = "file", aliases = alias("attachment-id"))
+            .copy(attachmentUrl = "https://example.org/file", sentAtEpochMs = 1_100L, sentTimeSource = MessageTimeSource.MAM))
+        store.ingest(incoming(localId = "reply", body = "reply original", aliases = alias("reply-id"), replyToId = "elsewhere")
+            .copy(sentAtEpochMs = 1_200L, sentTimeSource = MessageTimeSource.MAM))
+        val corrections = mapOf(
+            "thread-omitted" to "threaded-id",
+            "attachment-target" to "attachment-id",
+            "reply-target" to "reply-id",
+        )
+        corrections.entries.forEachIndexed { index, (id, target) ->
+            store.ingest(incoming(localId = id, body = "visible $id", aliases = alias("$id-wire"), replaceId = target)
+                .copy(sentAtEpochMs = 2_000L + index, sentTimeSource = MessageTimeSource.MAM))
+        }
+        val rows = dao.observeDirectTimeline(ACCOUNT, PEER).first().associateBy { it.localMessageId }
+        assertEquals(setOf("threaded", "attachment", "reply") + corrections.keys, rows.keys)
+        corrections.keys.forEach { id ->
+            assertEquals("visible $id", rows.getValue(id).body)
+            assertEquals(null, rows.getValue(id).correctedBody)
+        }
+        listOf("threaded", "attachment", "reply").forEach { id ->
+            assertEquals(null, rows.getValue(id).correctedBody)
+            assertFalse(rows.getValue(id).edited)
+        }
+        assertEquals(3, dao.markMessageIdsRead(ACCOUNT, PEER, corrections.keys.toList()))
     }
 
     @Test
@@ -643,7 +716,13 @@ class MessageStoreTest {
         )
         invalid.forEach { store.ingest(it) }
 
-        val row = database.messageDao().observeDirectTimeline(ACCOUNT, PEER).first().single()
+        val rows = database.messageDao().observeDirectTimeline(ACCOUNT, PEER).first().associateBy { it.localMessageId }
+        val row = rows.getValue("target")
+        assertEquals(
+            setOf("target", "wrong-sender", "wrong-thread", "attachment-correction", "reply-correction"),
+            rows.keys,
+        )
+        assertTrue(rows.values.all { it.correctedBody == null && !it.edited })
         assertEquals("target", row.localMessageId)
         assertEquals("original", row.body)
         assertEquals(null, row.correctedBody)
