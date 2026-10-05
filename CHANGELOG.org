@@ -1,6 +1,6 @@
 #+TITLE: Nema changelog
 
-* Unreleased
+* Unreleased — 0.3.2-reliability.4
 
 + Show protected and unsupported messages as one inert card aligned by direction, with sent or received time and no delivery ticks, download or edit actions.
 + Do not offer React on a correction whose original is missing, since it has no reaction target yet. When such a correction was already read and its original arrives, keep the original read.
