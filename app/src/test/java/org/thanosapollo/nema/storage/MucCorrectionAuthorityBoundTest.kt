@@ -76,7 +76,8 @@ internal class MucCorrectionAuthorityBoundTest : ReactionStoreTestFixture() {
                 sql.query("EXPLAIN $query", args).use { c ->
                     while (c.moveToNext()) println("VM " + (0 until c.columnCount).joinToString("|") { c.getString(it) ?: "NULL" })
                 }
-                val searches = plans.filter { it.contains("SEARCH c ") || it.contains("SCAN c") }
+                // SQLite before 3.36 names the alias as "TABLE identity_conflicts AS c".
+                val searches = plans.filter { CONFLICT_ALIAS_PLAN.containsMatchIn(it) }
                 if (searches.size != 2 || searches.any { detail ->
                         !detail.contains("kind=?") ||
                             !(detail.contains("firstMessageId=?") || detail.contains("secondMessageId=?"))
@@ -94,5 +95,9 @@ internal class MucCorrectionAuthorityBoundTest : ReactionStoreTestFixture() {
             }
         }
         assertTrue("Unbounded irrelevant-history prefixes: $failures", failures.isEmpty())
+    }
+
+    private companion object {
+        val CONFLICT_ALIAS_PLAN = Regex("""^(SEARCH|SCAN) (TABLE identity_conflicts AS )?c( |$)""")
     }
 }
