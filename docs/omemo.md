@@ -1,6 +1,6 @@
 # OMEMO design
 
-Status: design for work after 9 October 2026. Nothing here is implemented.
+Status: approved v1 design. OMEMO is not implemented or shipped.
 Today's behaviour is in [protected-content.md](protected-content.md), and
 code locations are in [omemo-calls-map.md](omemo-calls-map.md).
 
@@ -34,7 +34,7 @@ Evidence: Conversations 2.20.4 still depends on
 source references only `eu.siacs.conversations.axolotl`. Smack 4.5.0
 (September 2026) still ships only the `VAxolotl` element set.
 
-**Recommendation:** legacy OMEMO only in v1. Keep the existing `MODERN` parse
+**Approved protocol:** legacy OMEMO only in v1. Keep the existing `MODERN` parse
 path so OMEMO 2 messages show an honest "not supported yet" state. Revisit
 OMEMO 2 when one of Conversations or Dino ships it. Both protocols are
 end-to-end encrypted. Legacy OMEMO's known gap is metadata: reply, correction,
@@ -52,13 +52,14 @@ body.
 
 Licences are GPLv3-compatible with Nema (GPLv3).
 
-**Recommendation: B.** Nema already parses OMEMO itself and refuses foreign
+**Approved library: option B**, `signal-protocol-java` plus a Nema-owned
+OMEMO 0.3 layer. Nema already parses OMEMO itself and refuses foreign
 providers, and Conversations proves this stack at scale. The risks are an
 unmaintained crypto dependency (we own any patches) and an old
 `protobuf-java`. The mitigation is to bound inputs before they reach
-protobuf parsing; the existing provider already bounds evidence size. If
-the size of B grows past its budget during slice 1, fall back to A's
-`SignalOmemoRatchet`-level classes, not `OmemoManager`.
+protobuf parsing; the existing provider already bounds evidence size. There
+is no approved library fallback. A size or implementation blocker requires
+a new decision, not substitution of option A or another library.
 
 Spike results (branch `spike/omemo-webrtc-size`, not for merge):
 
@@ -107,7 +108,7 @@ Spike results (branch `spike/omemo-webrtc-size`, not for merge):
 
 ## Trust model and UX
 
-Options:
+Alternatives considered:
 
 1. **BTBV ("blind trust before verification")**, the Conversations default.
    New devices of a contact are trusted automatically until the user
@@ -117,7 +118,7 @@ Options:
    This is safest, but most users stop using encryption.
 3. **TOFU without verification.** Not recommended; there is no upgrade path.
 
-**Recommendation:** BTBV, plus QR verification that reads and writes
+**Approved trust model:** BTBV, plus QR verification that reads and writes
 Conversations' `xmpp:` URI fingerprint parameters, and a fingerprint list
 per contact with copy and compare. A message from a device the user has
 marked untrusted is still shown, with a persistent "unverified device"
@@ -129,9 +130,9 @@ Encryption state per chat:
 
 - Conversations enables OMEMO by default for conversations its policy
   considers suitable, rather than after checking every bundle. Nema's
-  proposal: on by default for new 1:1 chats once the contact has published
-  at least one device. Existing chats ask once. Sending then follows the
-  trust filter below.
+  approved policy: encryption is on by default for new 1:1 chats once the
+  contact has published at least one device. Existing chats ask once.
+  Sending then follows the trust filter below.
 - An encrypted chat never falls back to plaintext on its own. If no device
   can be encrypted to (no device list, no bundles, all untrusted), the send
   fails with a reason and the user picks "Send unencrypted" explicitly.
@@ -242,8 +243,8 @@ content in notifications" option is a product decision.
 
 ## Interop test plan
 
-Accounts: the `hermes` test account and a second test account on
-chat.thanosapollo.org, plus one account on another server for s2s.
+Use dedicated test accounts on one server, plus an account on another
+server for s2s.
 Clients: Conversations (Android), Monocles (Android), Dino (desktop),
 Gajim (desktop).
 
@@ -273,7 +274,7 @@ excerpt with ciphertext and keys removed.
 
 ## First slices
 
-1. Seams 1 to 4 from the map (`cockpit: nema`). No behaviour change.
+1. Seams 1 to 4 from the map. No behaviour change.
 2. Identity and device-list publication behind a developer flag. Receiving
    only: decrypt 1:1 live, carbon and MAM messages with BTBV, using the
    failure table.

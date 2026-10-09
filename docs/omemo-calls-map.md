@@ -2,13 +2,29 @@
 
 Status: foundation notes, October 2026. Line references are pinned to commit
 `1087d5b` and are relative to `app/src/main/java/org/thanosapollo/nema/`
-unless they start with `app/`. Re-check them before editing; `cockpit: nema`
-is refactoring this code.
+unless they start with `app/`. Re-check them before editing; the source may
+change independently of this map. These are design seams, not shipped
+features.
 
 Design documents: [omemo.md](omemo.md) and [calls.md](calls.md).
 Tracker: OMEMO epic #81 (slices #82-#85), calls epic #86 (slices #87-#89).
 Seam 1 is #82, seam 4 is #83, seams 2-3 are #84, seams 5 and 7 are #87,
 and seam 6 is #88.
+
+## Approved v1 scope
+
+- Legacy OMEMO only; OMEMO 2 remains an unsupported receive state.
+- Option B: `signal-protocol-java` with a Nema-owned OMEMO 0.3 layer. No
+  library fallback is approved.
+- BTBV with interoperable QR verification. Messages from untrusted devices
+  remain visible with a persistent marker; they are never hidden for trust.
+- New 1:1 chats default to encryption once the contact publishes at least
+  one device. An encrypted send never silently falls back to plaintext.
+- Calls v1 is 1:1 audio using Conversations' `webrtc-android`, compileSdk
+  37 and per-ABI APKs.
+
+These decisions approve the implementation direction only. Neither OMEMO
+nor calls is implemented or shipped.
 
 ## What exists today
 
@@ -142,7 +158,7 @@ PEP-notification, IQ-handler or entity-capabilities path today.
   secrets with an AndroidKeyStore AES-GCM key. OMEMO storage can reuse this
   pattern.
 
-## Seams for `cockpit: nema`
+## Implementation seams
 
 These are ordered. Each one is useful on its own and needs no crypto or media
 dependency. None changes user-visible behaviour.
@@ -152,10 +168,11 @@ dependency. None changes user-visible behaviour.
    spike showed that adding `smack-omemo` registers `OmemoVAxolotlProvider`
    through Smack's optional `OmemoInitializer`. All seven
    `ProtectedMessageStoreTest` cases then fail with "Unexpected protected
-   provider owner". Make ownership explicit: one Nema-owned provider that
-   either delegates to a library parser or stays the inert parser, chosen at
-   install time, with a test that the chosen owner wins regardless of class
-   initialisation order. Files: `NemaOmemoProvider.kt`, `NemaApplication.kt:67`,
+   provider owner". Under approved option B, retain the Nema-owned wire
+   parser and make that ownership explicit, with a test that it wins
+   regardless of class initialisation order. Do not add `smack-omemo` or
+   delegate parsing as an unapproved library fallback. Files:
+   `NemaOmemoProvider.kt`, `NemaApplication.kt:67`,
    `SmackSessionConnection.kt:406`.
 2. **Crypto stage in ingress.** Add one stage that runs on live, carbon and
    MAM envelopes alike, on the path from `toIncomingEnvelope` through

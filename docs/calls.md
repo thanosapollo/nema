@@ -1,6 +1,6 @@
 # Calls design
 
-Status: design for work after 9 October 2026. Nothing here is implemented.
+Status: approved v1 design. Calls are not implemented or shipped.
 Code locations are in [omemo-calls-map.md](omemo-calls-map.md).
 
 ## Goal and scope
@@ -8,7 +8,7 @@ Code locations are in [omemo-calls-map.md](omemo-calls-map.md).
 Goal: 1:1 audio calls with Conversations, Monocles, Cheogram and Dino, that
 connect behind ordinary NATs and ring reliably on a locked phone.
 
-Recommended v1: audio only, 1:1, one call at a time, with the account on its
+Approved v1: audio only, 1:1, one call at a time, with the account on its
 normal (non-Tor) route. Video follows in v2 on the same signalling. Group
 calls are out of scope; there is no interoperable XMPP group-call protocol
 to target.
@@ -69,12 +69,13 @@ with 16 KB pages (supported from Android 15) need. Zip alignment of the
 uncompressed libraries is checked when the real build lands. The per-device
 cost is about 9 MB on arm64.
 
-**Recommendations:**
+**Approved media and packaging:**
 
 - Use Conversations' `webrtc-android` build. It is the interop reference and
   tracks Chromium closely. It requires a compileSdk 37 / AGP bump, which is
-  a separate, mechanical seam for `cockpit: nema`. Until then, Threema's
-  144.0.0 is a drop-in for development.
+  a separate toolchain seam. The selected dependency is
+  `im.conversations.webrtc:webrtc-android`; no alternative WebRTC library
+  fallback is approved.
 - Ship per-ABI APKs (`splits.abi`, arm64-v8a and armeabi-v7a), so the
   self-update path does not download 34 MB of libraries that cannot load.
   x86/x86_64 only matter for emulators.
@@ -97,7 +98,7 @@ cost is about 9 MB on arm64.
   call notification. It must never start from a background stanza
   handler. The messaging service keeps its own type (map seam 8). Whether
   `remoteMessaging` is the right type for a persistent XMPP connection is a
-  separate question for `cockpit: nema`; Android describes that type as
+  separate messaging-service question; Android describes that type as
   cross-device message continuity.
 - **Notifications.** Every call has a `NotificationCompat.CallStyle`
   notification for its whole life: incoming (ringing, with a full-screen
@@ -132,7 +133,7 @@ cost is about 9 MB on arm64.
   needs a battery-optimisation exemption (as Conversations asks for) or
   push wake-up, and must be tested with forced Doze
   (`adb shell dumpsys deviceidle force-idle`), not just a locked screen.
-  How Nema handles this today belongs to `cockpit: nema`'s reliability work.
+  Existing messaging reachability needs separate reliability verification.
 - **Tor.** Accounts routed through Tor (`OnionXmppConnection`) must not
   announce or place calls, because ICE candidates expose the device's
   addresses. Conversations does the same. This is a capability rule (map
@@ -140,15 +141,10 @@ cost is about 9 MB on arm64.
 
 ## Server requirements
 
-The project's own server runs ejabberd 26.07. A read-only check in October
-2026 (no changes made) found ejabberd's built-in STUN/TURN listener
-(`ejabberd_stun`, UDP, `use_turn: true`) and `mod_stun_disco` with default
-options. ExtDisco discovery therefore exists, but TURN relaying is not yet
-usable from outside: the advertised relay address is not set and the relay
-port range is not opened in the host firewall. There is no TURN over TLS. The detailed
-findings are in the private campaign evidence, not in this repository.
-
-What is needed (applied by the server owner, outside this repository):
+Calls require working XEP-0215 discovery and a reachable TURN relay.
+Discovery alone does not prove relaying works. For an ejabberd deployment,
+the following are configuration requirements, not a statement about any
+live server or an instruction to change one:
 
 1. **Set `turn_ipv4_address`** on the STUN/TURN listener to the server's public
    IPv4. ejabberd's documentation says it has no default and should be set
@@ -205,8 +201,8 @@ What is needed (applied by the server owner, outside this repository):
 
 ## Interop test plan
 
-Accounts: the `hermes` test account and a second test account on
-chat.thanosapollo.org, plus one account on another server. Clients:
+Use dedicated test accounts on one server, plus an account on another
+server. Clients:
 Conversations, Monocles, Dino. Networks: same Wi-Fi, Wi-Fi to mobile data,
 and mobile data to mobile data. Mobile-to-mobile does not force TURN by
 itself. TURN is proven with the relay-only option, checking that WebRTC's
@@ -237,7 +233,8 @@ candidate was gathered.
 
 ## First slices
 
-1. Map seams 5 to 8 (IQ, PEP, capabilities, FGS split) in `cockpit: nema`.
+1. Map seams 5 to 8 (IQ, PEP, capabilities, FGS split), plus the compileSdk
+   37 / AGP toolchain seam and per-ABI APK packaging.
 2. ExtDisco client plus the server changes above, proven with a relay
    candidate.
 3. SDP to Jingle translator, tested only with captured fixtures from
