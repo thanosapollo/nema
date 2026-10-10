@@ -6,6 +6,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import org.thanosapollo.nema.createRobolectricComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.performClick
@@ -160,6 +161,51 @@ class VisibleReadLayoutTest {
         compose.waitForIdle()
         assertEquals(bottom - 1f, bubble.fetchSemanticsNode().positionInRoot.y, 0f)
         compose.waitUntil(5_000) { reads.any { "row-40" in it.messageIds } }
+    }
+
+    @Test
+    fun dayHeadingOverlapAloneAdmitsNothingButOneBubblePixelDoes() {
+        val zone = java.time.ZoneId.systemDefault()
+        fun sentAt(day: Int, minute: Int) = java.time.LocalDate.of(2025, 3, day).atTime(12, minute)
+            .atZone(zone).toInstant().toEpochMilli()
+        // row-40 starts a new local day, so its item carries a heading above the bubble.
+        val rows = (0..80).map {
+            row("row-$it").copy(markable = true, markerTargetId = "wire-$it",
+                sentAtEpochMs = if (it < 40) sentAt(1, it % 60) else sentAt(2, it % 60))
+        }
+        val resumed = mutableStateOf(false)
+        val reads = mutableListOf<VisibleReadRequest>()
+        val displayed = mutableListOf<String>()
+        compose.setContent {
+            MaterialTheme {
+                MessageTimeline(rows, accountId = "account", routeOccurrence = occurrence,
+                    activityResumed = resumed.value, readReceiptsEnabled = true,
+                    onMarkVisibleRead = { reads.add(it); true },
+                    onMessageDisplayed = { displayed.add(it.id); true },
+                    modifier = Modifier.height(300.dp))
+            }
+        }
+        val timeline = compose.onNodeWithTag("message-timeline")
+        timeline.performScrollToIndex(40)
+        compose.waitForIdle()
+        val bubble = compose.onNodeWithTag("message-bubble-row-40")
+        val height = bubble.fetchSemanticsNode().size.height.toFloat()
+        timeline.performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.ScrollBy) { it(0f, height) }
+        compose.waitForIdle()
+        val bottom = timeline.fetchSemanticsNode().boundsInRoot.bottom
+        assertEquals("bubble touches viewport without overlap", bottom, bubble.fetchSemanticsNode().positionInRoot.y, 0f)
+        val heading = compose.onAllNodesWithTag("day-separator").fetchSemanticsNodes()
+            .single { it.boundsInRoot.bottom == bottom }
+        assertTrue("heading overlaps the viewport", heading.boundsInRoot.top < bottom)
+        compose.runOnIdle { resumed.value = true }
+        compose.waitForIdle()
+        compose.waitUntil(5_000) { reads.isNotEmpty() }
+        assertTrue(reads.none { "row-40" in it.messageIds })
+        assertFalse(displayed.contains("row-40"))
+        timeline.performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.ScrollBy) { it(0f, -1f) }
+        compose.waitForIdle()
+        assertEquals(bottom - 1f, bubble.fetchSemanticsNode().positionInRoot.y, 0f)
+        compose.waitUntil(5_000) { reads.any { "row-40" in it.messageIds } && displayed.contains("row-40") }
     }
 
     @Test

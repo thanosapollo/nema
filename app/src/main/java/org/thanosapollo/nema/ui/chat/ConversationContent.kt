@@ -1,13 +1,19 @@
 package org.thanosapollo.nema.ui.chat
 
+import android.content.BroadcastReceiver
 import android.content.ContentResolver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.BitmapFactory
 import android.net.Uri
 import java.io.InputStream
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.LinkedHashMap
+import java.util.Locale
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.PredictiveBackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -71,6 +77,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -85,6 +92,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.State
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -102,6 +110,7 @@ import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.testTag
@@ -111,6 +120,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.error
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
@@ -119,12 +129,15 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupProperties
+import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Deferred
@@ -1996,6 +2009,9 @@ internal fun MessageTimeline(
     }
     currentMessages.value = messages
     val readIndex by remember { derivedStateOf { TimelineReadIndex(currentMessages.value) } }
+    val timelineDay = rememberTimelineDay()
+    val dayLabels by remember { derivedStateOf { timelineDayLabels(currentMessages.value, timelineDay.value) } }
+    val currentDaySeparatorPx by rememberUpdatedState(with(LocalDensity.current) { DAY_SEPARATOR_HEIGHT.roundToPx() })
     val currentReadIndex by rememberUpdatedState(readIndex)
     val latestId = messages.lastOrNull()?.id
     LaunchedEffect(initialViewport, viewportRestored, messages.isNotEmpty()) {
@@ -2026,8 +2042,14 @@ internal fun MessageTimeline(
         snapshotFlow {
             val layout = listState.layoutInfo
             val index = currentReadIndex
+            val labels = dayLabels
+            val headingPx = currentDaySeparatorPx
             val visible = layout.visibleItemsInfo.asSequence()
-                .filter { it.offset + it.size > layout.viewportStartOffset && it.offset < layout.viewportEndOffset }
+                .filter {
+                    val key = it.key as? String
+                    timelineBubbleVisible(it.offset, it.size, if (key != null && key in labels) headingPx else 0,
+                        layout.viewportStartOffset, layout.viewportEndOffset)
+                }
                 .mapNotNull { it.key as? String }
                 .filter { index.contains(it) }
                 .toSet()
@@ -2134,277 +2156,282 @@ internal fun MessageTimeline(
                 key = TimelineMessage::id,
                 contentType = { message -> if (message.outgoing) 1 else 0 },
             ) { message ->
-                if (message.protectedState != "NONE") {
-                    ProtectedMessageCard(message)
-                    return@items
-                }
-                var messageActionsOpen by remember(message.id) { mutableStateOf(false) }
-                val reactable = canReact(venue, message)
-                val (bubbleContainerColor, bubbleContentColor) = messageBubbleColors(message.outgoing)
-                val visibleBody = remember(message.body, message.attachmentUrl) {
-                    if (message.attachmentUrl == null) {
-                        message.body
-                    } else {
-                        attachmentBodyCaption(message.body, message.attachmentUrl) ?: ""
+                // Inside the keyed row, so viewport and read-index positions stay message positions.
+                // One Column keeps the label above its row, since reverseLayout reverses an item's own children.
+                Column(Modifier.fillMaxWidth()) {
+                    dayLabels[message.id]?.let { TimelineDaySeparator(it) }
+                    if (message.protectedState != "NONE") {
+                        ProtectedMessageCard(message)
+                        return@items
                     }
-                }
-                val segments = remember(visibleBody) { parseQuotedBody(visibleBody) }
-                val correctionTarget = message.correctionTargetOrNull(venue)
-                Box(modifier = Modifier.fillMaxWidth()) {
-                    Column(
-                        modifier = Modifier
-                            .align(if (message.outgoing) Alignment.CenterEnd else Alignment.CenterStart)
-                            .padding(
-                                start = if (message.outgoing) 32.dp else 0.dp,
-                                end = if (message.outgoing) 0.dp else 32.dp,
-                            ),
-                    ) {
-                        Surface(
+                    var messageActionsOpen by remember(message.id) { mutableStateOf(false) }
+                    val reactable = canReact(venue, message)
+                    val (bubbleContainerColor, bubbleContentColor) = messageBubbleColors(message.outgoing)
+                    val visibleBody = remember(message.body, message.attachmentUrl) {
+                        if (message.attachmentUrl == null) {
+                            message.body
+                        } else {
+                            attachmentBodyCaption(message.body, message.attachmentUrl) ?: ""
+                        }
+                    }
+                    val segments = remember(visibleBody) { parseQuotedBody(visibleBody) }
+                    val correctionTarget = message.correctionTargetOrNull(venue)
+                    Box(modifier = Modifier.fillMaxWidth()) {
+                        Column(
                             modifier = Modifier
-                                .testTag("message-bubble-${message.id}")
-                                .semantics {
-                                    onClick(label = "Message actions") {
-                                        messageActionsOpen = true
-                                        true
-                                    }
-                                }
-                                .combinedClickable(
-                                    role = Role.Button,
-                                    onLongClickLabel = "Message actions",
-                                    onClick = {},
-                                    onDoubleClick = { messageActionsOpen = true },
-                                    onLongClick = { messageActionsOpen = true },
+                                .align(if (message.outgoing) Alignment.CenterEnd else Alignment.CenterStart)
+                                .padding(
+                                    start = if (message.outgoing) 32.dp else 0.dp,
+                                    end = if (message.outgoing) 0.dp else 32.dp,
                                 ),
-                            color = bubbleContainerColor,
-                            contentColor = bubbleContentColor,
-                            shape = RoundedCornerShape(
-                                topStart = 18.dp,
-                                topEnd = 18.dp,
-                                bottomStart = if (message.outgoing) 18.dp else 4.dp,
-                                bottomEnd = if (message.outgoing) 4.dp else 18.dp,
-                            ),
                         ) {
-                            Column(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
-                                if (message.groupChat && !message.outgoing) {
-                                    val nick = message.senderJid.substringAfterLast('/').ifEmpty { message.senderJid }
-                                    val nickColor = remember(nick, bubbleContainerColor) {
-                                        Color(mucNickColor(nick, bubbleContainerColor.toArgb()))
-                                    }
-                                    Text(
-                                        nick,
-                                        color = nickColor,
-                                        fontWeight = FontWeight.SemiBold,
-                                        style = MaterialTheme.typography.labelSmall,
-                                    )
-                                }
-                                message.attachmentUrl?.let { url ->
-                                    val resolvedMime = resolvedAttachmentMime(
-                                        message.attachmentMime,
-                                        message.attachmentName,
-                                        url,
-                                    )
-                                    MessageAttachment(
-                                        url = url,
-                                        name = message.attachmentName,
-                                        mime = resolvedMime,
-                                        groupChat = venue is ConversationVenue.Room || message.groupChat,
-                                        isCached = { isAttachmentCached(url) },
-                                        onUse = {
-                                            onUseAttachment(url, message.attachmentName, resolvedMime)
-                                        },
-                                        onLoadInline = { onLoadInlineImage(url) },
-                                    )
-                                }
-                                message.reply?.let { reply ->
-                                    MessageReplyPreview(reply.senderLabel, reply.body)
-                                }
-                                if (visibleBody.isNotEmpty() && segments.none { it is BodySegment.Quote }) {
-                                    LinkedMessageText(visibleBody, style = MaterialTheme.typography.bodyMedium)
-                                } else if (visibleBody.isNotEmpty()) {
-                                    segments.forEach { segment ->
-                                        when (segment) {
-                                            is BodySegment.Plain ->
-                                                segment.text.takeIf(String::isNotEmpty)?.let {
-                                                    LinkedMessageText(it, style = MaterialTheme.typography.bodyMedium)
-                                                }
-                                            is BodySegment.Quote ->
-                                                ManualQuoteBlock(segment.text, segment.depth)
+                            Surface(
+                                modifier = Modifier
+                                    .testTag("message-bubble-${message.id}")
+                                    .semantics {
+                                        onClick(label = "Message actions") {
+                                            messageActionsOpen = true
+                                            true
                                         }
                                     }
-                                }
-                                if (message.edited) {
-                                    Text("Edited", style = MaterialTheme.typography.labelSmall)
-                                }
-                                if (venue is ConversationVenue.Direct && !message.groupChat) {
-                                    message.threadSummaries.forEach { summary ->
-                                        ThreadSummaryButton(
-                                            summary = summary,
-                                            onClick = { onContinueThread(summary.thread) },
+                                    .combinedClickable(
+                                        role = Role.Button,
+                                        onLongClickLabel = "Message actions",
+                                        onClick = {},
+                                        onDoubleClick = { messageActionsOpen = true },
+                                        onLongClick = { messageActionsOpen = true },
+                                    ),
+                                color = bubbleContainerColor,
+                                contentColor = bubbleContentColor,
+                                shape = RoundedCornerShape(
+                                    topStart = 18.dp,
+                                    topEnd = 18.dp,
+                                    bottomStart = if (message.outgoing) 18.dp else 4.dp,
+                                    bottomEnd = if (message.outgoing) 4.dp else 18.dp,
+                                ),
+                            ) {
+                                Column(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
+                                    if (message.groupChat && !message.outgoing) {
+                                        val nick = message.senderJid.substringAfterLast('/').ifEmpty { message.senderJid }
+                                        val nickColor = remember(nick, bubbleContainerColor) {
+                                            Color(mucNickColor(nick, bubbleContainerColor.toArgb()))
+                                        }
+                                        Text(
+                                            nick,
+                                            color = nickColor,
+                                            fontWeight = FontWeight.SemiBold,
+                                            style = MaterialTheme.typography.labelSmall,
                                         )
                                     }
-                                }
-                                message.delivery?.visibleLabel()?.let { label ->
-                                    Text(
-                                        label,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = if (message.delivery == DeliveryPresentation.UNCERTAIN) {
-                                            MaterialTheme.colorScheme.onSurfaceVariant
-                                        } else {
-                                            androidx.compose.ui.graphics.Color.Unspecified
-                                        },
-                                    )
-                                }
-                                val check = message.delivery?.receiptCheck(bubbleContainerColor.toArgb())
-                                if (message.sentAtEpochMs != null || check != null) {
-                                    Row(
-                                        modifier = Modifier
-                                            .align(Alignment.End)
-                                            .testTag("message-status"),
-                                        verticalAlignment = Alignment.CenterVertically,
-                                        horizontalArrangement = Arrangement.spacedBy(4.dp),
-                                    ) {
-                                        check?.let { receipt ->
-                                            Text(
-                                                "\u2713",
-                                                color = receipt.color,
-                                                style = MaterialTheme.typography.labelSmall,
-                                                modifier = Modifier.clearAndSetSemantics {
-                                                    contentDescription = receipt.description
-                                                },
-                                            )
+                                    message.attachmentUrl?.let { url ->
+                                        val resolvedMime = resolvedAttachmentMime(
+                                            message.attachmentMime,
+                                            message.attachmentName,
+                                            url,
+                                        )
+                                        MessageAttachment(
+                                            url = url,
+                                            name = message.attachmentName,
+                                            mime = resolvedMime,
+                                            groupChat = venue is ConversationVenue.Room || message.groupChat,
+                                            isCached = { isAttachmentCached(url) },
+                                            onUse = {
+                                                onUseAttachment(url, message.attachmentName, resolvedMime)
+                                            },
+                                            onLoadInline = { onLoadInlineImage(url) },
+                                        )
+                                    }
+                                    message.reply?.let { reply ->
+                                        MessageReplyPreview(reply.senderLabel, reply.body)
+                                    }
+                                    if (visibleBody.isNotEmpty() && segments.none { it is BodySegment.Quote }) {
+                                        LinkedMessageText(visibleBody, style = MaterialTheme.typography.bodyMedium)
+                                    } else if (visibleBody.isNotEmpty()) {
+                                        segments.forEach { segment ->
+                                            when (segment) {
+                                                is BodySegment.Plain ->
+                                                    segment.text.takeIf(String::isNotEmpty)?.let {
+                                                        LinkedMessageText(it, style = MaterialTheme.typography.bodyMedium)
+                                                    }
+                                                is BodySegment.Quote ->
+                                                    ManualQuoteBlock(segment.text, segment.depth)
+                                            }
                                         }
-                                        message.sentAtEpochMs?.let { sentAt ->
-                                            Text(
-                                                formatMessageTime(sentAt),
-                                                style = MaterialTheme.typography.labelSmall,
+                                    }
+                                    if (message.edited) {
+                                        Text("Edited", style = MaterialTheme.typography.labelSmall)
+                                    }
+                                    if (venue is ConversationVenue.Direct && !message.groupChat) {
+                                        message.threadSummaries.forEach { summary ->
+                                            ThreadSummaryButton(
+                                                summary = summary,
+                                                onClick = { onContinueThread(summary.thread) },
                                             )
                                         }
                                     }
-                                }
-                            }
-                        }
-                        if (message.reactions.isNotEmpty()) {
-                            Row(
-                                modifier = Modifier
-                                    .padding(top = 4.dp)
-                                    .testTag("reaction-row-${message.id}"),
-                                horizontalArrangement = Arrangement.spacedBy(4.dp),
-                            ) {
-                                message.reactions.forEach { chip ->
-                                    Text(
-                                        "${chip.emoji} ${chip.count}",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        modifier = Modifier
-                                            .testTag("reaction-chip-${message.id}-${chip.emoji}")
-                                            .clickable(enabled = reactable) {
-                                                scope.launch { onReact(message, chip.emoji) }
+                                    message.delivery?.visibleLabel()?.let { label ->
+                                        Text(
+                                            label,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (message.delivery == DeliveryPresentation.UNCERTAIN) {
+                                                MaterialTheme.colorScheme.onSurfaceVariant
+                                            } else {
+                                                androidx.compose.ui.graphics.Color.Unspecified
                                             },
-                                    )
-                                }
-                            }
-                        }
-                        if (reactionPickerMessageId == message.id && reactable) {
-                            Popup(
-                                onDismissRequest = { reactionPickerShown = false },
-                                properties = PopupProperties(
-                                    focusable = true,
-                                    dismissOnBackPress = true,
-                                    dismissOnClickOutside = true,
-                                ),
-                            ) {
-                                AnimatedVisibility(
-                                    visible = reactionPickerShown,
-                                    enter = fadeIn(tween(140)) + scaleIn(initialScale = 0.88f, animationSpec = tween(180)),
-                                    exit = fadeOut(tween(110)) + scaleOut(targetScale = 0.88f, animationSpec = tween(150)),
-                                ) {
-                                    Surface(
-                                        shape = RoundedCornerShape(24.dp),
-                                        tonalElevation = 6.dp,
-                                        modifier = Modifier.testTag("reaction-picker"),
-                                    ) {
+                                        )
+                                    }
+                                    val check = message.delivery?.receiptCheck(bubbleContainerColor.toArgb())
+                                    if (message.sentAtEpochMs != null || check != null) {
                                         Row(
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            modifier = Modifier
+                                                .align(Alignment.End)
+                                                .testTag("message-status"),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp),
                                         ) {
-                                            org.thanosapollo.nema.xmpp.reactions.DEFAULT_REACTION_CHOICES.forEach { emoji ->
+                                            check?.let { receipt ->
                                                 Text(
-                                                    emoji,
-                                                    style = MaterialTheme.typography.titleMedium,
-                                                    modifier = Modifier.clickable {
-                                                        reactionPickerShown = false
-                                                        reactionPickerMessageId = null
-                                                        scope.launch { onReact(message, emoji) }
+                                                    "\u2713",
+                                                    color = receipt.color,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    modifier = Modifier.clearAndSetSemantics {
+                                                        contentDescription = receipt.description
                                                     },
+                                                )
+                                            }
+                                            message.sentAtEpochMs?.let { sentAt ->
+                                                Text(
+                                                    formatMessageTime(sentAt),
+                                                    style = MaterialTheme.typography.labelSmall,
                                                 )
                                             }
                                         }
                                     }
                                 }
-                                LaunchedEffect(reactionPickerShown) {
-                                    if (!reactionPickerShown) {
-                                        delay(160)
-                                        reactionPickerMessageId = null
+                            }
+                            if (message.reactions.isNotEmpty()) {
+                                Row(
+                                    modifier = Modifier
+                                        .padding(top = 4.dp)
+                                        .testTag("reaction-row-${message.id}"),
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    message.reactions.forEach { chip ->
+                                        Text(
+                                            "${chip.emoji} ${chip.count}",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            modifier = Modifier
+                                                .testTag("reaction-chip-${message.id}-${chip.emoji}")
+                                                .clickable(enabled = reactable) {
+                                                    scope.launch { onReact(message, chip.emoji) }
+                                                },
+                                        )
                                     }
                                 }
                             }
-                        }
-                        DropdownMenu(
-                            expanded = messageActionsOpen,
-                            onDismissRequest = { messageActionsOpen = false },
-                        ) {
-                            message.retryUncertainKey?.let { retryKey ->
-                                DropdownMenuItem(
-                                    text = { Text("Retry send…") },
-                                    onClick = {
-                                        messageActionsOpen = false
-                                        retryResult = null
-                                        retrySelection = message.id to retryKey
-                                    },
-                                )
+                            if (reactionPickerMessageId == message.id && reactable) {
+                                Popup(
+                                    onDismissRequest = { reactionPickerShown = false },
+                                    properties = PopupProperties(
+                                        focusable = true,
+                                        dismissOnBackPress = true,
+                                        dismissOnClickOutside = true,
+                                    ),
+                                ) {
+                                    AnimatedVisibility(
+                                        visible = reactionPickerShown,
+                                        enter = fadeIn(tween(140)) + scaleIn(initialScale = 0.88f, animationSpec = tween(180)),
+                                        exit = fadeOut(tween(110)) + scaleOut(targetScale = 0.88f, animationSpec = tween(150)),
+                                    ) {
+                                        Surface(
+                                            shape = RoundedCornerShape(24.dp),
+                                            tonalElevation = 6.dp,
+                                            modifier = Modifier.testTag("reaction-picker"),
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                            ) {
+                                                org.thanosapollo.nema.xmpp.reactions.DEFAULT_REACTION_CHOICES.forEach { emoji ->
+                                                    Text(
+                                                        emoji,
+                                                        style = MaterialTheme.typography.titleMedium,
+                                                        modifier = Modifier.clickable {
+                                                            reactionPickerShown = false
+                                                            reactionPickerMessageId = null
+                                                            scope.launch { onReact(message, emoji) }
+                                                        },
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                    LaunchedEffect(reactionPickerShown) {
+                                        if (!reactionPickerShown) {
+                                            delay(160)
+                                            reactionPickerMessageId = null
+                                        }
+                                    }
+                                }
                             }
-                            if (message.replyReferenceId != null) {
-                                DropdownMenuItem(
-                                    text = { Text("Reply") },
-                                    onClick = {
-                                        messageActionsOpen = false
-                                        currentOnReply(message)
-                                    },
-                                )
-                                if (venue is ConversationVenue.Direct && !message.groupChat) {
+                            DropdownMenu(
+                                expanded = messageActionsOpen,
+                                onDismissRequest = { messageActionsOpen = false },
+                            ) {
+                                message.retryUncertainKey?.let { retryKey ->
                                     DropdownMenuItem(
-                                        text = { Text("Reply as a thread") },
+                                        text = { Text("Retry send…") },
                                         onClick = {
                                             messageActionsOpen = false
-                                            currentOnReplyAsThread(message)
+                                            retryResult = null
+                                            retrySelection = message.id to retryKey
                                         },
                                     )
                                 }
-                            }
-                            if (correctionTarget != null && currentEditActionsEnabled) {
+                                if (message.replyReferenceId != null) {
+                                    DropdownMenuItem(
+                                        text = { Text("Reply") },
+                                        onClick = {
+                                            messageActionsOpen = false
+                                            currentOnReply(message)
+                                        },
+                                    )
+                                    if (venue is ConversationVenue.Direct && !message.groupChat) {
+                                        DropdownMenuItem(
+                                            text = { Text("Reply as a thread") },
+                                            onClick = {
+                                                messageActionsOpen = false
+                                                currentOnReplyAsThread(message)
+                                            },
+                                        )
+                                    }
+                                }
+                                if (correctionTarget != null && currentEditActionsEnabled) {
+                                    DropdownMenuItem(
+                                        text = { Text("Edit") },
+                                        onClick = {
+                                            messageActionsOpen = false
+                                            currentOnEdit(message)
+                                        },
+                                    )
+                                }
                                 DropdownMenuItem(
-                                    text = { Text("Edit") },
+                                    text = { Text("Quote") },
                                     onClick = {
                                         messageActionsOpen = false
-                                        currentOnEdit(message)
+                                        currentOnQuote(message)
                                     },
                                 )
-                            }
-                            DropdownMenuItem(
-                                text = { Text("Quote") },
-                                onClick = {
-                                    messageActionsOpen = false
-                                    currentOnQuote(message)
-                                },
-                            )
-                            if (reactable) {
-                                DropdownMenuItem(
-                                    text = { Text("Reactions") },
-                                    onClick = {
-                                        messageActionsOpen = false
-                                        reactionPickerMessageId = message.id
-                                        reactionPickerShown = true
-                                    },
-                                )
+                                if (reactable) {
+                                    DropdownMenuItem(
+                                        text = { Text("Reactions") },
+                                        onClick = {
+                                            messageActionsOpen = false
+                                            reactionPickerMessageId = message.id
+                                            reactionPickerShown = true
+                                        },
+                                    )
+                                }
                             }
                         }
                     }
@@ -2677,6 +2704,114 @@ internal fun formatMessageTime(
 ): String = MESSAGE_TIME_FORMATTER.format(Instant.ofEpochMilli(epochMillis).atZone(zoneId))
 
 private val MESSAGE_TIME_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm")
+
+/** The presentation's local day; labels and boundaries are recomputed when either part changes. */
+internal data class TimelineDay(val zoneId: ZoneId, val today: LocalDate) {
+    fun millisUntilNextDay(nowMillis: Long): Long =
+        today.plusDays(1).atStartOfDay(zoneId).toInstant().toEpochMilli() - nowMillis
+
+    companion object {
+        fun now(nowMillis: Long = System.currentTimeMillis(), zoneId: ZoneId = ZoneId.systemDefault()) =
+            TimelineDay(zoneId, Instant.ofEpochMilli(nowMillis).atZone(zoneId).toLocalDate())
+    }
+}
+
+/**
+ * Day labels keyed by the first message of each local day, oldest first. Messages without a
+ * sent time get no label and do not end the current day, and a loaded older page moves the
+ * label to its own first message of that day instead of repeating it.
+ */
+internal fun timelineDayLabels(messages: List<TimelineMessage>, day: TimelineDay): Map<String, String> {
+    val labels = HashMap<String, String>()
+    var previous: LocalDate? = null
+    for (message in messages) {
+        val sentAt = message.sentAtEpochMs ?: continue
+        val date = Instant.ofEpochMilli(sentAt).atZone(day.zoneId).toLocalDate()
+        if (date != previous) labels[message.id] = formatDayLabel(date, day.today)
+        previous = date
+    }
+    return labels
+}
+
+internal fun formatDayLabel(date: LocalDate, today: LocalDate): String = when {
+    date == today -> "Today"
+    date == today.minusDays(1) -> "Yesterday"
+    date.year == today.year -> DateTimeFormatter.ofPattern("EEE d MMM", Locale.getDefault()).format(date)
+    else -> DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault()).format(date)
+}
+
+@Composable
+private fun rememberTimelineDay(): State<TimelineDay> {
+    val context = LocalContext.current
+    val day = remember { mutableStateOf(TimelineDay.now()) }
+    DisposableEffect(context) {
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                day.value = TimelineDay.now()
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_TIMEZONE_CHANGED)
+            addAction(Intent.ACTION_TIME_CHANGED)
+            addAction(Intent.ACTION_DATE_CHANGED)
+        }
+        // Exported because telephony, not only the system UID, can send zone changes. These are
+        // protected broadcasts, so other apps cannot send them.
+        ContextCompat.registerReceiver(context, receiver, filter, ContextCompat.RECEIVER_EXPORTED)
+        onDispose { context.unregisterReceiver(receiver) }
+    }
+    // Midnight in the current zone; the broadcasts above cover zone and clock changes.
+    LaunchedEffect(day.value) {
+        val current = day.value
+        while (isActive) {
+            delay(current.millisUntilNextDay(System.currentTimeMillis()).coerceAtLeast(1_000L))
+            val next = TimelineDay.now()
+            if (next != current) {
+                day.value = next
+                break
+            }
+        }
+    }
+    return day
+}
+
+@Composable
+private fun TimelineDaySeparator(label: String) {
+    // A fixed height lets visible-read admission exclude the heading without measuring it.
+    val height = with(LocalDensity.current) { DAY_SEPARATOR_HEIGHT.roundToPx().toDp() }
+    Box(
+        contentAlignment = Alignment.BottomCenter,
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(height)
+            .semantics { heading() }
+            .testTag("day-separator"),
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
+            modifier = Modifier.padding(bottom = 4.dp),
+        )
+    }
+}
+
+/** Scales with the font like the label inside it; [timelineBubbleVisible] subtracts it. */
+private val DAY_SEPARATOR_HEIGHT = 32.sp
+
+/**
+ * Whether the message part of a timeline item overlaps the viewport. Offsets follow the
+ * reversed layout, so a day heading occupies the far end of its item, above the message.
+ */
+internal fun timelineBubbleVisible(
+    offset: Int,
+    size: Int,
+    headingPx: Int,
+    viewportStart: Int,
+    viewportEnd: Int,
+): Boolean = offset + size - headingPx > viewportStart && offset < viewportEnd
 
 private fun DeliveryPresentation.visibleLabel(): String? = when (this) {
     DeliveryPresentation.QUEUED -> "Queued"
